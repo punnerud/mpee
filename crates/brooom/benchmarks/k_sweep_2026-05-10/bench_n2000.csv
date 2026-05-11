@@ -1,0 +1,7 @@
+instance,solver,cost,routes,wallclock_s
+2000_s1,vroom,21271.0,133,341
+2000_s1,brooom_auto,21192.2,137,156
+2000_s2,vroom,20803.0,131,311
+2000_s2,brooom_auto,20637.2,138,185
+2000_s3,vroom,20873.0,131,283
+2000_s3,brooom_auto,20730.2,139,170

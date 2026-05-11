@@ -1,0 +1,34 @@
+# Rust build artifacts
+target/
+**/target/
+*.rlib
+*.rmeta
+
+# OSM input data and engine caches — too large for git, regenerable
+data/
+**/*.osm.pbf
+**/*.osm.pbf.csr
+**/*.osm.pbf.pp
+**/*.osm.pbf.ch
+**/*.csr
+**/*.pp
+**/*.ch
+**/*.bak
+
+# Benchmark output / generated datasets
+**/instances/
+**/instances_gh_200/
+**/gh_canonical/
+**/results/*.csv.tmp
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Python (for benchmark scripts in brooom)
+__pycache__/
+*.pyc
+.venv/
+venv/

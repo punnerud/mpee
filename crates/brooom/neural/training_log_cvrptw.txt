@@ -1,0 +1,23 @@
+epoch    0  sample=11.7708  greedy=10.6988  loss=-43.7655
+epoch   20  sample=10.8952  greedy=10.5497  loss=-9.5843
+epoch   40  sample=10.5449  greedy=10.4658  loss=-2.1065
+epoch   60  sample=10.0802  greedy=9.7280  loss=-7.0022
+epoch   80  sample=9.7365  greedy=9.8119  loss=0.1273
+epoch  100  sample=9.6053  greedy=9.6046  loss=-0.4148
+epoch  120  sample=9.7262  greedy=9.8183  loss=0.6913
+epoch  140  sample=9.5793  greedy=9.5331  loss=-1.4297
+epoch  160  sample=9.4529  greedy=9.1906  loss=-3.7191
+epoch  180  sample=9.5707  greedy=9.7299  loss=1.5201
+epoch  200  sample=9.4386  greedy=9.3497  loss=-1.1948
+epoch  220  sample=9.2691  greedy=9.2299  loss=-0.4847
+epoch  240  sample=9.3571  greedy=9.1494  loss=-1.8016
+epoch  260  sample=9.1113  greedy=9.0231  loss=-1.0660
+epoch  280  sample=9.1003  greedy=9.1269  loss=0.2493
+epoch  300  sample=9.1498  greedy=9.2488  loss=0.7567
+epoch  320  sample=9.5093  greedy=9.3543  loss=-1.7781
+epoch  340  sample=9.2308  greedy=9.1940  loss=-0.1129
+epoch  360  sample=9.1901  greedy=9.2292  loss=0.0694
+epoch  380  sample=9.0686  greedy=8.9781  loss=-0.6149
+epoch  399  sample=9.5221  greedy=9.6695  loss=1.1421
+Trened i 61.0s
+Final greedy: 9.2887

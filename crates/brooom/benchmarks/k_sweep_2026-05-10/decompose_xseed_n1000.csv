@@ -1,0 +1,11 @@
+instance,variant,cost,routes,wallclock_s
+1000_s1,flat,12554.1,69,490
+1000_s1,decompose10,12173.1,72,46
+1000_s2,flat,12165.1,68,432
+1000_s2,decompose10,11899.1,72,47
+1000_s3,flat,11993.1,66,429
+1000_s3,decompose10,11660.1,69,48
+1000_s4,flat,12255.1,67,441
+1000_s4,decompose10,12024.1,69,46
+1000_s5,flat,12338.1,67,391
+1000_s5,decompose10,12061.1,70,46

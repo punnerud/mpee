@@ -1,0 +1,4 @@
+epoch    0  loss=0.21517  top-5-hit=0.00%
+epoch   20  loss=0.17992  top-5-hit=2.50%
+epoch   40  loss=0.18382  top-5-hit=7.50%
+epoch   60  loss=0.12666  top-5-hit=7.50%

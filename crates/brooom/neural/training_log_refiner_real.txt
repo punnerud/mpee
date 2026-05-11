@@ -1,0 +1,13 @@
+epoch    0  train_loss=0.6655  val_loss=0.6919  val_acc=0.526  margin=-0.000
+epoch   20  train_loss=0.6642  val_loss=0.6890  val_acc=0.528  margin=+0.016
+epoch   40  train_loss=0.6559  val_loss=0.6841  val_acc=0.546  margin=+0.043
+epoch   60  train_loss=0.6576  val_loss=0.6804  val_acc=0.539  margin=+0.079
+epoch   80  train_loss=0.6593  val_loss=0.6759  val_acc=0.540  margin=+0.106
+epoch  100  train_loss=0.6475  val_loss=0.6738  val_acc=0.542  margin=+0.124
+epoch  120  train_loss=0.6516  val_loss=0.6732  val_acc=0.540  margin=+0.141
+epoch  140  train_loss=0.6482  val_loss=0.6716  val_acc=0.542  margin=+0.149
+epoch  160  train_loss=0.6552  val_loss=0.6698  val_acc=0.553  margin=+0.151
+epoch  180  train_loss=0.6515  val_loss=0.6687  val_acc=0.566  margin=+0.152
+epoch  199  train_loss=0.6557  val_loss=0.6656  val_acc=0.594  margin=+0.160
+
+Final: good=0.531, bad=0.495, margin=+0.035

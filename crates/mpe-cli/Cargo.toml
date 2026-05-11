@@ -1,0 +1,30 @@
+[package]
+name = "mpe-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Unified CLI driver for mpe-engine — wires the dikstra (CH routing) and brooom (VRP solver) crates into one in-process pipeline with zero-copy shared memory."
+license = "MIT"
+
+[[bin]]
+name = "mpe"
+path = "src/main.rs"
+
+[dependencies]
+# Both engines as path dependencies. This is the seam where in-process,
+# zero-copy data sharing happens: the CLI loads a CH cache via dikstra
+# and passes &Vec / Arc references straight into brooom — no IPC, no
+# serialization round-trip.
+#
+# NOTE: the two crates are NOT wired up yet inside this binary. The CLI
+# exists as scaffolding so the integration can be added incrementally
+# without further restructuring of the workspace. The path dependencies
+# are commented out for now because the brooom crate needs `ort` which
+# downloads ~200 MB of ONNX Runtime binaries on first build, and the
+# user wanted a fast, clean first commit. Uncomment as needed.
+#
+# brooom     = { path = "../brooom" }
+# sssp_bench = { path = "../dikstra" }
+
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+ureq = "2"

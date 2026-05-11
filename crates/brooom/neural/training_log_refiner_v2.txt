@@ -1,0 +1,16 @@
+epoch    0  train_loss=0.6543  val_acc=0.472  pos_mean=+0.203  neg_mean=+0.202  margin=+0.001
+epoch   20  train_loss=0.6378  val_acc=0.472  pos_mean=+0.311  neg_mean=+0.267  margin=+0.044
+epoch   40  train_loss=0.6200  val_acc=0.477  pos_mean=+0.405  neg_mean=+0.267  margin=+0.138
+epoch   60  train_loss=0.6292  val_acc=0.551  pos_mean=+0.346  neg_mean=+0.157  margin=+0.189
+epoch   80  train_loss=0.6062  val_acc=0.570  pos_mean=+0.507  neg_mean=+0.242  margin=+0.265
+epoch  100  train_loss=0.6042  val_acc=0.564  pos_mean=+0.249  neg_mean=+0.036  margin=+0.212
+epoch  120  train_loss=0.6035  val_acc=0.535  pos_mean=+0.605  neg_mean=+0.341  margin=+0.264
+epoch  140  train_loss=0.5946  val_acc=0.574  pos_mean=+0.285  neg_mean=+0.032  margin=+0.253
+epoch  160  train_loss=0.6209  val_acc=0.593  pos_mean=+0.166  neg_mean=-0.081  margin=+0.247
+epoch  180  train_loss=0.5952  val_acc=0.584  pos_mean=+0.288  neg_mean=-0.017  margin=+0.305
+epoch  200  train_loss=0.6352  val_acc=0.587  pos_mean=+0.157  neg_mean=-0.114  margin=+0.271
+epoch  220  train_loss=0.5951  val_acc=0.586  pos_mean=+0.128  neg_mean=-0.128  margin=+0.256
+epoch  240  train_loss=0.5994  val_acc=0.588  pos_mean=+0.267  neg_mean=-0.071  margin=+0.338
+epoch  260  train_loss=0.6017  val_acc=0.592  pos_mean=+0.138  neg_mean=-0.143  margin=+0.282
+epoch  280  train_loss=0.5681  val_acc=0.601  pos_mean=+0.042  neg_mean=-0.262  margin=+0.303
+epoch  299  train_loss=0.5766  val_acc=0.606  pos_mean=+0.276  neg_mean=-0.094  margin=+0.370

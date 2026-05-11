@@ -1,0 +1,25 @@
+device=mps, N=20, epochs=200, batch=64
+epoch    0  sample_cost=10.5752  greedy_cost=7.7532  loss=-119.5353
+epoch   10  sample_cost=8.2778  greedy_cost=6.5879  loss=-54.4246
+epoch   20  sample_cost=6.6530  greedy_cost=5.9875  loss=-12.6489
+epoch   30  sample_cost=5.4564  greedy_cost=4.9380  loss=-9.3111
+epoch   40  sample_cost=4.9241  greedy_cost=4.4104  loss=-9.0958
+epoch   50  sample_cost=4.9716  greedy_cost=4.5159  loss=-7.0399
+epoch   60  sample_cost=4.8061  greedy_cost=4.6384  loss=-2.2723
+epoch   70  sample_cost=4.5342  greedy_cost=4.4076  loss=-1.7027
+epoch   80  sample_cost=4.5326  greedy_cost=4.3306  loss=-2.1516
+epoch   90  sample_cost=4.7012  greedy_cost=4.4992  loss=-2.1235
+epoch  100  sample_cost=4.5086  greedy_cost=4.3718  loss=-1.2248
+epoch  110  sample_cost=4.3268  greedy_cost=4.2168  loss=-0.9792
+epoch  120  sample_cost=4.4170  greedy_cost=4.3413  loss=-0.6346
+epoch  130  sample_cost=4.3895  greedy_cost=4.3934  loss=-0.0936
+epoch  140  sample_cost=4.4039  greedy_cost=4.3919  loss=-0.3516
+epoch  150  sample_cost=4.3674  greedy_cost=4.3002  loss=-0.5573
+epoch  160  sample_cost=4.3428  greedy_cost=4.2945  loss=-0.4026
+epoch  170  sample_cost=4.4353  greedy_cost=4.4096  loss=-0.2195
+epoch  180  sample_cost=4.3167  greedy_cost=4.2190  loss=-0.5993
+epoch  190  sample_cost=4.2190  greedy_cost=4.1629  loss=-0.4448
+epoch  199  sample_cost=4.4212  greedy_cost=4.3488  loss=-0.5430
+Trened i 10.9s
+
+Final: rand=10.3573, NN=4.3407

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/brooom",
+    "crates/dikstra",
+    "crates/mpe-cli",
+]
+
+# Each subcrate also declares its own `[profile.release]`; cargo prefers
+# these workspace-root settings when the workspace is the build unit and
+# ignores the member-local ones (with a warning). The member profiles are
+# kept so that `cd crates/brooom && cargo build --release` still produces
+# the same binaries as before — i.e. the subprojects remain buildable
+# standalone, exactly as the user requested.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false

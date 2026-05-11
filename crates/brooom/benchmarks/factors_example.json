@@ -1,0 +1,5 @@
+{
+  "ils_iters":     [10, 30],
+  "granular_k":    [10, 20],
+  "ils_kick_size": [0.3, 0.5]
+}

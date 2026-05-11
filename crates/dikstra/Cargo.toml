@@ -1,0 +1,86 @@
+[package]
+name = "sssp_bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+osmpbf = "0.3"
+rayon = "1"
+memmap2 = "0.9"
+flate2 = "1"
+lru = "0.12"
+libc = "0.2"
+petgraph = "0.6"
+ordered-float = "4"
+ureq = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[lib]
+name = "sssp_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sssp_bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench_london"
+path = "src/bin/bench_london.rs"
+
+[[bin]]
+name = "duan_repro"
+path = "src/bin/duan_repro.rs"
+
+[[bin]]
+name = "parser_bench"
+path = "src/bin/parser_bench.rs"
+
+[[bin]]
+name = "bench_extra"
+path = "src/bin/bench_extra.rs"
+
+[[bin]]
+name = "bench_petgraph"
+path = "src/bin/bench_petgraph.rs"
+
+[[bin]]
+name = "delta_repro"
+path = "src/bin/delta_repro.rs"
+
+[[bin]]
+name = "bench_pp"
+path = "src/bin/bench_pp.rs"
+
+[[bin]]
+name = "bench_osrm"
+path = "src/bin/bench_osrm.rs"
+
+[[bin]]
+name = "ch_test"
+path = "src/bin/ch_test.rs"
+
+[[bin]]
+name = "bench_ch"
+path = "src/bin/bench_ch.rs"
+
+[[bin]]
+name = "bench_ch_extra"
+path = "src/bin/bench_ch_extra.rs"
+
+[[bin]]
+name = "intercity"
+path = "src/bin/intercity.rs"
+
+[[bin]]
+name = "bench_paged"
+path = "src/bin/bench_paged.rs"
+
+[[bin]]
+name = "serve"
+path = "src/bin/serve.rs"

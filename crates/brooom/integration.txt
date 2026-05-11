@@ -1,0 +1,379 @@
+# brooom ↔ MMM integration guide
+
+How to plug a custom routing/matrix engine (such as MMM — the Apple Silicon
+optimized Contraction-Hierarchies engine, ~50× faster per route than OSRM)
+into brooom as a drop-in replacement for the dense N×N distance matrix.
+
+Audience: someone integrating brooom into a production system where a real
+road-network routing engine produces distances, and where storing the full
+N² matrix in RAM is undesirable for N ≥ 5 000.
+
+---
+
+## 0. TL;DR
+
+brooom can consume K-NN graph data directly via `Granular::from_knn_flat()`
+or `from_knn_rows()`. This is the minimum-friction integration path:
+
+```rust
+// MMM side (per the API specification)
+let knn: Vec<(u32, f32, f32)> =
+    mmm::knn_matrix_flat(&graph, &customers, K, edge_dist);
+
+// brooom side
+let granular = brooom::granular::Granular::from_knn_flat(&knn, n, K);
+```
+
+That's it for the granular structure. For full integration with the LS / GPU
+hot path, you also need to supply consecutive-edge distances for
+`evaluate_route()` — see Section 3.
+
+Default `K = 80` for N ≥ 500, `K = 40` for 100 ≤ N < 500, `K = 20` for N < 100.
+
+Storage: K=160 × N × 12 bytes = **96 MB for N = 50 000** (vs. 10 GB for a
+dense N² matrix — 100× compression with no quality loss on the LS hot path).
+
+---
+
+## 1. What brooom needs
+
+brooom's local-search inner loop reads distance values in two distinct
+patterns:
+
+### 1a. Hot path: granular neighbour lookups
+
+- For every candidate move (relocate, 2-opt, exchange, swap-star, Or-opt,
+  2-opt*), brooom asks "is `j` one of the K nearest customers to `i`?"
+  and reads `distance(i, j)` only if yes.
+- Frequency: 10–100 M lookups/second on the CPU; up to 1 G/second on GPU.
+- Required latency per lookup: ≤ 10 ns (i.e. array indexing).
+- This is what `Granular` provides — K-nearest indices are pre-stored.
+
+### 1b. Cold path: route evaluation
+
+- `evaluate_route()` walks every consecutive pair on a route and reads
+  `distance(prev, here)`. For a route of 25 stops this is ~24 lookups.
+- Some of these pairs **are not** in K-nearest (e.g. depot→customer when
+  the depot is not adjacent to that customer in graph distance).
+- Frequency: ~1 k–10 k calls/second (much less than hot path).
+- Required latency per lookup: ≤ 10 µs is acceptable.
+- This is where you fall back to MMM's `ch::query(a, b)` (88 µs single-thread).
+
+### 1c. GPU path
+
+- The megakernel reads distances from a flat buffer (currently
+  `matrix.durations` cast to `i32`). It does its own granular lookups via
+  an uploaded K-NN buffer (see `gpu_population::upload_granular`).
+- The shader cannot easily fall back to CPU during execution, so GPU mode
+  needs either (a) the full N² matrix uploaded, or (b) coord-mode
+  (Euclidean from f32 coords) when the matrix doesn't fit.
+
+---
+
+## 2. The K-NN API contract
+
+### 2a. `knn_matrix_flat` (preferred for brooom)
+
+```rust
+pub fn knn_matrix_flat(
+    g:         &CsrGraph,
+    customers: &[u32],          // node ids in the graph that are VRP customers
+    k:         usize,
+    edge_dist: Option<&[f32]>,  // metres; if None, dur_s is also used as dist_m
+) -> Vec<(u32, f32, f32)>;
+//                       ^ length = customers.len() * k
+//                       ^ entry (i*k + r) = (neighbour_idx, dur_s, dist_m)
+//                       ^ entry.0 == u32::MAX → padding (isolated component)
+//                       ^ row sorted ascending by dur_s
+//                       ^ self is NOT included in own row
+```
+
+This matches `Granular::from_knn_flat(flat: &[(u32, f32, f32)], n: usize,
+k: usize)` directly. No copies, no transformations — pass it in.
+
+### 2b. `knn_matrix` (nested, equally valid)
+
+```rust
+pub fn knn_matrix(
+    g:         &CsrGraph,
+    customers: &[u32],
+    k:         usize,
+    edge_dist: Option<&[f32]>,
+) -> Vec<Vec<(u32, f32, f32)>>;
+//                            ^ row i = up to k nearest of customers[i]
+//                            ^ row may be shorter than k if src is isolated
+```
+
+Use `Granular::from_knn_rows(&rows, k)` for this layout.
+
+### 2c. Performance expectations (measured on Apple M3 Pro, London CH)
+
+| N      | K   | Build time | Peak RAM | Output |
+|--------|-----|-----------:|---------:|-------:|
+| 50 000 | 160 | 1.22 s     | 220 MB   | 92 MB  |
+| 50 000 | 80  | ~0.8 s     | ~140 MB  | 48 MB  |
+| 10 000 | 80  | ~0.2 s     | ~50 MB   | 10 MB  |
+
+Per-source cost is ~24 µs (averaged over 11 cores). 99 % of sources reach
+full K=160; the rest are in isolated components and get fewer.
+
+---
+
+## 3. Distance fallback for `evaluate_route()`
+
+brooom's `evaluate_route()` (in `src/solution.rs`) reads the duration of
+every consecutive pair on a route. Some of these pairs are not K-nearest
+neighbours. You have three options:
+
+### Option A — Hybrid matrix (recommended for first integration)
+
+Keep brooom's existing `Matrix` for `evaluate_route`, replace only the
+KD-tree based `Granular::build(&matrix, k)` with `Granular::from_knn_flat`:
+
+```rust
+let matrix = build_matrix_via_mmm(&customers);  // existing OSRM-style call
+let granular = Granular::from_knn_flat(&knn, n, k);
+```
+
+Pros: zero changes to evaluate_route / LS / GPU. Same RAM as before.
+Cons: doesn't save the N² RAM — that's a future step.
+
+### Option B — Sparse matrix with `ch::query` fallback
+
+Store only K-NN distances + a depot row. Cache lookups in a `DashMap`.
+Misses fall through to `ch::query` (88 µs / 11.4 k lookups/s).
+
+```rust
+pub struct SparseDistanceSource {
+    knn: Arc<[(u32, f32, f32)]>,   // K-NN, length n * k
+    knn_dur: Arc<[i32]>,           // unrolled durations[i*k + r] for fast indexing
+    depot_row: Vec<i32>,           // depot → every customer, prebuilt
+    ch: Arc<MmmCh>,                // fallback engine
+    cache: dashmap::DashMap<u64, i32>,  // packed (a,b) → dur_s
+}
+
+impl SparseDistanceSource {
+    pub fn get(&self, a: u32, b: u32) -> i32 {
+        // 1. Try K-NN of a
+        for r in 0..self.k {
+            if self.knn[a as usize * self.k + r].0 == b {
+                return self.knn[a as usize * self.k + r].1 as i32;
+            }
+        }
+        // 2. Depot row
+        if a == 0 { return self.depot_row[b as usize]; }
+        if b == 0 { return self.depot_row[a as usize]; }  // symmetric
+        // 3. Cache then MMM fallback
+        let key = ((a as u64) << 32) | (b as u64);
+        if let Some(v) = self.cache.get(&key) { return *v; }
+        let v = self.ch.query(a, b);
+        self.cache.insert(key, v);
+        v
+    }
+}
+```
+
+Pros: 100× RAM reduction (96 MB instead of 10 GB at N=50K).
+Cons: requires refactoring `evaluate_route` and all LS operators to take a
+`DistanceSource` trait rather than `&Matrix`. ~3–4 days of work.
+
+### Option C — Fat K-NN (transit-node aware)
+
+Have MMM build K-NN with **K = 160** where the neighbours are not just
+fugleflukt-K-nearest but graph-shortest-distance K-nearest (which naturally
+exploits transit nodes / bridges / mountain passes). Then `evaluate_route`
+edges always land in K-NN.
+
+Pros: same single 96 MB storage. No fallback needed.
+Cons: needs MMM's `knn_matrix` to use graph-Dijkstra rather than Euclidean
+nearest, which it already does — so this is essentially Option A with bigger K.
+
+---
+
+## 4. Step-by-step integration
+
+### Step 1 — Wire `Granular::from_knn_flat` into the solver
+
+In `src/main.rs`, replace:
+
+```rust
+let granular = Granular::build(&matrix, eff_granular_k);
+```
+
+with:
+
+```rust
+let granular = if let Some(knn_path) = &cli.mmm_knn {
+    let knn_data: Vec<(u32, f32, f32)> = load_mmm_knn(knn_path)?;
+    Granular::from_knn_flat(&knn_data, matrix.n, eff_granular_k)
+} else {
+    Granular::build(&matrix, eff_granular_k)
+};
+```
+
+Add to `Cli`:
+
+```rust
+/// Path to MMM-produced K-NN data (binary or JSON). When set, skip
+/// brooom's KD-tree-based granular build.
+#[arg(long)]
+mmm_knn: Option<PathBuf>,
+```
+
+This is ~20 lines of code in `main.rs`.
+
+### Step 2 — Wire MMM as a `MatrixSource`
+
+Implement `brooom::matrix::MatrixSource` for an `MmmMatrixSource` wrapper:
+
+```rust
+pub struct MmmMatrixSource {
+    pub ch: Arc<MmmCh>,
+}
+
+impl MatrixSource for MmmMatrixSource {
+    fn build_matrix(&self, coords: &[[f64; 2]]) -> Result<Matrix, brooom::Error> {
+        // Use MMM's bulk matrix builder: 26.6 M routes/s on M3 Pro
+        let n = coords.len();
+        let durations: Vec<i32> = mmm::build_matrix(&self.ch, coords)?;  // hypothetical API
+        Ok(Matrix { n, durations, distances: None })
+    }
+}
+```
+
+Now brooom can call MMM transparently when the user supplies coords (instead
+of a precomputed matrix) and an OSRM URL isn't available.
+
+### Step 3 — (Optional) Add an MMM-aware CLI invocation
+
+```bash
+brooom -i problem.json \
+       --mmm-graph /path/to/london.ch \
+       --mmm-knn-cache /tmp/london_knn.bin \
+       --gpu -m 16 -l 60
+```
+
+The CLI loads the CH graph once, builds K-NN, caches it, and reuses the
+cache on subsequent runs. For 50K customers in London, first run = 1.5 s K-NN
++ solve time. Cached runs = solve time only.
+
+### Step 4 — Validation
+
+Run the existing benchmark suite with the new `--mmm-knn` flag and verify
+solutions match within 0.1 % of the KD-tree-based build:
+
+```bash
+./target/release/brooom -i benchmarks/instances/r1_1000_s1.json --gpu  > a.json
+./target/release/brooom -i benchmarks/instances/r1_1000_s1.json --gpu \
+    --mmm-knn /tmp/r1_1000_s1.knn.bin > b.json
+python3 benchmarks/compare_costs.py a.json b.json   # should match exactly
+```
+
+Same K-NN graph → same set of candidate moves → same solution.
+
+---
+
+## 5. Apple Silicon unified memory (future, ~1 day work)
+
+On M3 / M4 the GPU and CPU share physical RAM. We can eliminate the
+upload-copy by writing MMM output directly into a `wgpu::Buffer` mapped
+with `BufferUsages::MAP_WRITE | STORAGE`.
+
+```rust
+// brooom side: allocate GPU-mappable buffer
+let granular_buf = device.create_buffer(&wgpu::BufferDescriptor {
+    size: (n * k * 12) as u64,
+    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::MAP_WRITE,
+    mapped_at_creation: true,
+    ..Default::default()
+});
+
+let view = granular_buf.slice(..).get_mapped_range_mut();
+let cpu_slice: &mut [(u32, f32, f32)] = bytemuck::cast_slice_mut(&mut *view);
+
+// MMM side: write straight in (no allocation, no copy)
+mmm::knn_matrix_flat_into(&graph, &customers, k, edge_dist, cpu_slice);
+
+drop(view);
+granular_buf.unmap();
+// Buffer is now visible to GPU without any physical memory copy.
+```
+
+This saves ~92 MB of peak RAM at N=50K (single copy eliminated). On
+non-Apple-Silicon backends wgpu handles the staging buffer automatically;
+the code is portable.
+
+---
+
+## 6. Quality / performance expectations
+
+When brooom uses MMM-produced K-NN instead of its built-in KD-tree:
+
+- **Solution quality**: identical (same set of moves considered)
+- **Setup time**: 1–2 s faster on N=50K (KD-tree is also ~1 s, but with
+  Euclidean rather than graph-distance — MMM gives slightly better K-NN)
+- **Hot-path LS speed**: identical (both produce flat u32 arrays)
+- **RAM (Option A)**: identical
+- **RAM (Option B/C)**: 100× reduction at N ≥ 10K
+
+Single-pair MMM latency (88 µs) is **not** acceptable for the hot path —
+that's 4 orders of magnitude too slow. The K-NN precompute is what
+unlocks the integration.
+
+---
+
+## 7. Failure modes
+
+### Isolated components
+
+A customer can be in a graph-isolated component (e.g. a road network with
+unreachable islands). MMM signals this by emitting fewer than K neighbours
+and padding with `(u32::MAX, INF, INF)`. brooom's `from_knn_flat` stops
+counting at the first `u32::MAX` and pads remaining slots with self-index
+(its existing convention for the KD-tree case where fewer than K others
+exist). LS operators tolerate self-neighbours (they're filtered by
+`if neighbour == src { continue; }`).
+
+### Disconnected depot
+
+If the depot is isolated from some customers, `evaluate_route` will fail
+when it tries to compute the depot→customer edge. Detect this upstream by
+checking that the depot's K-NN row has at least one valid neighbour for
+each route's first stop, and either:
+- Reassign to a reachable depot, or
+- Mark those customers as `unassigned` and let brooom skip them.
+
+### Direction-asymmetric distances
+
+CH supports asymmetric (one-way streets, traffic patterns, etc.). brooom's
+`Matrix` already supports asymmetric durations. K-NN is naturally
+asymmetric — `knn(a)` may not contain `b` even when `knn(b)` contains `a`.
+LS handles this — each operator queries the source's K-NN list, not the
+target's.
+
+---
+
+## 8. Suggested integration phases
+
+| Phase | Scope                                   | Duration | Validation                       |
+|-------|------------------------------------------|----------|-----------------------------------|
+| 1     | Granular from MMM K-NN (Option A)        | 1–2 days | Solutions match KD-tree baseline  |
+| 2     | MMM as MatrixSource (Step 2)             | 1 day    | brooom runs end-to-end via MMM    |
+| 3     | Add CLI + caching                        | 0.5 day  | Production CLI                    |
+| 4     | Sparse matrix (Option B) for N=50K+      | 3–4 days | 100× RAM reduction at scale       |
+| 5     | Apple unified-memory zero-copy           | 1 day    | Peak RAM drop measurable on M3    |
+
+Phases 1–3 are sufficient to ship brooom with MMM as the routing engine.
+Phases 4–5 are optimizations for the N ≥ 50 000 regime.
+
+---
+
+## 9. Contact points in brooom
+
+- `src/granular.rs` — `Granular::from_knn_flat`, `from_knn_rows` (DONE)
+- `src/matrix.rs` — `MatrixSource` trait, add `MmmMatrixSource` impl here
+- `src/main.rs` — CLI flag `--mmm-knn`
+- `src/solver.rs` — accept pre-built `Granular` via `SolverConfig`
+- `src/gpu_population.rs::upload_granular` — already takes flat `Vec<u32>`,
+  no change needed
+- `src/solution.rs::evaluate_route` — only touched if you do Option B

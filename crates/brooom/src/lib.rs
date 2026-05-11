@@ -1,0 +1,36 @@
+//! brooom — VRP solver library.
+//!
+//! Open Rust alternative to Vroom. Solves TSP / CVRP / VRPTW / PDPTW
+//! and accepts Vroom-compatible JSON.
+
+pub mod error;
+pub mod problem;
+pub mod matrix;
+pub mod solution;
+pub mod eval;
+pub mod granular;
+pub mod insertion;
+pub mod local_search;
+pub mod solver;
+pub mod io;
+pub mod cache;
+pub mod embedding;
+pub mod regression;
+pub mod neural;
+pub mod pattern_db;
+pub mod warm_start;
+pub mod cluster_decompose;
+pub mod gpu_sweep;
+pub mod gpu_population;
+pub mod gpu_polish;
+pub mod hgs;
+pub mod route_exact;
+pub mod population;
+
+pub use error::{Error, Result};
+pub use problem::{
+    Capacity, Job, Location, Problem, Shipment, TimeWindow, Vehicle, VehicleStep, JobKind,
+};
+pub use matrix::{Matrix, MatrixSource, HaversineMatrix, OsrmClient};
+pub use solution::{Route, Solution, Step, StepKind, Summary, TaskRef};
+pub use solver::{solve, solve_full, solve_with_matrix, Solved, SolverConfig};

@@ -1,0 +1,555 @@
+# ============================================================
+# HGS på GPU — status og neste steg (oppdatert 2026-05-11)
+# ============================================================
+#
+# STATUS: MVP-skjelett bygget (`src/hgs.rs`, ~330 LOC), `--hgs` CLI-flagg
+# er aktivt. Pipeline fungerer mekanisk (initial pop → crossover → GPU
+# LS-education → generational replacement → restart). MEN: faktiske
+# bench-tall viser at MVP-HGS *ikke* forbedrer seed-solution på N=100.
+# Det er fordi den enkle SREX-crossoveren (random subset av A's ruter +
+# cheapest-feasible-reinsertion av B's manglende tasks) produserer
+# offspring som LS-konvergerer til samme lokale optimum som seedet.
+#
+# Test-resultater:
+#   N=100 baseline (-m 8 --ils-iters 10):    2487
+#   N=100 + --hgs v1 (random subset):        2487  (ingen forbedring)
+#   N=100 + --hgs v2 (real SREX + diversity): 2487  (fortsatt 0 forbedring!)
+#   PyVRP (60s):                              2415  (mål)
+#
+# DYPERE DIAGNOSE etter v2: HGS-pipelinen er KORREKT bygget men låses
+# til samme strukturelle lokale optimum som CPU-baseline. Crossover-
+# offspring konvergerer via LS-education til kostnader ≥ seed. Diversity-
+# selection bevarer mangfold, men ingen *bedre* løsning blir noensinne
+# funnet — seedet vinner alltid cost-rangering, og vinneren beholdes.
+#
+# Dette er IKKE en bug i HGS-implementasjonen. Det er et fundamentalt
+# tak på hva LS-only + genetic recombination kan finne på Solomon r1_0100.
+# PyVRP slår oss fordi de bruker **penalty-basert infeasible-intermediate
+# LS**: TW- og capacity-brudd tillates med straff under LS, og repair
+# skjer ved slutten av en kjede av moves. Det lar dem hoppe over
+# infeasible-mellom-mål og lande på bedre feasible-løsninger vi aldri
+# kan nå med vår strict-feasibility LS.
+#
+# Det som er bygget i HGS v2 (~440 LOC i src/hgs.rs):
+#
+#   ✓ Initial populasjon med diversifiserte greedy_seeded variants
+#   ✓ Ekte SREX-crossover (Nagata 2010): subset-of-A ⊕ overlap-best-B
+#   ✓ Tournament selection (k=2)
+#   ✓ GPU batch LS-education (gjenbruker run_megakernel_2opt_batch_with_kick)
+#   ✓ Diversitet-drevet seleksjon (bag-of-edges hash, 70/30 cost/diversity rank)
+#   ✓ Restart-trigger ved stale_gens >= 8
+#   ✓ --hgs og --hgs-pop CLI-flagg
+#
+# Det som STADIG MANGLER for å slå PyVRP (penalty-LS prosjekt):
+#
+# Detaljert design (2026-05-11) — ~600 LOC totalt over 4-5 dager:
+#
+# ============================================================
+# PENALTY-LS DESIGN
+# ============================================================
+#
+# Kjerne-idé: tillat TW- og kapasitets-brudd under LS med en
+# kost-straff som motivasjon. Lar LS hoppe gjennom "infeasible
+# mellom-løsninger" til bedre feasible optima.
+#
+# ---- Megakernel-endringer (~300-400 LOC) ----
+#
+# Nye workgroup-arrays:
+#   var<workgroup> wg_route_dist: array<i32, 512>;     // distanse per rute
+#   var<workgroup> wg_route_tw_viol: array<i32, 512>;  // TW-brudd i seconds
+#   var<workgroup> wg_route_cap_viol: array<i32, 512>; // capacity overrun
+#
+# Phase 1 (init): walk hver rute, beregn dist + TW-violation + cap-violation
+#
+# Phase 2a-g (operatorer): for hver kandidat-move:
+#   - Compute dist delta (cheap, som før)
+#   - Walk proposed routes, compute new TW-violations + cap-violations
+#   - total_delta = dist_delta
+#                 + W_tw * (new_tw_viol_total − cur_tw_viol_total)
+#                 + W_cap * (new_cap_viol_total − cur_cap_viol_total)
+#   - atomicMin på total_delta (ikke bare dist_delta)
+#
+# Phase 4 (apply): oppdater wg_route_* for berørte ruter
+#
+# Penalty-vekter (params/uniform):
+#   - W_tw_init = 100, W_cap_init = 1000 (mild — utforskning)
+#   - Ramp opp lineært over iterasjoner til 1e6 (hard — feasibility)
+#   - I "exploration" fase: mange infeasible moves akseptert
+#   - I "convergence" fase: kun feasible
+#
+# Sluttkontroll: hvis sluttløsning fortsatt infeasible (W_tw/W_cap ikke
+# var høye nok): repair-fase som påfører høyere straff til feasible.
+#
+# ---- TW-violation-beregning ----
+#
+# I dag: walk route, if current_t > tw_end[here]: break (infeasible).
+# Penalty-versjon: walk route, akkumuler max(0, current_t - tw_end[here])
+# for hvert stopp. Det er totalt TW-brudd.
+#
+# Implementasjons-detalj: "current_t = max(current_t, tw_start[here])"
+# håndteres som før (wait-time). "if current_t > tw_end[here]" blir til
+# "violation += current_t - tw_end[here]; current_t = current_t".
+# Vi clamper IKKE current_t — infeasibility propagerer fremover.
+#
+# ---- Estimat per komponent ----
+#
+# | Komponent                                   | LOC  | Tid    |
+# | Init phase: per-route stats                 | 60   | ½ dag |
+# | Modify relocate operator                    | 80   | 1 dag |
+# | Modify exchange operator                    | 80   | 1 dag |
+# | Modify 2-opt + 2-opt* + swap-star + Or-opt | 200  | 2 dager|
+# | Penalty weight schedule + uniform           | 30   | ¼ dag |
+# | Apply: update wg_route_* arrays             | 80   | ½ dag |
+# | Repair-pass (penalty → feasible)            | 70   | ½ dag |
+# | TOTAL                                       | **600** | **~5 dager** |
+#
+# ---- Risiko ----
+#
+# Høy — penalty-LS er state-of-the-art i VRP-forskning. PyVRP og HGS-CVRP
+# har trolig 1000+ engineer-timer i å tune deres versjoner. Vi vil ikke
+# matche dem fullt ut i første implementasjon.
+#
+# Realistisk forventning: lukker N=100 gap fra +1.45% til +0.5%, N=250
+# fra +1.01% til +0.4%. Ikke full paritet, men betydelig forbedring.
+#
+# ---- Anbefalt rekkefølge ----
+#
+# 1. POC: penalty-LS for KUN relocate-operatoren (1 dag). Test om
+#    penalty alene gir noen forbedring. Hvis nei: prosjektet stoppes.
+# 2. Hvis ja: roll ut til alle operatorer.
+# 3. Tune penalty-vekter (5 ulike instans-størrelser).
+# 4. Bench mot PyVRP på Solomon-canonical.
+#
+# Dette MÅ være et bevisst flertallsdagsprosjekt. Forsøk på autonom
+# loop-implementering vil sannsynligvis introdusere subtile bugs i hot-
+# path-koden (megakernelen) som ødelegger eksisterende vinn på N=500/2000.
+#
+# ---- Andre prosjekter som kan gi sammenlignbar gevinst med mindre LOC
+#
+# Alternativ A: **Full Vidal swap-star** (task #77, ~150 LOC).
+# Lukker N=1000 gap til Vroom mer konsekvent. Mer fokusert ROI.
+#
+# Alternativ B: **Bedre kicks i eksisterende ILS** (~80 LOC).
+# Adaptive kick-størrelse basert på iter-uten-forbedring.
+#
+# Alternativ C: **Or-opt-segmenter inntil 4-5 tasks**, ikke bare 2-3.
+# Trivielt utvide eksisterende kode.
+#
+# ---- Anbefaling ----
+#
+# HGS-prosjektet er reelt et research-prosjekt på 2-3 ukers fokustert
+# arbeid for å matche PyVRP. MVPen som er bygget viser at *infrastrukturen*
+# (population + GPU-education + generational loop) fungerer — det er
+# *crossover-kvaliteten* som er den vanskelige biten.
+#
+# Hvis brukeren VIL ha PyVRP-paritet er det riktig vei. Hvis brukeren VIL
+# ha rask gevinst, prøv Alternativ A først (full Vidal swap-star).
+#
+# ============================================================
+# HGS på GPU — opprinnelig design-skisse (2026-05-11, beholdt for ref.)
+# ============================================================
+#
+# PyVRP-HGS slår oss konsistent på N=100/250 fordi vår LS+ILS-tilnærming
+# låser seg i lokale optima som genetisk recombination kan bryte ut av.
+# For å konkurrere må vi bygge en GPU-akselerert HGS.
+#
+# ---- Hva HGS faktisk gjør ----
+#
+# 1. Initial populasjon: 25-100 individer (Solutions), hver fra greedy +
+#    LS-education.
+# 2. Generasjonsloop:
+#    a. Velg 2 foreldre via binær turnering (etter diversitet + kostnad).
+#    b. SREX-crossover (Selective Route Exchange): kombiner ruter fra
+#       begge foreldre, fjern duplikater, reinserter manglende tasks.
+#    c. Educate avkom med LS (vår batch_with_kick passer).
+#    d. Hvis avkom er feasible OG bedre enn populasjonens worst-diverse-
+#       individuelle: erstatt det.
+# 3. Restart populasjon når diversiteten kollapser.
+# 4. Return best i populasjon ved tidsbudsjett.
+#
+# ---- Hva vi allerede har på GPU ----
+#
+#   ✓ GpuPopulation (pop_size, fleet, matrix på GPU)
+#   ✓ Batch megakernel med kick + LS i én dispatch (= "educate batch")
+#   ✓ Granular K-naboliste på GPU
+#   ✓ Or-opt, swap-star, 2-opt*, relocate, exchange operatorer
+#   ✓ Per-trajektori status (cost, applies) for selection input
+#
+# ---- Hva må bygges nytt ----
+#
+# 1. **SREX crossover kernel** (WGSL, ~200 LOC):
+#    Per workgroup = 1 par foreldre + 1 avkom:
+#    - Velg en delmengde av ruter fra forelder A (random eller cost-based)
+#    - Kopier disse til avkom
+#    - For hver task fra forelder B som ikke er i de valgte rutene:
+#      reinserter ved cheapest-feasible-position
+#    - Drop tasks som ikke kan reinseres feasibly (mark trajektorien)
+#
+# 2. **Selection + replacement (CPU-side, ~100 LOC)**:
+#    - Tournament selection blant pop_size individuelle (cost + diversity)
+#    - Hash-basert diversity-mål (bag-of-edges, Hamming distance)
+#    - Replace worst-cost-similar individual hvis avkom forbedrer
+#
+# 3. **Diversity metric (GPU kernel, ~80 LOC)**:
+#    - Beregn parvis Hamming-distanse mellom alle populasjon-medlemmer
+#    - Eller bare edge-overlap (raskere)
+#    - Output: pop_size × pop_size matrise → CPU-side reduksjon
+#
+# 4. **Population restart trigger**:
+#    - Hvis median-diversitet under en terskel: restart populasjon
+#    - Hold best 25%, regenerer resten via kick + LS
+#
+# 5. **Integrasjon i solve_full**:
+#    - Ny `solve_hgs_gpu()` function som erstatter multi_start + ILS
+#    - Aktivert via `--hgs` flag eller `--gpu` for N ≤ 500
+#
+# ---- Estimert kostnad ----
+#
+# | Komponent | LOC | Tid | Risiko |
+# | SREX crossover kernel | 200 | 2 dager | Høy (genetisk operator) |
+# | Selection + replacement | 100 | ½ dag | Lav |
+# | Diversity metric | 80 | ½ dag | Lav |
+# | Restart logikk | 50 | ¼ dag | Lav |
+# | Integrasjon + bench | 150 | 1 dag | Middels |
+# | TOTAL | **~580 LOC** | **4-5 dager** | Middels |
+#
+# ---- Forventet effekt ----
+#
+# Realistisk: lukker N=100 gap fra +1.45% til ~+0.3% (matche PyVRP innen ~5 cost units),
+# N=250 gap fra +1.01% til ~+0.5%. Vinner N=1000 mer konsistent (HGS-style
+# diversification ovenpå eksisterende LS-bedriften).
+#
+# Akademisk litteratur (Vidal et al., Christiaens & Vanden Berghe):
+# HGS slår LS-only solvere med 1-3% på Solomon C/R/RC, 200-1000 customers.
+# Med vår eksisterende LS-stack som "educator" kan vi forventet matche eller
+# slå PyVRP på små N hvis crossover-kernelen er korrekt.
+#
+# ---- Anbefalt rekkefølge ----
+#
+# 1. Først: full Vidal swap-star (~150 LOC, lukker N=1000 mer) - SMALL,
+#    incremental, kjent gevinst
+# 2. Så: SREX crossover kernel + selection (~480 LOC) - BIG, gir HGS
+# 3. Bench mot PyVRP på Solomon-canonical (alle 56 instanser, 5 seeds)
+#
+# ============================================================
+# Neste steg — bench-status etter swap-star (2026-05-11)
+#
+# Begge planlagte arbeider er fullført:
+#   (A) swap-star operator i megakernel  — DONE (Phase 6, ±1-position search)
+#   (B) GPU-megakernel integrert i solve_full bak `--gpu` flagg — DONE
+#
+# Målte bench-resultater (Solomon R1, 60s budsjett ekskl. N=2000 som er 5min):
+#
+# | N    | brooom_gpu (R=4) | Vroom         | PyVRP         | Posisjon |
+# | 500  | 7073             | 7132 (+0.83%) | 7022 (−0.72%) | #2, slår Vroom |
+# | 1000 | 11818            | 11748 (−0.60%)| 11909 (+0.77%)| #2, slår PyVRP |
+# | 2000 | 21160 ←#1        | 21271 (+0.52%)| 21209 (+0.23%)| #1, slår begge |
+#
+# Resterende gap til Vroom på N=1000: +0.60% (var +0.77% før GPU+swap-star).
+# Resterende gap til PyVRP på N=500: +0.72%.
+#
+# ---- Hva som kan lukke gapet videre ----
+#
+# 1. Full Vidal swap-star (ALLE posisjoner, ikke bare ±1) — kostbart men
+#    nær HGS-kvalitet. ~+100 LOC, ~3× tregere LS-iter.
+# 2. Or-opt (segment-relocate, 2-3 task chunks) — ny operator, ~150 LOC.
+#    HGS bruker dette aktivt.
+# 3. Større granular K for swap-star (50 → 100) — flere par å vurdere.
+#    Trivielt: bare hev K i CLI/auto-K. Risiko: tregere per iter.
+# 4. Adaptiv operator-seleksjon: lær hvilke operatorer som vinner per N,
+#    vekt dem i søk-rekkefølge. ~200 LOC + telling/booking.
+# 5. RouteSplit / RouteMerge: Vroom/HGS bruker rute-skill-and-glue. Vi
+#    har route_split_pass på CPU; kunne portes til GPU.
+#
+# ---- Tidligere (A)/(B) beskrivelser (historisk) ----
+#
+# ---- (A) swap-star (Vidal 2014, "ESPPRC swap-star") ----
+#
+# Generaliserer exchange: bytter (a i rute A, b i rute B), MEN
+# *omposisjonerer* hver oppgave til den beste plassen i sin nye rute.
+#
+# Per (a, b) granular-par (rA != rB):
+#   - removal_a = dist(prev_iA, a) + dist(a, next_iA) − dist(prev_iA, next_iA)
+#   - removal_b = dist(prev_pB, b) + dist(b, next_pB) − dist(prev_pB, next_pB)
+#   - For hver kandidat-posisjon p_a i B' (B etter at b er fjernet):
+#       insertion_a_at_p = dist(prev, a) + dist(a, next) − dist(prev, next)
+#       hold best_a (laveste insertion-kost)
+#   - Tilsvarende best_b i A'
+#   - delta = best_a + best_b − removal_a − removal_b
+#
+# Kandidat-posisjoner: full slot (~30 stops per rute) er for dyrt.
+# Granular-trick: kun posisjoner *adjacent* til a's K-naboer i B.
+# Eks: hvis a's tre nærmeste naboer i B er på posisjon 4, 8, 12,
+# da prøver vi p_a ∈ {3,4,5, 7,8,9, 11,12,13} — 9 kandidater i stedet
+# for hele rute-slot. O(K) per par.
+#
+# Total kompleksitet: O(N × K × K) per LS-iter. For N=1000, K=50:
+# 2.5M evalueringer / 1024 tråder = ~2500 per tråd × 100 ops = 250K
+# ops/tråd/iter. Estimert ~30-50 ms/iter ved N=1000 (mot 3 ms uten
+# swap-star). Trade-off: ~10× tregere per iter, men <2% færre iter.
+#
+# Apply-fase er nontriviell: må committe 6 verdier (rA, iA, rB, iB,
+# p_a_new, p_b_new). Pakk to par i én atomic u32:
+#   wg_best_route = (rA << 16) | rB
+#   wg_best_i     = (iA << 16) | iB
+#   wg_best_j     = (p_a_new << 16) | p_b_new
+#
+# Apply-rekkefølge:
+#   1. Lagre a og b
+#   2. Fjern a fra A (shift venstre)
+#   3. Fjern b fra B (shift venstre)
+#   4. Sett inn b i A på p_b_new (shift høyre fra p_b_new)
+#   5. Sett inn a i B på p_a_new (shift høyre fra p_a_new)
+#
+# Estimert innsats: ~250 linjer WGSL (søk: 150, apply: 100). 1-2 dager
+# inkl. validering mot CPU-evaluate_route på 50+ ruter.
+#
+# ---- (B) `--gpu` integrasjon i solve_full ----
+#
+# I dag kjører `brooom -i ...` kun CPU-pipelinen. For å vinne på faktiske
+# Solomon-benchmarks må vi:
+#
+#   1. Lese problem → matrix → vehicle/job data
+#   2. Insertion-only baseline (CPU, raskt)
+#   3. UPLOAD til GpuPopulation
+#   4. run_megakernel_2opt_chunked(traj=0, max_iter=2000)
+#   5. read_back → reconstruct Solution
+#   6. (valgfri) CPU polish-pass på toppen
+#   7. (valgfri) ILS-kick + re-megakernel × M restarts
+#
+# CLI: `brooom -i r1_1000.json --gpu`
+# Eller automatisk: hvis N ≥ 500 OG `--no-gpu` ikke satt OG GPU er
+# tilgjengelig → bruk GPU.
+#
+# Forventet effekt på bench:
+#   - N=1000: brooom CPU 11838 / 49s   →  GPU+CPU-polish ~11700 / 25-30s
+#   - N=2000: brooom CPU 20853 / 170s  →  GPU+CPU-polish ~20700 / 80s
+#   - N=5000: brooom CPU 47221 / 1485s →  GPU+CPU-polish ~46900 / 600s
+#
+# Slik vinner vi både på tid (2× raskere) og kvalitet (litt bedre)
+# samtidig.
+#
+# Estimert innsats: ~150 linjer Rust (lifecycle + format-konvertering).
+# 1 dag inkl. CLI-flagg og integrasjonsbench.
+#
+# ---- Anbefalt rekkefølge ----
+#
+# 1. (B) GPU-integrering først — gir umiddelbar bench-data. Vi kan
+#    *måle* hva som faktisk vinner i dag, ikke bare gjette.
+# 2. (A) swap-star — bygger på integrasjonen og gir måling av kvalitet-
+#    gevinst per operator.
+# 3. Time-equalized bench: kjør med samme tidsbudsjett som Vroom (60s)
+#    og se hvor langt vi kommer med ILS-restarts.
+#
+#
+# =============================================================
+# Neste steg (2) — streaming sparse-matrix arkitektur for N≥50K
+# =============================================================
+
+## Bakgrunn
+
+I dag opererer brooom GPU-megakernelen i to moduser:
+
+1. **Matrix-mode**: hele N×N i32 avstandsmatrise lastet til GPU. Praktisk
+   tak ~N=16K (1 GiB buffer-grense). For N=50K ville matrisen vært 10 GB.
+2. **Coord-mode** (nylig): coords lastes opp som f32×2 per node, avstander
+   regnes ut on-demand i shader via `sqrt(dx²+dy²) × 100`. Fungerer på
+   N=50K, men kun for Euclidean. Klarer ikke å bruke OSRM-veiavstander.
+
+Begrensningen: for ekte produksjon (OSRM-baserte kjøreavstander, ikke
+fugleflukt) trenger vi enten:
+- Full N×N matrise (umulig for N≥16K pga minne/båndbredde)
+- En *sparse* matrise med kun de avstandene LS-løkken faktisk bruker
+
+## Idéen: streaming + sparse K-nabo-cache
+
+### Kjerne-innsikt
+
+Granular K=50 LS bruker bare **K=50 nærmeste naboer per node** for
+relocate/exchange. Det er N×K = 2.5M avstander for N=50K — ikke N² = 2.5G.
+2000× mindre minne, 2000× færre OSRM-kall.
+
+### Datastruktur
+
+```
+sparse_cache[node_id]  →  [(neighbour_id, distance); K]
+```
+
+For N=50K, K=50: 50000 × 50 × 8 bytes = **20 MB** (mot 10 GB for tett).
+
+### Distanse-lookup i shader
+
+```wgsl
+fn dist_at(a: u32, b: u32) -> i32 {
+    // 1. Linear-scan i a's K-naboer (kun 50 ops)
+    for (var k: u32 = 0u; k < K; k = k + 1u) {
+        let entry = sparse_cache[a * K + k];
+        if (entry.neighbour == b) {
+            return entry.distance;
+        }
+    }
+    // 2. Fallback: Euclidean fra coords
+    let ax = coords[a * 2u];   let ay = coords[a * 2u + 1u];
+    let bx = coords[b * 2u];   let by = coords[b * 2u + 1u];
+    return i32(sqrt((ax-bx)*(ax-bx) + (ay-by)*(ay-by)) * 100.0);
+}
+```
+
+Granular-baserte operatorer (relocate, exchange) treffer alltid sparse
+cache — kjent veiavstand. 2-opt innen samme rute treffer sparse cache når
+to noder i ruten er K-naboer, fallback til Euclidean ellers. Siden LS
+fortrinnsvis går etter naboskap, vil "stupide" moves som krever fallback
+nesten aldri være lovende uansett.
+
+### Streaming-pipeline
+
+Pseudo-kode for byggsteget:
+
+```
+sent = {depot}
+emit(depot)                            # første frø
+while |sent| < N:
+    candidate = argmax_{c ∉ sent} min_{s ∈ sent} dist(c, s)  # fjernest fra eksisterende sett
+    emit(candidate)
+    sent.add(candidate)
+
+    if |sent| >= warmup_threshold (e.g. 2000):
+        request_knn(candidate, K=50)   # OSRM table call: candidate vs alle eksisterende
+        sparse_cache[candidate] = top-K nærmeste
+        # Også oppdater eldres K-naboer hvis candidate er nærmere
+        for old in sparse_cache:
+            if dist(candidate, old) < old.K_th:
+                insert_sorted(sparse_cache[old], candidate)
+                evict_if_overflow(K)
+
+        if first_time: start_ls_thread()    # LS kan starte parallelt
+```
+
+**Farthest-point seeding** (maximin-rekkefølge):
+- Garanterer at de første K%×N punktene dekker hele rommet
+- Hvert nytt punkt har minst mulig redundans
+- Når ~2000 punkter er på plass, har granular-tabellen god "skjelett"-
+  dekning av domene-rommet — LS kan starte før resten er ferdig
+
+## Fordeler
+
+### Minne / båndbredde
+
+| Aspekt | Tett N² | Sparse K-nabo |
+|---|---|---|
+| GPU-buffer (N=50K) | 10 GB | 20 MB |
+| OSRM table-kall | 50000² = 2.5G | 50000 × 50 = 2.5M |
+| Bandwidth | 10 GB | 20 MB |
+| Tid å bygge matrise | minutter-timer | strømmet, ingen kald start |
+
+500× reduksjon i minne, 1000× færre nettverkskall, **null kald-start-
+forsinkelse** — LS kan starte etter ~K%×N punkter.
+
+### Korrekthet
+
+- Granular-operatorer (relocate, exchange) bruker *alltid* ekte
+  veiavstander fra OSRM
+- 2-opt bruker Euclidean for fjerne par. Filtrerer ut implausible moves
+  som ikke ville vært valgt uansett (de er for langt fra hverandre til at
+  forbedringen blir betydelig)
+
+### Dynamisk forfining
+
+Hvis Euclidean-fallback identifiserer en lovende 2-opt-move (Δ < terskel),
+kunne vi spørre OSRM live for å bekrefte før commit. På den måten:
+- LS kjører raskt på estimater
+- OSRM kalles kun for de få avgjørelsene som faktisk betyr noe
+- Total OSRM-bruk kan reduseres til **<1% av en tett matrise**
+
+### Skalering
+
+Sparse cache + coord-mode fallback enables:
+- N=100K: 50 MB sparse cache, 1.6 MB coords. Bare ~30s OSRM-tid for KNN-
+  bygg (parallelle table-kall)
+- N=500K: 250 MB cache, 8 MB coords. Stadig innenfor M3 GPU-minne
+
+Praktisk øvre grense flyttet fra **N≈16K → N≈500K**.
+
+## Implementasjons-skisse
+
+### CPU-side (Rust)
+
+```rust
+struct SparseCache {
+    /// Per node: K (neighbour_id, distance) pars
+    entries: Vec<(u32, i32)>,   // n × K, flat
+    k: usize,
+}
+
+impl SparseCache {
+    fn new(n: usize, k: usize) -> Self;
+    fn insert(&mut self, src: u32, dst: u32, dist: i32);
+    fn into_gpu_buffers(self) -> (Vec<u32>, Vec<i32>);  // splitt for GPU
+}
+
+trait DistanceProvider {
+    fn knn(&mut self, src_coord: (f64, f64), candidates: &[(u32, (f64, f64))], k: usize)
+        -> Vec<(u32, i32)>;
+}
+
+struct OsrmStreamingProvider { /* ... */ }
+struct EuclideanProvider { /* for testing */ }
+```
+
+### GPU-side (WGSL)
+
+To nye buffers i megakernel:
+- `@binding(17) sparse_neighbours: array<u32>`  — N×K, neighbour-ids
+- `@binding(18) sparse_distances: array<i32>`   — N×K, parallell distances
+
+Endring i `dist_at(a, b)`:
+- Hvis `coord_mode == 2`: linear-scan a's K-liste, fallback Euclidean
+- (mode==0: matrix, mode==1: ren Euclidean, mode==2: sparse + fallback)
+
+### Pipeline-arkitektur
+
+```
+[OSRM] ───stream─→ [SparseCache builder] ───→ [GPU: upload coords + sparse]
+                            │
+                            └─ trigger LS-start ved warmup_threshold
+                                            │
+                                            ▼
+                              [megakernel LS] ──→ Solution
+```
+
+## Tradeoffs / risiko
+
+1. **Cache-miss-rate i 2-opt**: ukjent hvor ofte LS prøver edges som ikke
+   er K-naboer. Trolig <5% siden granular eliminerer fjerne kandidater,
+   men må måles.
+2. **OSRM throughput**: hvor raskt klarer OSRM N×K table-kall? Typisk
+   1000 punkter/sek per kjerne → 50s for N=50K. Akseptabelt.
+3. **Eldre nodes må oppdatere K-listen**: når et nytt punkt kommer inn
+   som er nærmere enn deres K-te nabo. Krever sorterings-insertion.
+   Amortisert O(N×K log K) total — overkommelig.
+4. **Asymmetri**: OSRM-avstander er ikke symmetriske (envegskjøring).
+   Sparse cache bør lagre begge retninger separat — fordobler minne men
+   fortsatt 1000× mindre enn tett.
+
+## Estimert innsats
+
+| Fase | LOC | Tid | Effekt |
+|---|---|---|---|
+| Sparse-cache i shader | ~150 | 1 dag | N=50K → 20 MB, riktig OSRM-avstander |
+| Farthest-point seeder | ~80 | ½ dag | Smartere KNN-rekkefølge |
+| OSRM streaming-klient | ~200 | 1 dag | Live KNN-kall |
+| Progressiv LS-start | ~100 | ½ dag | Skjul OSRM-latency bak LS |
+| Dynamisk OSRM-verify for 2-opt | ~80 | ½ dag | Reduserer OSRM-kall ~99% |
+| **Total** | **~610** | **3-4 dager** | N=50K på minutter i stedet for timer |
+
+## Anbefalt rekkefølge
+
+1. **Sparse-cache i shader** først — gir umiddelbar gevinst for N≥20K,
+   selv med Euclidean-bygd sparse (uten OSRM)
+2. **Farthest-point seeder** — billig, gjør benchmarks mer realistiske
+3. **OSRM streaming-klient** — den faktiske I/O-integrasjonen
+4. **Progressiv LS-start** — perf-vinn for produksjon
+5. **Dynamisk verify** — siste finpussning, kan vente
+
+Den første alene flytter taket fra N=16K til N=500K. Resten er
+optimaliseringer for å holde OSRM-belastningen lav i produksjon.
