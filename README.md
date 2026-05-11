@@ -4,11 +4,12 @@ An open, unified Rust workbench for routing and vehicle-routing
 optimisation — an alternative stack to **OSRM** + **VROOM**, where both
 engines run in the same process and share memory directly.
 
-| Layer                       | Crate                                  | Alternative to    |
-|-----------------------------|----------------------------------------|--------------------|
-| Road-network router (CH)    | [`crates/dijkstra/`](crates/dijkstra/) | OSRM               |
-| VRP solver (GPU + CPU LS)   | [`crates/brooom/`](crates/brooom/)     | VROOM              |
-| Shared CLI / orchestration  | [`crates/mpe-cli/`](crates/mpe-cli/)   | (new)              |
+| Layer                       | Crate                                    | Alternative to    |
+|-----------------------------|------------------------------------------|--------------------|
+| Road-network router (CH)    | [`crates/dijkstra/`](crates/dijkstra/)   | OSRM               |
+| VRP solver (GPU + CPU LS)   | [`crates/brooom/`](crates/brooom/)       | VROOM              |
+| Shared CLI / orchestration  | [`crates/mpe-cli/`](crates/mpe-cli/)     | (new)              |
+| Live HTTP + map UI          | [`crates/mpe-serve/`](crates/mpe-serve/) | (new)              |
 
 Both engines **are** standalone Rust projects (each with its own
 `Cargo.toml`, its own binaries, its own tests) and can be run completely
@@ -124,17 +125,33 @@ cargo run --release -p sssp_bench --bin bench_ch -- london car
   Solomon R1-1000 (p ≈ 3·10⁻⁸), Vroom-compatible I/O. See
   [crates/brooom/README.md](crates/brooom/README.md).
 
-- **mpe-cli**: scaffolding. The `download`, `build`, `solve`, `pipeline`
-  subcommands are defined but `build/solve/pipeline` currently bail out
-  with a message asking you to invoke the underlying binaries directly.
-  The path dependencies on brooom and sssp_bench are prepared (commented
-  out) in `crates/mpe-cli/Cargo.toml` — wiring is documented in
-  [INTEGRATION.md](INTEGRATION.md) and can be added without further
-  restructuring.
+- **mpe-cli**: end-to-end VRP pipeline. The `download` / `build` /
+  `solve` / `pipeline` subcommands load a CH cache via sssp_bench, snap
+  random / supplied coords to the road graph, build the N×N
+  duration+distance matrix with sssp_bench's bucket-MMM, and hand the
+  matrix straight to brooom's solver — all in the same address space,
+  no IPC, no disk on the hot path.
+- **mpe-serve**: live HTTP server (port 8032 by default) that runs the
+  same pipeline and then serves the result over an embedded
+  Leaflet-based mobile UI. Designed so a phone on the same network can
+  load `http://<laptop-ip>:8032/`, see every route colour-coded on a
+  map, tap a stop for `job_id` / `vehicle_id` / `stop_order`, and zoom
+  to any vehicle's bounding box. See
+  [`crates/mpe-serve/README.md`](crates/mpe-serve/README.md) for build
+  instructions and the measured 2 000 / 5 000-job runs over Greater
+  London.
 
-The two engines **do not yet communicate** — they are prepared for it.
-Once `mpe-cli` is activated as planned, they will share the same
-`Vec<(u32, f32, f32)>` for the K-NN table with no copy.
+### Measured end-to-end runs (Apple M3 Pro, Central London CH)
+
+| N jobs | vehicles | matrix     | solve   | wall     | assigned | distance |
+|-------:|---------:|-----------:|--------:|---------:|---------:|---------:|
+| 2 000  | 50       | 0.32 s     | 122 s   | ~2 min   | 1 982    | 1 332 km |
+| 5 000  | 100      | 4.10 s     | 515 s   | ~9 min   | 4 948    | 2 535 km |
+
+Both runs ship a 99 %+ assignment rate. The 1 % dropped are random
+points that snapped to road fragments isolated from the depot (parks,
+gated roads, pedestrian-only paths). Real address inputs do not have
+this issue.
 
 ---
 

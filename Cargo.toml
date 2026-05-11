@@ -4,6 +4,7 @@ members = [
     "crates/brooom",
     "crates/dijkstra",
     "crates/mpe-cli",
+    "crates/mpe-serve",
 ]
 
 # Each subcrate also declares its own `[profile.release]`; cargo prefers

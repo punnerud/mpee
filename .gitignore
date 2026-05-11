@@ -6,6 +6,7 @@ target/
 
 # OSM input data and engine caches — too large for git, regenerable
 data/
+data
 **/*.osm.pbf
 **/*.osm.pbf.csr
 **/*.osm.pbf.pp
