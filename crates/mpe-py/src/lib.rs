@@ -123,9 +123,12 @@ impl Engine {
     /// Spawn a background thread that runs the in-process VRP pipeline
     /// (gen → snap → matrix → iterative brooom solve), publishing the
     /// best-known dataset after every chunk. Returns immediately.
+    /// `radius_km` > 0 generates jobs uniformly inside a disk of that
+    /// radius around the region's depot. `radius_km` = 0 (default) uses
+    /// the region's bbox.
     #[pyo3(signature = (
         region, n_jobs, n_vehicles, capacity, seed, ch, pp,
-        time_limit_s=45.0, multi_start=1,
+        time_limit_s=45.0, multi_start=1, radius_km=0.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn start_solve(
@@ -139,6 +142,7 @@ impl Engine {
         pp: &str,
         time_limit_s: f64,
         multi_start: usize,
+        radius_km: f64,
     ) -> PyResult<()> {
         // Reset state to "solving".
         {
@@ -174,7 +178,7 @@ impl Engine {
             .spawn(move || {
                 let args = SolverArgs {
                     region, n_jobs, n_vehicles, capacity, seed,
-                    ch, pp, time_limit_s, multi_start,
+                    ch, pp, time_limit_s, multi_start, radius_km,
                 };
                 if let Err(e) = solve_in_process(&args, &solver_state) {
                     let msg = format!("{:#}", e);
@@ -254,6 +258,7 @@ struct SolverArgs {
     pp: String,
     time_limit_s: f64,
     multi_start: usize,
+    radius_km: f64,
 }
 
 fn region_bbox(region: &str) -> anyhow::Result<(f64, f64, f64, f64)> {
@@ -278,15 +283,34 @@ fn region_depot(region: &str) -> (f64, f64) {
 fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow::Result<()> {
     use anyhow::Context;
 
-    set_phase(state, "gen", &format!("generating {} jobs in {}", args.n_jobs, args.region), 0.05);
-    let (lat_min, lat_max, lon_min, lon_max) = region_bbox(&args.region)?;
     let (depot_lat, depot_lon) = region_depot(&args.region);
+    let shape_desc = if args.radius_km > 0.0 {
+        format!("circle r={:.1}km around depot", args.radius_km)
+    } else {
+        format!("bbox of {}", args.region)
+    };
+    set_phase(state, "gen", &format!("generating {} jobs in {}", args.n_jobs, shape_desc), 0.05);
+    let (lat_min, lat_max, lon_min, lon_max) = region_bbox(&args.region)?;
     let mut rng = ChaCha8Rng::seed_from_u64(args.seed);
 
     let mut problem = brooom::Problem::default();
     for i in 0..args.n_jobs {
-        let lat = rng.gen_range(lat_min..lat_max);
-        let lon = rng.gen_range(lon_min..lon_max);
+        let (lat, lon) = if args.radius_km > 0.0 {
+            // Uniform sample within a disk of radius_km around the depot.
+            // r = sqrt(u) * R gives uniform area-density; theta uniform.
+            use std::f64::consts::PI;
+            let u: f64 = rng.gen_range(0.0..1.0);
+            let r = u.sqrt() * (args.radius_km * 1000.0);
+            let theta: f64 = rng.gen_range(0.0..(2.0 * PI));
+            let dy = r * theta.sin();
+            let dx = r * theta.cos();
+            let lat = depot_lat + dy / 111_000.0;
+            let lon_per_m = 1.0 / (111_000.0 * depot_lat.to_radians().cos().max(1e-6));
+            let lon = depot_lon + dx * lon_per_m;
+            (lat, lon)
+        } else {
+            (rng.gen_range(lat_min..lat_max), rng.gen_range(lon_min..lon_max))
+        };
         let delivery: i64 = rng.gen_range(1..=10);
         problem.jobs.push(brooom::Job {
             id: (i + 1) as u64,
@@ -374,21 +398,39 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
 
     loop {
         iter += 1;
+        // Iter 1 has no warm-start, so brooom does:
+        //   1) greedy insertion of all jobs (O(N²)) — slow for N≥1000
+        //   2) up to max_local_search_passes of full LS
+        //   3) ILS bounded by time_limit_ms
+        // For N=2000 the first two phases alone can take 30-60 s; the
+        // time_limit_ms budget only applies after (1)+(2). Cap LS passes
+        // for iter 1 to keep the wait short — subsequent iters use the
+        // default 50 since warm-start lands near a local optimum and
+        // each pass terminates fast.
+        let max_passes = if iter == 1 { 10 } else { 50 };
         let cfg = brooom::solver::SolverConfig {
             multi_start: if iter == 1 { args.multi_start.max(1) } else { 1 },
             time_limit_ms: Some(chunk_ms),
             warm_start: warm.clone(),
+            max_local_search_passes: max_passes,
             verbose: false,
             ..Default::default()
         };
-        set_phase(
-            state, "solve",
-            &format!(
-                "iter {iter} · chunk {:.1}s · {:.0}s/{:.0}s",
+        let msg = if iter == 1 {
+            format!(
+                "iter 1 · initial insertion + LS (N={}, slow first solve)",
+                args.n_jobs
+            )
+        } else {
+            format!(
+                "iter {iter} · refining (chunk {:.1}s · total {:.0}s/{:.0}s)",
                 chunk_ms as f64 / 1000.0,
                 solve_start.elapsed().as_secs_f64(),
                 args.time_limit_s,
-            ),
+            )
+        };
+        set_phase(
+            state, "solve", &msg,
             0.40 + 0.55 * (solve_start.elapsed().as_millis() as f32 / total_budget_ms.max(1) as f32).min(1.0),
         );
         let sol = brooom::solver::solve_with_matrix(&problem, &matrix, &cfg);

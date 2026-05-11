@@ -9,7 +9,7 @@
 <style>
   :root {
     --bg: #0e1116;
-    --panel: rgba(20, 24, 32, 0.92);
+    --panel: rgba(20, 24, 32, 0.94);
     --text: #e8eaee;
     --muted: #9aa3b2;
     --accent: #4dabf7;
@@ -19,9 +19,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   #map { position: absolute; inset: 0; }
-  .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-    background: var(--panel); color: var(--text); border-radius: 8px;
-  }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); border-radius: 8px; }
   .leaflet-popup-content { margin: 10px 12px; font-size: 13px; }
   .leaflet-popup-content b { color: var(--accent); }
 
@@ -36,8 +34,7 @@
   #status-pill {
     display: inline-block; padding: 2px 8px; border-radius: 999px;
     font-size: 11px; font-weight: 500; margin-left: 6px;
-    background: #1f2937; color: var(--muted); text-transform: uppercase;
-    letter-spacing: 0.4px; vertical-align: 1px;
+    background: #1f2937; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; vertical-align: 1px;
   }
   #status-pill.solving { background: #1c3354; color: var(--accent); }
   #status-pill.evolving { background: #3b3115; color: var(--warn); }
@@ -52,7 +49,7 @@
     padding: 8px 12px env(safe-area-inset-bottom, 8px);
     background: var(--panel); backdrop-filter: blur(8px);
     border-top: 1px solid #1c2230; z-index: 1000;
-    max-height: 42vh; overflow: auto;
+    max-height: 55vh; overflow: auto;
     -webkit-overflow-scrolling: touch;
   }
   #summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
@@ -60,7 +57,6 @@
   #summary .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
   #summary .v { font-size: 15px; font-weight: 600; }
   #summary .v.delta-good { color: var(--good); }
-  #summary .v.delta-bad { color: var(--warn); }
 
   #progress-wrap { margin-top: 8px; display: none; }
   #progress-wrap.show { display: block; }
@@ -75,6 +71,7 @@
     -webkit-tap-highlight-color: transparent;
   }
   .btn:hover { background: #1c2333; }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
   .btn.on { background: var(--accent); border-color: var(--accent); color: #001a30; }
 
   #vehicle-list {
@@ -87,10 +84,38 @@
     border: 1px solid transparent;
   }
   .veh-row.hidden { opacity: 0.35; }
-  .veh-row.focus { background: #1a2030; border-color: #2a3344; }
+  .veh-row.focus { background: #1a2030; border-color: var(--accent); }
   .veh-row .sw { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
   .veh-row .lbl { font-size: 12px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .veh-row .n { color: var(--muted); font-size: 11px; }
+
+  #stops-panel { display: none; margin-top: 10px; border-top: 1px solid #1c2230; padding-top: 8px; }
+  #stops-panel.show { display: block; }
+  #stops-panel .head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  #stops-panel .title { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  #stops-panel .title .sw { width: 14px; height: 14px; border-radius: 50%; }
+  #stops-panel .title b { font-weight: 600; }
+  #stops-panel .title .meta { color: var(--muted); }
+
+  #stops-pager { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+  #stops-pager .page { color: var(--muted); padding: 0 4px; min-width: 70px; text-align: center; font-variant-numeric: tabular-nums; }
+
+  #stops-list { display: grid; grid-template-columns: 1fr; gap: 2px; max-height: 30vh; overflow: auto; }
+  .stop-row {
+    display: grid; grid-template-columns: 32px 1fr auto;
+    gap: 8px; align-items: center;
+    padding: 5px 8px; border-radius: 4px; cursor: pointer;
+    border: 1px solid transparent; font-size: 12px;
+  }
+  .stop-row:hover { background: #161c28; }
+  .stop-row.selected { background: #1f3554; border-color: var(--accent); }
+  .stop-row .ord { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+  .stop-row .id { font-weight: 600; }
+  .stop-row .id .small { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
+  .stop-row .load { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
   #empty-state {
     position: absolute; inset: 0; display: flex;
@@ -122,10 +147,12 @@
 
 <div id="footer">
   <div id="summary"></div>
+
   <div id="progress-wrap">
     <div id="progress-bar"><div></div></div>
     <div id="progress-text"></div>
   </div>
+
   <div id="toolbar">
     <button class="btn on" id="btn-stops">Stops</button>
     <button class="btn on" id="btn-routes">Routes</button>
@@ -133,8 +160,26 @@
     <button class="btn" id="btn-fit">Fit</button>
     <button class="btn" id="btn-all">All on</button>
     <button class="btn" id="btn-none">All off</button>
+    <button class="btn" id="btn-close-veh" style="display:none">Close detail</button>
   </div>
+
   <div id="vehicle-list"></div>
+
+  <div id="stops-panel">
+    <div class="head">
+      <div class="title">
+        <span class="sw" id="sp-sw"></span>
+        <b id="sp-veh">Veh —</b>
+        <span class="meta" id="sp-meta"></span>
+      </div>
+      <div id="stops-pager">
+        <button class="btn" id="btn-stop-prev">‹ prev</button>
+        <span class="page" id="stops-page-label">— / —</span>
+        <button class="btn" id="btn-stop-next">next ›</button>
+      </div>
+    </div>
+    <div id="stops-list"></div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -142,24 +187,25 @@
 <script>
 (function () {
   const $ = (id) => document.getElementById(id);
+  const PAGE_SIZE = 15;
 
-  // ---- Map + base layer (loaded immediately so the user sees a tile
-  // backdrop while the solver is still working) ----
   const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([51.5, -0.1], 11);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap'
   }).addTo(map);
 
-  // ---- Rendering state ----
   let depotMarker = null;
-  let vehicleLayers = [];  // [{ v, stops:LayerGroup, polylines:LayerGroup, visible:bool }]
+  let vehicleLayers = [];                 // [{ v, stops:LayerGroup, polylines:LayerGroup, visible:bool }]
   let unassignedGroup = L.layerGroup();
   let showStops = true, showRoutes = true, showUnassigned = false;
-  let lastIter = -1;
-  let lastCost = Infinity;
+  let lastIter = -1, lastCost = Infinity;
   let bbox = null;
-  let pollTimer = null;
   let firstRender = true;
+  let selectedVehicleIdx = null;
+  let selectedStopIdx = 0;
+  let pageIdx = 0;
+  let highlightMarker = null;
+  let pollTimer = null;
 
   function setStatusPill(state, text) {
     const pill = $('status-pill');
@@ -167,31 +213,16 @@
     pill.classList.add(state);
     $('status-text').textContent = text;
   }
-
   function setProgress(p, txt) {
     $('progress-wrap').classList.add('show');
     $('progress-bar').firstElementChild.style.width = `${Math.round(p * 100)}%`;
     $('progress-text').textContent = txt;
   }
 
-  function colorFor(i) {
-    const hue = ((i * 137.508) % 360 + 360) % 360;
-    return `hsl(${hue.toFixed(0)},75%,45%)`;
-  }
-
-  function clearVehicleLayers() {
-    vehicleLayers.forEach(vl => {
-      vl.stops.remove();
-      vl.polylines.remove();
-    });
-    vehicleLayers = [];
-  }
-
   function renderDataset(data) {
     setStatusPill(data.final ? 'done' : 'evolving', data.final ? 'final' : `iter ${data.iter}`);
     $('region-label').textContent = `· ${data.region}`;
 
-    // --- Header summary
     const costDelta = (lastCost !== Infinity && data.cost < lastCost) ? ' ↓' : '';
     $('summary').innerHTML = `
       <div class="kv"><span class="k">Iter</span><span class="v">${data.iter}${data.final ? ' ✓' : ''}</span></div>
@@ -206,19 +237,17 @@
     `;
     lastCost = data.cost;
 
-    // --- Depot
     if (!depotMarker) {
       depotMarker = L.circleMarker([data.depot.lat, data.depot.lon], {
         radius: 8, color: '#fff', weight: 2, fillColor: '#ffd43b', fillOpacity: 1
       }).addTo(map).bindPopup('<b>Depot</b>');
     }
 
-    // --- Replace vehicle layers in place
-    clearVehicleLayers();
+    vehicleLayers.forEach(vl => { vl.stops.remove(); vl.polylines.remove(); });
+    vehicleLayers = [];
     data.vehicles.forEach((v, i) => {
       const stops = L.layerGroup();
       const polylines = L.layerGroup();
-
       const path = [[data.depot.lat, data.depot.lon]];
       v.stops.forEach(s => path.push([s.lat, s.lon]));
       path.push([data.depot.lat, data.depot.lon]);
@@ -228,21 +257,13 @@
         const m = L.circleMarker([s.lat, s.lon], {
           radius: 5, color: v.color, weight: 1, fillColor: v.color, fillOpacity: 0.9
         });
-        m.bindPopup(
-          `<b>Job #${s.job_id}</b><br>` +
-          `Vehicle: ${v.id}<br>` +
-          `Stop: ${idx + 1} of ${v.n_stops}<br>` +
-          `Load after: ${s.load_after}<br>` +
-          `<small>${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</small>`
-        );
-        m.on('click', () => focusVehicle(i));
+        m.bindPopup(stopPopupHtml(v, s, idx));
+        m.on('click', () => selectVehicle(i, idx));
         m.addTo(stops);
       });
-
       vehicleLayers.push({ v, stops, polylines, visible: true });
     });
 
-    // --- Unassigned
     unassignedGroup.remove();
     unassignedGroup = L.layerGroup(
       data.unassigned.map(u => L.circleMarker([u.lat, u.lon], {
@@ -250,7 +271,6 @@
       }).bindPopup(`<b>Unassigned job #${u.job_id}</b>`))
     );
 
-    // --- Vehicle row list
     const list = $('vehicle-list');
     list.innerHTML = '';
     vehicleLayers.forEach((vl, i) => {
@@ -261,72 +281,164 @@
         `<span class="sw" style="background:${vl.v.color}"></span>` +
         `<span class="lbl">Veh ${vl.v.id}</span>` +
         `<span class="n">${vl.v.n_stops} · ${(vl.v.distance_m/1000).toFixed(1)} km</span>`;
-      row.onclick = () => focusVehicle(i);
+      row.onclick = () => selectVehicle(i, 0);
       list.appendChild(row);
     });
 
-    // --- Fit view on first render
     bbox = data.bbox;
     if (firstRender) {
       map.fitBounds(L.latLngBounds([[bbox.lat_min, bbox.lon_min], [bbox.lat_max, bbox.lon_max]]).pad(0.05));
       firstRender = false;
     }
-
     refreshLayers();
+
+    if (selectedVehicleIdx != null && selectedVehicleIdx < vehicleLayers.length) {
+      // Keep the same vehicle selected across iterations, but clamp the stop index.
+      const max = Math.max(0, vehicleLayers[selectedVehicleIdx].v.stops.length - 1);
+      if (selectedStopIdx > max) selectedStopIdx = max;
+      pageIdx = Math.floor(selectedStopIdx / PAGE_SIZE);
+      // Re-apply the row focus.
+      const row = document.querySelector(`.veh-row[data-idx="${selectedVehicleIdx}"]`);
+      if (row) row.classList.add('focus');
+      renderStopsPanel();
+      drawHighlight(false);  // don't fly between iters, keep view
+    }
     $('empty-state').classList.add('gone');
   }
 
+  function stopPopupHtml(v, s, idx) {
+    return (
+      `<b>Job #${s.job_id}</b><br>` +
+      `Vehicle: ${v.id}<br>` +
+      `Stop: ${idx + 1} of ${v.n_stops}<br>` +
+      `Load after: ${s.load_after}<br>` +
+      `<small>${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</small>`
+    );
+  }
+
   function refreshLayers() {
-    map.eachLayer(l => {
-      if (l._mpe_managed) map.removeLayer(l);
-    });
+    map.eachLayer(l => { if (l._mpe_managed) map.removeLayer(l); });
     vehicleLayers.forEach(vl => {
       if (!vl.visible) return;
-      if (showStops) { vl.stops.addTo(map); vl.stops._mpe_managed = true; }
+      if (showStops)  { vl.stops.addTo(map); vl.stops._mpe_managed = true; }
       if (showRoutes) { vl.polylines.addTo(map); vl.polylines._mpe_managed = true; }
     });
     if (showUnassigned) { unassignedGroup.addTo(map); unassignedGroup._mpe_managed = true; }
+    if (highlightMarker) highlightMarker.bringToFront?.();
   }
 
-  function toggle(id, on) { $(id).classList.toggle('on', on); }
-  function setVisible(i, visible) {
-    vehicleLayers[i].visible = visible;
-    document.querySelectorAll('.veh-row').forEach(r => {
-      if (Number(r.dataset.idx) === i) r.classList.toggle('hidden', !visible);
-    });
-  }
-  function focusVehicle(i) {
-    const vl = vehicleLayers[i];
+  // ---- Selection ----
+  function selectVehicle(i, stopIdx = 0) {
+    selectedVehicleIdx = i;
+    selectedStopIdx = stopIdx;
+    pageIdx = Math.floor(stopIdx / PAGE_SIZE);
     document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('focus'));
-    document.querySelector(`.veh-row[data-idx="${i}"]`)?.classList.add('focus');
-    const lats = vl.v.stops.map(s => s.lat);
-    const lons = vl.v.stops.map(s => s.lon);
-    if (lats.length) {
-      const b = L.latLngBounds(lats.map((la, k) => [la, lons[k]]));
-      map.fitBounds(b.pad(0.1));
+    const row = document.querySelector(`.veh-row[data-idx="${i}"]`);
+    if (row) { row.classList.add('focus'); row.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    $('btn-close-veh').style.display = '';
+    renderStopsPanel();
+    drawHighlight(true);
+  }
+
+  function selectStop(stopIdx) {
+    if (selectedVehicleIdx == null) return;
+    const max = vehicleLayers[selectedVehicleIdx].v.stops.length - 1;
+    selectedStopIdx = Math.max(0, Math.min(max, stopIdx));
+    pageIdx = Math.floor(selectedStopIdx / PAGE_SIZE);
+    renderStopsPanel();
+    drawHighlight(true);
+  }
+
+  function drawHighlight(fly) {
+    if (highlightMarker) { map.removeLayer(highlightMarker); highlightMarker = null; }
+    if (selectedVehicleIdx == null) return;
+    const vl = vehicleLayers[selectedVehicleIdx];
+    const s = vl.v.stops[selectedStopIdx];
+    if (!s) return;
+    highlightMarker = L.circleMarker([s.lat, s.lon], {
+      radius: 12, color: '#fff', weight: 3, fillColor: vl.v.color, fillOpacity: 0.0
+    }).addTo(map);
+    highlightMarker._mpe_managed = false;
+    highlightMarker.bindPopup(stopPopupHtml(vl.v, s, selectedStopIdx)).openPopup();
+    if (fly) {
+      map.flyTo([s.lat, s.lon], Math.max(map.getZoom(), 14), { duration: 0.6 });
     }
   }
+
+  function closeVehicleDetail() {
+    selectedVehicleIdx = null;
+    selectedStopIdx = 0;
+    pageIdx = 0;
+    if (highlightMarker) { map.removeLayer(highlightMarker); highlightMarker = null; }
+    document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('focus'));
+    $('stops-panel').classList.remove('show');
+    $('btn-close-veh').style.display = 'none';
+  }
+
+  function renderStopsPanel() {
+    if (selectedVehicleIdx == null) { $('stops-panel').classList.remove('show'); return; }
+    const vl = vehicleLayers[selectedVehicleIdx];
+    const stops = vl.v.stops;
+    const totalPages = Math.max(1, Math.ceil(stops.length / PAGE_SIZE));
+    if (pageIdx < 0) pageIdx = 0;
+    if (pageIdx >= totalPages) pageIdx = totalPages - 1;
+
+    $('sp-sw').style.background = vl.v.color;
+    $('sp-veh').textContent = `Veh ${vl.v.id}`;
+    $('sp-meta').textContent =
+      `· ${vl.v.n_stops} stops · ${(vl.v.distance_m/1000).toFixed(1)} km · ${Math.round(vl.v.duration_s/60)} min`;
+    $('stops-page-label').textContent =
+      `${selectedStopIdx + 1} / ${stops.length}`;
+    $('stops-panel').classList.add('show');
+
+    const start = pageIdx * PAGE_SIZE;
+    const end = Math.min(stops.length, start + PAGE_SIZE);
+    const container = $('stops-list');
+    container.innerHTML = '';
+    for (let i = start; i < end; i++) {
+      const s = stops[i];
+      const row = document.createElement('div');
+      row.className = 'stop-row' + (i === selectedStopIdx ? ' selected' : '');
+      row.dataset.idx = i;
+      row.innerHTML =
+        `<span class="ord">${i + 1}.</span>` +
+        `<span class="id">#${s.job_id}<span class="small">${s.lat.toFixed(4)}, ${s.lon.toFixed(4)}</span></span>` +
+        `<span class="load">load ${s.load_after}</span>`;
+      row.onclick = () => selectStop(i);
+      container.appendChild(row);
+    }
+    const selRow = container.querySelector('.stop-row.selected');
+    if (selRow) selRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  // Toolbar
+  function toggle(id, on) { $(id).classList.toggle('on', on); }
   $('btn-stops').onclick = () => { showStops = !showStops; toggle('btn-stops', showStops); refreshLayers(); };
   $('btn-routes').onclick = () => { showRoutes = !showRoutes; toggle('btn-routes', showRoutes); refreshLayers(); };
   $('btn-unassigned').onclick = () => { showUnassigned = !showUnassigned; toggle('btn-unassigned', showUnassigned); refreshLayers(); };
   $('btn-fit').onclick = () => { if (bbox) map.fitBounds(L.latLngBounds([[bbox.lat_min, bbox.lon_min], [bbox.lat_max, bbox.lon_max]]).pad(0.05)); };
-  $('btn-all').onclick = () => { vehicleLayers.forEach((_, i) => setVisible(i, true)); refreshLayers(); };
-  $('btn-none').onclick = () => { vehicleLayers.forEach((_, i) => setVisible(i, false)); refreshLayers(); };
+  $('btn-all').onclick = () => { vehicleLayers.forEach(vl => vl.visible = true); refreshLayers(); document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('hidden')); };
+  $('btn-none').onclick = () => { vehicleLayers.forEach(vl => vl.visible = false); refreshLayers(); document.querySelectorAll('.veh-row').forEach(r => r.classList.add('hidden')); };
+  $('btn-close-veh').onclick = closeVehicleDetail;
+  $('btn-stop-prev').onclick = () => selectStop(selectedStopIdx - 1);
+  $('btn-stop-next').onclick = () => selectStop(selectedStopIdx + 1);
 
-  // ---- Poll loop ----
+  document.addEventListener('keydown', (e) => {
+    if (selectedVehicleIdx == null) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); selectStop(selectedStopIdx - 1); }
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); selectStop(selectedStopIdx + 1); }
+    else if (e.key === 'Escape') { closeVehicleDetail(); }
+  });
+
   async function pollOnce() {
     let status;
-    try {
-      status = await (await fetch('/api/status', { cache: 'no-store' })).json();
-    } catch (e) {
+    try { status = await (await fetch('/api/status', { cache: 'no-store' })).json(); }
+    catch (e) {
       $('empty-phase').textContent = 'Network error';
       $('empty-detail').textContent = String(e);
       return;
     }
-
     setStatusPill(status.state, status.state);
-
-    // Update progress UI
     setProgress(status.progress || 0, `${status.phase} · ${status.message} (${status.elapsed_s.toFixed(1)}s)`);
     $('empty-phase').textContent = `${status.phase} (${status.elapsed_s.toFixed(1)}s)`;
     $('empty-detail').textContent = status.message;
@@ -336,36 +448,23 @@
       $('empty-detail').textContent = status.error || status.message;
       return;
     }
-
-    // Pick up new dataset whenever iter advances.
     if (status.dataset_iter > lastIter) {
       try {
         const r = await fetch('/api/dataset', { cache: 'no-store' });
         if (r.status === 200) {
           const data = await r.json();
-          if (data.iter > lastIter) {
-            lastIter = data.iter;
-            renderDataset(data);
-          }
+          if (data.iter > lastIter) { lastIter = data.iter; renderDataset(data); }
         }
-      } catch (e) {
-        // ignore — try again on next poll
-      }
+      } catch {}
     }
-
-    // Keep polling until the final dataset arrives, then back off.
     if (status.state !== 'done') {
       pollTimer = setTimeout(pollOnce, 2000);
     } else {
-      // One last fetch to make sure we have the final version, then stop.
       try {
         const r = await fetch('/api/dataset', { cache: 'no-store' });
         if (r.status === 200) {
           const data = await r.json();
-          if (data.iter > lastIter) {
-            lastIter = data.iter;
-            renderDataset(data);
-          }
+          if (data.iter > lastIter) { lastIter = data.iter; renderDataset(data); }
         }
       } catch {}
       setProgress(1, 'done');

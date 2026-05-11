@@ -46,6 +46,11 @@ def main() -> int:
     p.add_argument("--pp", default=str(REPO_ROOT / "data" / "greater-london.osm.pbf.pp"))
     p.add_argument("--time-limit-s", type=float, default=45.0)
     p.add_argument("--multi-start", type=int, default=1)
+    p.add_argument(
+        "--radius-km", type=float, default=0.0,
+        help="If > 0, place jobs uniformly inside a disk of this radius "
+             "around the city-centre depot (instead of the rectangular bbox).",
+    )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8032)
     args = p.parse_args()
@@ -71,6 +76,7 @@ def main() -> int:
         pp=args.pp,
         time_limit_s=args.time_limit_s,
         multi_start=args.multi_start,
+        radius_km=args.radius_km,
     )
     print(
         f"mpe_py started solving: region={args.region} n_jobs={args.n_jobs} "
