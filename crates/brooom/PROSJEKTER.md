@@ -1,214 +1,227 @@
-# brooom NN-utvikling — store prosjekter
+# brooom NN development — large projects
 
-Levende plan for tre parallelle/sekvensielle ML-prosjekter. Hver fase har
-mål, avhengigheter, sjekkliste og suksesskriterier. Sporing skjer ved å
-hake av `[ ]` → `[x]` per oppgave.
+Living plan for three parallel/sequential ML projects. Each phase has a
+goal, dependencies, a checklist, and success criteria. Tracking is by
+flipping `[ ]` → `[x]` per task.
 
-**Nåværende baseline (uten ML-aktivert):**
+**Current baseline (ML disabled):**
 
 | N | Vroom | brooom | Δ |
 |---|---|---|---|
 | 50 | 1554 | 1563 | +0.6% |
-| 100 | 2466 | 2463 | −0.1% (nær) |
+| 100 | 2466 | 2463 | −0.1% (tied) |
 | 250 | 4472 | 4373 | **−2.2% WIN** |
 | 500 | 7132 | 7091 | **−0.6% WIN** |
 | 1000 | 11748 | 12162 | +3.5% |
 
-**Hva som er ferdig:**
-- LS-stack (regret-3, SwapStar, polish-pass)
-- Embedding (22-d) + cache + ANN-search
-- DoE-runner
-- Distillation-pipeline (PyTorch → ONNX → Rust): TSP/CVRPTW pointer-NN, edge-refiner v1/v2/v3/v4-RL
+**What is done:**
+- LS stack (regret-3, SwapStar, polish-pass)
+- Embedding (22-d) + cache + ANN search
+- DoE runner
+- Distillation pipeline (PyTorch → ONNX → Rust): TSP/CVRPTW pointer-NN,
+  edge-refiner v1/v2/v3/v4-RL
 
-**Hva som ikke ble nyttig:**
-- Distillation v1 (flat MLP, 5 par): margin 0.05
-- Distillation v2 (transformer, 35 par): margin 0.37 men val_acc 60%
-- v3 (cost-delta MSE): top10_hit 0%
-- v4 (REINFORCE): val_advantage konstant negativ
-
----
-
-## Prosjekt A: Diagnostisk regime-mapping (Nivå 1)
-
-**Mål:** Identifisere i hvilke parameter-regimer brooom slår Vroom og
-hvor Vroom slår brooom. Empirisk grunnlag for ML-arbeid.
-
-**Avhengigheter:** ingen (alle verktøy finnes).
-**Tidsestimat:** 1-2 arbeidsdager.
-
-### Sjekkliste
-
-**A1. Parameter-rom (4 timer)**
-- [ ] Definer aksene: clustering (R/C/RC), TW-stramhet, demand-tetthet,
-      capacity-utnyttelse, N (50/100/250/500/1000)
-- [ ] Utvide `gen_solomon_like.py` med `--cluster-type R|C|RC`-flagg
-- [ ] Utvide med `--tw-tightness 0.1..1.0`
-- [ ] Utvide med `--demand-spread uniform|skewed`
-- [ ] Lagre som JSON med metadata-felt `meta: {cluster, tw, demand, n, seed}`
-
-**A2. Generere korpus (2 timer)**
-- [ ] 100 instanser per størrelse (50/100/250) = 300 instanser totalt
-- [ ] Variere alle 4 akser med Latin Hypercube Sampling
-- [ ] Lagre i `benchmarks/regime_corpus/`
-
-**A3. Kjøre solvere (4-6 timer)**
-- [ ] Kjør Vroom på alle 300 instanser
-- [ ] Kjør brooom på alle 300 instanser
-- [ ] Lagre resultater + tider i `regime_results.csv`
-
-**A4. Analyse (4 timer)**
-- [ ] Plot: brooom-cost / Vroom-cost vs hver akse
-- [ ] Identifiser top-10 regimer hvor brooom > Vroom (mer enn +5%)
-- [ ] Identifiser top-10 regimer hvor brooom < Vroom (mer enn −5%)
-- [ ] Korrelasjons-matrise mellom features og kost-ratio
-- [ ] Skriv `REGIME_REPORT.md` med funn
-
-**A5. ML-relevante features (4 timer)**
-- [ ] Per-instans embedding (22-d via embedding.rs)
-- [ ] Logistic regression: predict win/loss fra embedding
-- [ ] Identifiser 5-10 features med høyest predictive power
-- [ ] Disse blir input-features til Prosjekt B+C
-
-### Suksesskriterier
-
-- ≥10 distinkte regimer identifisert
-- Kvantitativ forklaring av når brooom-stacken er konkurransedyktig
-- Empirisk grunnlag for å avgjøre om Prosjekt B/C er verdt arbeidet
+**What did not turn out useful:**
+- Distillation v1 (flat MLP, 5 params): margin 0.05
+- Distillation v2 (transformer, 35 params): margin 0.37 but val_acc 60 %
+- v3 (cost-delta MSE): top10_hit 0 %
+- v4 (REINFORCE): val_advantage constant negative
 
 ---
 
-## Prosjekt B: Generator-search for hard cases (Nivå 2)
+## Project A: Diagnostic regime mapping (Level 1)
 
-**Mål:** Bygge bibliotek av 100-500 instanser hvor brooom vinner ≥3% mot
-Vroom. Treningsdata for adversarial-NN.
+**Goal:** Identify which parameter regimes brooom beats Vroom in and
+which regimes Vroom beats brooom in. Empirical foundation for ML work.
 
-**Avhengigheter:** Prosjekt A ferdig (kunnskap om regimer).
-**Tidsestimat:** 5-7 arbeidsdager.
+**Dependencies:** none (all tools exist).
+**Time estimate:** 1-2 working days.
 
-### Sjekkliste
+### Checklist
 
-**B1. Evolutionary search rammeverk (1 dag)**
-- [ ] Definer instans-parameter-vektor (8-12 floats)
-- [ ] Mutation-operatorer: gaussian on each axis ± uniform-flip
-- [ ] Crossover: per-axis swap mellom to parents
-- [ ] Selection: top-K basert på reward = brooom_cost / vroom_cost
-- [ ] Implementer i `neural/evo_search.py`
+**A1. Parameter space (4 h)**
+- [ ] Define the axes: clustering (R/C/RC), TW tightness, demand
+      density, capacity utilisation, N (50/100/250/500/1000)
+- [ ] Extend `gen_solomon_like.py` with a `--cluster-type R|C|RC` flag
+- [ ] Extend with `--tw-tightness 0.1..1.0`
+- [ ] Extend with `--demand-spread uniform|skewed`
+- [ ] Save as JSON with metadata field `meta: {cluster, tw, demand, n, seed}`
 
-**B2. Reward-pipeline (1 dag)**
-- [ ] Solo-functor som tar parameter-vektor → instans → kjør Vroom + brooom → kost-ratio
-- [ ] Cache-baserte tidligere kjøringer (samme parametre = ikke re-kjør)
-- [ ] Parallellisere på multi-core
+**A2. Generate corpus (2 h)**
+- [ ] 100 instances per size (50/100/250) = 300 instances total
+- [ ] Vary all 4 axes with Latin Hypercube Sampling
+- [ ] Store under `benchmarks/regime_corpus/`
 
-**B3. Kjør generasjoner (2-3 dager)**
-- [ ] Initial pop: 100 random fra hele space
-- [ ] 20 generasjoner × 100 individer = 2000 evals
-- [ ] Track convergence: best/avg reward per generasjon
-- [ ] Lagre top-500 unike instanser i `benchmarks/hard_corpus/`
+**A3. Run solvers (4-6 h)**
+- [ ] Run Vroom on all 300 instances
+- [ ] Run brooom on all 300 instances
+- [ ] Save results + timings to `regime_results.csv`
 
-**B4. Validering (1 dag)**
-- [ ] Re-kjør Vroom + brooom på alle 500 med ulik seed
-- [ ] Verifiser at brooom-vinn er reproducer-bar
-- [ ] Skriv `HARD_CORPUS_REPORT.md` med oppsummering
+**A4. Analysis (4 h)**
+- [ ] Plot: brooom-cost / Vroom-cost against each axis
+- [ ] Identify top-10 regimes where brooom > Vroom (more than +5 %)
+- [ ] Identify top-10 regimes where brooom < Vroom (more than −5 %)
+- [ ] Correlation matrix between features and cost ratio
+- [ ] Write `REGIME_REPORT.md` with findings
 
-### Suksesskriterier
+**A5. ML-relevant features (4 h)**
+- [ ] Per-instance embedding (22-d via embedding.rs)
+- [ ] Logistic regression: predict win/loss from embedding
+- [ ] Identify 5-10 features with the highest predictive power
+- [ ] These become the input features for Projects B+C
 
-- ≥100 instanser hvor brooom vinner ≥3% mot Vroom (deterministisk)
-- Diversitet: instansene dekker minst 3 distinkte regimer
-- Klart for input til Prosjekt C som treningsdata
+### Success criteria
 
----
-
-## Prosjekt C: Adversarial NN-arkitektur (Nivå 3)
-
-**Mål:** Co-evolved generator-NN + solver-NN som over tid forbedrer
-hverandre.
-
-**Avhengigheter:** Prosjekt A + B ferdig. PyTorch Geometric installert.
-**Tidsestimat:** 30-60 arbeidsdager (forskningsnivå).
-
-### Sjekkliste
-
-**C1. Infrastruktur (3-5 dager)**
-- [ ] Installere PyTorch Geometric + DGL
-- [ ] Sette opp PyG-DataLoader for instans-batches
-- [ ] Bygge GNN-encoder (3-lag GAT eller GIN) over distanse-matrise
-- [ ] Bygge node-decoder (per-node prediksjon)
-- [ ] Validere på Prosjekt B's hard_corpus
-
-**C2. Solver-NN baseline (5-10 dager)**
-- [ ] Pointer-network med GNN-encoder (utvider eksisterende `train_pointer_cvrptw.py`)
-- [ ] Trene supervised: NN-output predict Vroom-løsning
-- [ ] Trene REINFORCE: reward = -final_cost
-- [ ] Eksportere som ONNX, integrere i Rust som warm-start eller refiner
-
-**C3. Generator-NN (5-10 dager)**
-- [ ] Conditional generator: tar parameter-distribusjon → genererer instans-features
-- [ ] Trening: reward = brooom_cost - solver_NN_cost (positiv = "fant en svakhet")
-- [ ] REINFORCE eller GAN-stil
-- [ ] Generere "hard-for-solver-NN" instanser
-
-**C4. Co-evolution loop (10-20 dager)**
-- [ ] Curriculum: solver-NN trenes på generator-NNs output
-- [ ] Generator-NN trenes på å finne instanser solver-NN feiler på
-- [ ] Track Elo-rating mellom generator og solver
-- [ ] Når en av de slutter å forbedre, øk diversitets-pressure
-- [ ] Evaluere mot Vroom-baseline ved hver epoch
-
-**C5. Integrasjon i brooom-solver (5-10 dager)**
-- [ ] ONNX-eksport av final solver-NN
-- [ ] Rust-side warm-start eller refiner
-- [ ] Bench på Solomon r1_0050 til r1_1000
-- [ ] Mål om vi slår Vroom konsekvent
-
-### Suksesskriterier
-
-- Solver-NN slår Vroom på ≥2 av 5 Solomon-instanser
-- Generator-NN finner instanser hvor brooom-stack faktisk feiler
-- Reproduserbar trening-pipeline
-- Forskningspublikasjon-verdig artefakt
+- ≥10 distinct regimes identified
+- Quantitative explanation of when the brooom stack is competitive
+- Empirical basis for deciding whether Project B/C is worth the work
 
 ---
 
-## Sporings-tabell
+## Project B: Generator search for hard cases (Level 2)
 
-| Prosjekt | Status | Fremgang |
+**Goal:** Build a library of 100-500 instances where brooom beats Vroom
+by ≥3 %. Training data for adversarial NN.
+
+**Dependencies:** Project A done (knowledge of regimes).
+**Time estimate:** 5-7 working days.
+
+### Checklist
+
+**B1. Evolutionary-search framework (1 day)**
+- [ ] Define the instance parameter vector (8-12 floats)
+- [ ] Mutation operators: Gaussian on each axis ± uniform flip
+- [ ] Crossover: per-axis swap between two parents
+- [ ] Selection: top-K by reward = brooom_cost / vroom_cost
+- [ ] Implement in `neural/evo_search.py`
+
+**B2. Reward pipeline (1 day)**
+- [ ] Single functor that takes a parameter vector → instance → runs
+      Vroom + brooom → cost ratio
+- [ ] Cache prior runs (same params = don't re-run)
+- [ ] Parallelise across cores
+
+**B3. Run generations (2-3 days)**
+- [ ] Initial pop: 100 random samples from the whole space
+- [ ] 20 generations × 100 individuals = 2000 evals
+- [ ] Track convergence: best/avg reward per generation
+- [ ] Save top-500 unique instances under `benchmarks/hard_corpus/`
+
+**B4. Validation (1 day)**
+- [ ] Re-run Vroom + brooom on all 500 with a different seed
+- [ ] Verify that brooom wins are reproducible
+- [ ] Write `HARD_CORPUS_REPORT.md` with the summary
+
+### Success criteria
+
+- ≥100 instances where brooom beats Vroom by ≥3 % (deterministic)
+- Diversity: the instances cover at least 3 distinct regimes
+- Ready as training input for Project C
+
+---
+
+## Project C: Adversarial NN architecture (Level 3)
+
+**Goal:** Co-evolved generator-NN + solver-NN that improve each other
+over time.
+
+**Dependencies:** Projects A + B done. PyTorch Geometric installed.
+**Time estimate:** 30-60 working days (research-grade).
+
+### Checklist
+
+**C1. Infrastructure (3-5 days)**
+- [ ] Install PyTorch Geometric + DGL
+- [ ] Set up a PyG DataLoader for instance batches
+- [ ] Build a GNN encoder (3-layer GAT or GIN) over the distance matrix
+- [ ] Build a node decoder (per-node prediction)
+- [ ] Validate on Project B's hard_corpus
+
+**C2. Solver-NN baseline (5-10 days)**
+- [ ] Pointer network with GNN encoder (extends the existing
+      `train_pointer_cvrptw.py`)
+- [ ] Train supervised: NN output predicts the Vroom solution
+- [ ] Train REINFORCE: reward = −final_cost
+- [ ] Export as ONNX, integrate into Rust as warm-start or refiner
+
+**C3. Generator-NN (5-10 days)**
+- [ ] Conditional generator: takes a parameter distribution → emits
+      instance features
+- [ ] Training: reward = brooom_cost − solver_NN_cost (positive =
+      "found a weakness")
+- [ ] REINFORCE or GAN-style
+- [ ] Generate "hard-for-solver-NN" instances
+
+**C4. Co-evolution loop (10-20 days)**
+- [ ] Curriculum: solver-NN trains on generator-NN's output
+- [ ] Generator-NN trains to find instances solver-NN fails on
+- [ ] Track Elo rating between generator and solver
+- [ ] When one stops improving, increase diversity pressure
+- [ ] Evaluate against the Vroom baseline at every epoch
+
+**C5. Integration into the brooom solver (5-10 days)**
+- [ ] ONNX export of the final solver-NN
+- [ ] Rust-side warm-start or refiner
+- [ ] Bench on Solomon r1_0050 to r1_1000
+- [ ] Goal: beat Vroom consistently
+
+### Success criteria
+
+- Solver-NN beats Vroom on ≥2 of 5 Solomon instances
+- Generator-NN finds instances where the brooom stack actually fails
+- Reproducible training pipeline
+- Publication-worthy artefact
+
+---
+
+## Tracking table
+
+| Project | Status | Progress |
 |---|---|---|
-| A — Diagnostisk regime-mapping | Ikke startet | 0/22 oppgaver |
-| B — Generator-search | Blokkert (avh. A) | 0/12 oppgaver |
-| C — Adversarial NN | Blokkert (avh. A+B) | 0/29 oppgaver |
+| A — Diagnostic regime mapping | Not started | 0/22 tasks |
+| B — Generator search | Blocked (depends on A) | 0/12 tasks |
+| C — Adversarial NN | Blocked (depends on A+B) | 0/29 tasks |
 
-## Beslutningspunkter
+## Decision points
 
-**Etter Prosjekt A:**
-- Hvis ≥10 distinkte regimer funnet → fortsett til B
-- Hvis <5 regimer → omdefinere parameter-rommet eller stoppe ML-arbeid
-- Hvis det viser seg at brooom-stack er konkurransedyktig på de fleste regimer → ML kanskje ikke verdt det
+**After Project A:**
+- If ≥10 distinct regimes are found → continue to B.
+- If <5 regimes → redefine the parameter space or stop ML work.
+- If it turns out brooom is competitive on most regimes → ML may not be
+  worth it.
 
-**Etter Prosjekt B:**
-- Hvis hard_corpus har ≥100 reproducerbare instanser → fortsett til C
-- Hvis <50 → tenk på om problem-distribusjonen er begrenset, eller om vår stack er for sterk
+**After Project B:**
+- If the hard_corpus has ≥100 reproducible instances → continue to C.
+- If <50 → consider whether the problem distribution is too narrow, or
+  whether our stack is too strong.
 
-**Etter Prosjekt C:**
-- Hvis solver-NN slår Vroom konsekvent → integrere som default warm-start
-- Hvis ikke → dokumentere som negative-result research, vurder hybride tilnærminger
+**After Project C:**
+- If solver-NN beats Vroom consistently → integrate as the default
+  warm-start.
+- If not → document as a negative-result research artefact; consider
+  hybrid approaches.
 
 ---
 
-## Risikoer
+## Risks
 
-- **Distribusjons-shift:** ML-modell trent på syntetiske instanser kan generalisere dårlig til ekte OSM-data
-- **Compute:** trening krever GPU-tid; hvis det blir uoverkommelig, vurder Apple MPS (gratis, men 5-10× tregere enn CUDA)
-- **Fortolkning:** ML-modeller er black-box; hvis de feiler, vanskelig å feilsøke
-- **Vedlikehold:** ONNX-modeller er bundet til arkitektur — ny treningsiterasjon = ny eksport
+- **Distribution shift:** ML models trained on synthetic instances may
+  generalise poorly to real OSM data.
+- **Compute:** training needs GPU time; if that becomes prohibitive,
+  consider Apple MPS (free, but 5-10× slower than CUDA).
+- **Interpretability:** ML models are black-box; debugging failures is
+  hard.
+- **Maintenance:** ONNX models are tied to architecture — every new
+  training iteration is a new export.
 
-## Avhengigheter på eksisterende kodebase
+## Dependencies on the existing codebase
 
-| Modul | Brukes i | Skal endres? |
+| Module | Used in | To be modified? |
 |---|---|---|
-| `src/embedding.rs` | A5, C2-C5 | Nei (kan utvides) |
-| `src/cache.rs` | A4, B2 | Nei |
-| `src/regression.rs` | A5 | Mulig (logistic regression) |
-| `src/neural.rs` | C5 | Ja (utvide for GNN) |
-| `benchmarks/doe.py` | A1-A4 | Mulig (utvide flag-set) |
-| `benchmarks/gen_solomon_like.py` | A1, B2 | Ja (parameter-flagg) |
-| `neural/train_*.py` | C2-C4 | Ja (legge til GNN) |
+| `src/embedding.rs` | A5, C2-C5 | No (may be extended) |
+| `src/cache.rs` | A4, B2 | No |
+| `src/regression.rs` | A5 | Possibly (logistic regression) |
+| `src/neural.rs` | C5 | Yes (extend for GNN) |
+| `benchmarks/doe.py` | A1-A4 | Possibly (extend the flag set) |
+| `benchmarks/gen_solomon_like.py` | A1, B2 | Yes (parameter flags) |
+| `neural/train_*.py` | C2-C4 | Yes (add GNN) |

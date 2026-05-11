@@ -28,21 +28,21 @@ fn main() -> std::io::Result<()> {
     println!("speedup: {:.2}x ({:.0} ms spart)", dt_seq / dt_par, (dt_seq - dt_par) * 1000.0);
     println!();
 
-    // ---- Korrekthet: sammenlign de to grafene ----
+    // ---- Correctness: compare the two graphs ----
     let mut diffs = 0usize;
 
     if g_seq.n != g_par.n || g_seq.m() != g_par.m() {
-        println!("STR: forskjellige størrelser! seq=({}, {}) par=({}, {})",
+        println!("STR: different sizes! seq=({}, {}) par=({}, {})",
                  g_seq.n, g_seq.m(), g_par.n, g_par.m());
         diffs += 1;
     }
 
-    // Den parallelle versjonen kan gi en annen NODE-ID-rekkefølge fordi blobs
-    // prosesseres ut-av-orden. Det betyr at intern-numerene er permuterte.
-    // Vi sjekker derfor *struktur* (sortert kantliste) i stedet for indeks-likhet.
+    // The parallel version can yield a different NODE-ID order because blobs
+    // are processed out of order. That means the internal indices are permuted.
+    // So we check *structure* (sorted edge list) instead of index equality.
     fn canonical_edges(g: &sssp_bench::graph::CsrGraph, coords: &[(f32, f32)]) -> Vec<(u64, u64, f32)> {
-        // Bruk (lat,lon) som identitet, runde til ~1cm presisjon for å være tolerant.
-        // Vi pakker lat/lon inn i u64.
+        // Use (lat,lon) as identity, round to ~1cm precision to be tolerant.
+        // We pack lat/lon into a u64.
         let key = |i: u32| -> u64 {
             let (la, lo) = coords[i as usize];
             // 1e7 ≈ 1cm pr degree. Cast til i32, pakk.

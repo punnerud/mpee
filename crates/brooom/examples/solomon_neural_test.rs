@@ -1,6 +1,6 @@
-//! Test om vår NN-modell (trent på N=20 uniform) generaliserer til
-//! Solomon r1_0050. Forventer dårlig kvalitet pga distribusjons-shift,
-//! men gir et målepunkt.
+//! Test whether our NN model (trained on N=20 uniform) generalizes to
+//! Solomon r1_0050. Expect poor quality due to distribution shift,
+//! but provides a measurement point.
 
 use std::path::Path;
 
@@ -13,13 +13,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let f = std::fs::File::open("benchmarks/instances/r1_0050.json")?;
     let mut problem = parse_input_reader(std::io::BufReader::new(f))?;
 
-    // Bruk haversine fallback for å få coords-like distanser. Faktisk for
-    // Solomon-instanser er coordinates allerede normalisert. Vi tar ut
-    // matrix-baserte distanser i stedet og skalerer.
+    // Use haversine fallback to get coords-like distances. Actually for
+    // Solomon instances the coordinates are already normalized. We extract
+    // matrix-based distances instead and scale.
     let _ = build_matrix(&mut problem, Some(&HaversineMatrix::default()))?;
 
-    // Konstruere CvrptwNode-vektor: index 0 = depot, 1..N = jobs.
-    // Solomon r1_0050 har depot-coordinates implicit i vehicle.start.
+    // Construct CvrptwNode vector: index 0 = depot, 1..N = jobs.
+    // Solomon r1_0050 has depot coordinates implicit in vehicle.start.
     let depot_loc = problem.vehicles[0].start.as_ref()
         .and_then(|l| l.coord)
         .unwrap_or([35.0, 35.0]);
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|tw| tw.end as f32)
         .unwrap_or(1000.0);
 
-    // Finn min/max for normalisering
+    // Find min/max for normalization
     let mut all_coords: Vec<[f64; 2]> = vec![depot_loc];
     for j in &problem.jobs {
         if let Some(c) = j.location.coord { all_coords.push(c); }
@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         y: depot_norm[1],
         demand: 0.0,
         tw_start: 0.0,
-        tw_end: max_tw_end / max_tw_end, // = 1.0 normalisert
+        tw_end: max_tw_end / max_tw_end, // = 1.0 normalized
         service: 0.0,
     });
     for j in &problem.jobs {
@@ -84,21 +84,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Max TW end: {}", max_tw_end);
     println!("  Coord range: [{:.2}, {:.2}] x [{:.2}, {:.2}]", min_x, max_x, min_y, max_y);
 
-    // NB: modellen er trent med capacity=30, horizon=4 i normaliserte enheter.
-    // Vi mater normaliserte verdier inn så nodene matcher trenings-distribusjonen.
+    // NB: the model is trained with capacity=30, horizon=4 in normalized units.
+    // We feed normalized values so nodes match the training distribution.
     let model_path = Path::new("/Users/punnerud/Downloads/brooom/neural");
     let mut model = PointerCvrptwModel::load(model_path, 1.0, 1.0)?;
 
     let routes = model.route(&nodes)?;
     println!("\n--- Pointer-NN output ---");
-    println!("  Routes generert: {}", routes.len());
+    println!("  Routes generated: {}", routes.len());
     let total_visited: usize = routes.iter().map(|r| r.len()).sum();
-    println!("  Kunder besøkt: {} / {}", total_visited, problem.jobs.len());
+    println!("  Customers visited: {} / {}", total_visited, problem.jobs.len());
 
     if total_visited < problem.jobs.len() {
-        println!("  ADVARSEL: Modellen klarte ikke å plassere alle kunder.");
-        println!("  Sannsynlig årsak: distribusjons-shift (trent på N=20 uniform,");
-        println!("  Solomon r1_0050 har clustered TW + faste kapasitet/horizon-forhold).");
+        println!("  WARNING: Model failed to place all customers.");
+        println!("  Likely cause: distribution shift (trained on N=20 uniform,");
+        println!("  Solomon r1_0050 has clustered TW + fixed capacity/horizon ratios).");
     }
 
     // Compute total tour length in normalized coords (as a sanity check).
@@ -116,8 +116,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         total += (dx * dx + dy * dy).sqrt();
     }
     println!("  Normalized tour length: {:.4}", total);
-    println!("\n  Vroom-kost (normalisert ikke direkte sammenlignbar): 1554");
-    println!("  brooom (vår LS+ILS+regret-3 stack): 1563");
+    println!("\n  Vroom cost (normalized, not directly comparable): 1554");
+    println!("  brooom (our LS+ILS+regret-3 stack): 1563");
 
     Ok(())
 }

@@ -32,7 +32,7 @@ fn main() {
             println!("  n={n}: OK");
         } else {
             let (i, a, b) = first.unwrap();
-            println!("  n={n}: FAIL {bad}, første v={i} ref={a} got={b}");
+            println!("  n={n}: FAIL {bad}, first v={i} ref={a} got={b}");
         }
     }
     println!();
@@ -64,7 +64,7 @@ fn main() {
         }
         if bad == 0 { println!("  v2 n={nv}: OK"); } else {
             let (i, a, b) = first.unwrap();
-            println!("  v2 n={nv}: FAIL {bad}, første v={i} ref={a} got={b}");
+            println!("  v2 n={nv}: FAIL {bad}, first v={i} ref={a} got={b}");
         }
     }
     println!();
@@ -94,7 +94,7 @@ fn main() {
         } else {
             let (i, a, b) = first.unwrap();
             println!(
-                "delta={delta}: FAIL {bad}, første v={i} ref={a} got={b}"
+                "delta={delta}: FAIL {bad}, first v={i} ref={a} got={b}"
             );
         }
     }

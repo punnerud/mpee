@@ -1,16 +1,16 @@
-"""Tren en liten Pointer Network på N=20 TSP via REINFORCE.
+"""Train a small Pointer Network on N=20 TSP via REINFORCE.
 
-Proof-of-concept for Neural Combinatorial Optimization integrasjon med
-brooom. TSP er enkleste VRP-variant (én kjøretøy, ingen TW, ingen kapasitet)
-— hvis dette fungerer, skalerer arkitekturen naturlig til CVRPTW med
-flere features per node.
+Proof-of-concept for Neural Combinatorial Optimization integration with
+brooom. TSP is the simplest VRP variant (one vehicle, no TW, no capacity)
+-- if this works, the architecture scales naturally to CVRPTW with
+more features per node.
 
-Bruk:
+Usage:
     /Users/punnerud/Downloads/ainmt/venv/bin/python3 neural/train_pointer_tsp.py
 
 Output:
-    - neural/pointer_tsp.onnx — den trente modellen
-    - neural/training_log.txt — tap per epoch
+    - neural/pointer_tsp.onnx -- the trained model
+    - neural/training_log.txt -- loss per epoch
 """
 
 import os

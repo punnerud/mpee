@@ -1,66 +1,68 @@
-# mpe-engine — integrasjons-oversikt
+# mpe-engine — integration overview
 
-Dette dokumentet binder sammen kontraktene som allerede er beskrevet i hver
-crate, og forklarer hvordan **dikstra** (routing) og **brooom** (VRP-solver)
-er ment å kjøre som **én prosess med felles minne**.
+This document ties together the contracts already described in each
+crate and explains how **dijkstra** (routing) and **brooom** (VRP solver)
+are designed to run as **one process with shared memory**.
 
-For dybdedetaljer, se:
+For the full detail, see:
 
-- [`crates/dikstra/integration.txt`](crates/dikstra/integration.txt) — den fulle
-  routing-API-flaten, tråding-modell, binærformat (`RTBL0001`), Apple-UMA-notater.
-- [`crates/brooom/integration.txt`](crates/brooom/integration.txt) — den fulle
-  solver-siden: hvor `Granular::from_knn_flat()` plugges inn, hvilke
-  fall-back-strategier som finnes for `evaluate_route`.
+- [`crates/dijkstra/integration.txt`](crates/dijkstra/integration.txt) — the
+  full routing API surface, threading model, binary format (`RTBL0001`),
+  Apple-UMA notes.
+- [`crates/brooom/integration.txt`](crates/brooom/integration.txt) — the
+  full solver side: where `Granular::from_knn_flat()` plugs in and what
+  fallback strategies exist for `evaluate_route`.
 
 ---
 
-## Hva er hver del?
+## What each part does
 
-### dikstra — Contraction-Hierarchies veinetts-router
+### dijkstra — Contraction-Hierarchies road-network router
 
-Tar en OSM PBF, bygger CSR → PP (omsortert) → CH (rangerte snarveier) og
-serverer:
+Takes an OSM PBF, builds CSR → PP (reordered) → CH (ranked shortcuts)
+and serves:
 
-- **Single-pair**: `ch::query(src, dst) → Option<f32>` (88 µs/kall).
-- **Many-to-many**: `ch::matrix_with_dist(srcs, dsts)` eller streaming
-  `matrix_with_dist_chunked` med RAM-tak.
+- **Single-pair**: `ch::query(src, dst) → Option<f32>` (88 µs/call).
+- **Many-to-many**: `ch::matrix_with_dist(srcs, dsts)` or streaming
+  `matrix_with_dist_chunked` with a hard RAM cap.
 - **K-NN**: `knn::knn_matrix_flat(graph, customers, k, edge_dist)` —
-  returnerer `Vec<(u32, f32, f32)>` av lengde `N*K` med `(idx, dur_s, dist_m)`.
-- **Snap til vei**: `routing::RoutingService::route(src_lat, src_lon, …)`.
+  returns `Vec<(u32, f32, f32)>` of length `N*K` with `(idx, dur_s, dist_m)`.
+- **Snap to road**: `routing::RoutingService::route(src_lat, src_lon, …)`.
 
-Bygd én gang, cache mmap'es på ~20 mikrosekunder uansett størrelse.
+Built once; the cache mmaps in ~20 µs regardless of size.
 
-### brooom — Vehicle-Routing-Problem-løser
+### brooom — Vehicle-Routing-Problem solver
 
-Tar et Vroom-kompatibelt JSON-problem (jobs + vehicles + tidsvinduer +
-kapasiteter) og finner en rute-tildeling som minimerer total kostnad.
+Takes a Vroom-compatible JSON problem (jobs + vehicles + time windows +
+capacities) and finds a route assignment that minimises total cost.
 
-Den bruker:
+It consumes:
 
-- En **avstandskilde** — i dag enten egen Haversine, OSRM via HTTP, eller en
-  forhåndsbygd matrise.
-- Et **granulært K-nærmeste-nabolag** for lokalsøk-flyttene (2-opt,
-  relocate, exchange, …).
+- A **distance source** — today either its own Haversine, OSRM over
+  HTTP, or a precomputed matrix.
+- A **granular K-nearest-neighbour graph** for the local-search moves
+  (2-opt, relocate, exchange, swap-star, Or-opt, …).
 
-Disse to inngangene er nettopp det dikstra produserer. Resultatet av
-integrasjonen er at brooom slipper sin Haversine-fallback og dikstra
-slipper det binære filformatet — alt er pekere i samme adresseplass.
+Those are precisely the two things dijkstra produces. The end result of
+integration is that brooom drops its Haversine fallback and dijkstra
+drops the binary file format — everything is pointers in the same
+address space.
 
 ---
 
-## Integrasjonskontrakten i én skjerm
+## The integration contract in one screen
 
 ```rust
-// 1. Last CH-cachen mmap'd én gang per prosess (≈20 µs uansett størrelse)
+// 1. Load the CH cache mmap'd once per process (≈20 µs regardless of size)
 let pp = sssp_bench::cache_pp::load_mmap("data/greater-london.osm.pbf.pp")?;
 let ch = sssp_bench::cache_ch::load_mmap("data/greater-london.osm.pbf.ch")?;
 
-// 2. Konverter VRP-kundenes lat/lon til pp-graf-id-er via snap
+// 2. Convert VRP customer lat/lon into pp graph IDs via snap
 let customers: Vec<u32> = problem.jobs.iter()
     .map(|job| snap_lat_lon(&pp, job.lat, job.lon))
     .collect();
 
-// 3. Bygg granulær K=160 K-NN — 1.22 s for 50 000 kunder, 92 MB output
+// 3. Build the granular K=160 K-NN — 1.22 s for 50 000 customers, 92 MB output
 let knn: Vec<(u32, f32, f32)> = sssp_bench::knn::knn_matrix_flat(
     &pp.graph,
     &customers,
@@ -68,79 +70,86 @@ let knn: Vec<(u32, f32, f32)> = sssp_bench::knn::knn_matrix_flat(
     Some(pp.edge_dist.as_slice()),
 );
 
-// 4. ZERO-COPY: brooom konsumerer SAMME Vec direkte
+// 4. ZERO-COPY: brooom consumes the SAME Vec directly
 let granular = brooom::granular::Granular::from_knn_flat(
     &knn,
     customers.len(),
     160,
 );
 
-// 5. Solve. Hot path er nå pure array-indexing i delt minne.
+// 5. Solve. The hot path is now pure array indexing in shared memory.
 let solved = brooom::solver::solve_with_matrix(&problem, &granular, &cfg)?;
 ```
 
-**Ingen filer skrives, ingen sockets åpnes, ingen kopier mellom motorene.**
-Hele forflyttingen er en `&Vec<(u32, f32, f32)>`-referanse på tvers av
-crate-grensen.
+**No files are written, no sockets opened, no copies between the
+engines.** The whole transfer is a single `&Vec<(u32, f32, f32)>`
+reference across the crate boundary.
 
 ---
 
-## Hvorfor "on the fly" istedenfor full matrise
+## Why "on the fly" instead of a full matrix
 
-For N = 50 000 kunder er en full N×N matrise med duration+distance som f32
-≈ 20 GB. K-NN med K=160 er ≈ 92 MB. Reduksjonen er ~220× på dette
-størrelsesnivået.
+For N = 50 000 customers, a full N×N matrix with duration + distance as
+f32 is ≈ 20 GB. K-NN with K=160 is ≈ 92 MB. That is a ~220× reduction
+at this scale.
 
-Det er to typer oppslag VRP-løseren gjør:
+The VRP solver performs two kinds of distance look-ups:
 
-1. **Hot path (10-1000 M/s)**: "Er j blant K nærmeste til i?" Svar via K-NN-array.
-2. **Cold path (~10k/s)**: "Hva er avstanden depot→kunde X?" Svar via
-   `ch::query` (88 µs) — fortsatt billig fordi det skjer sjelden.
+1. **Hot path (10–1000 M/s)**: "is j among the K-nearest of i?" Answered
+   from the K-NN array.
+2. **Cold path (~10 k/s)**: "what is the distance depot → customer X?"
+   Answered via `ch::query` (88 µs) — still cheap because it happens
+   rarely.
 
-Den fulle matrisen er aldri nødvendig hvis K-NN er stort nok (K ≥ 80) og
-depot-raden er prekomputert separat. Det er nøyaktig hva brooom og dikstra
-er optimalisert for å gjøre sammen.
+The full matrix is never needed if K-NN is large enough (K ≥ 80) and
+the depot row is precomputed separately. This is exactly what brooom
+and dijkstra were optimised to do together.
 
 ---
 
-## Hva som mangler (denne committen)
+## What is missing (this commit)
 
-1. **`mpe-cli`-kommandoene gjør ikke calls ennå** — bare scaffolding. Når
-   brooom og sssp_bench legges inn som path-dep i `crates/mpe-cli/Cargo.toml`
-   (utkommentert i dag), er resten ~50 linjer rør.
-2. **brooom har ikke en `MmmMatrixSource`-impl** som tar en dikstra `&ContractionHierarchy`.
-   Se `crates/brooom/integration.txt` §2 Step 2 for den 40-linjers impl-en.
-3. **Snap-laget** (lat/lon → pp-node-id) ligger i `dikstra::routing::RoutingService`,
-   men brooom forventer at kundene allerede har node-id-er. Trenger en liten
-   adapter i `mpe-cli`.
+1. **The `mpe-cli` subcommands don't make calls yet** — scaffolding only.
+   Once brooom and sssp_bench are added as path dependencies in
+   `crates/mpe-cli/Cargo.toml` (commented out today), the rest is roughly
+   50 lines of plumbing.
+2. **brooom does not have an `MmmMatrixSource` impl** that consumes a
+   dijkstra `&ContractionHierarchy`. See
+   `crates/brooom/integration.txt` §2 Step 2 for the ~40-line impl.
+3. **The snap layer** (lat/lon → pp node ID) lives in
+   `dijkstra::routing::RoutingService`, but brooom expects customers to
+   already carry node IDs. A small adapter belongs in `mpe-cli`.
 
-Når disse tre er på plass kjører `mpe pipeline <region> <problem.json>` ende-til-ende
-i én Rust-prosess uten å rør disken etter cache-load.
+Once those three are in place, `mpe pipeline <region> <problem.json>`
+runs end-to-end in a single Rust process without touching disk after
+the cache load.
 
 ---
 
 ## Apple Silicon: unified memory
 
-På M-serie deler CPU og GPU samme fysiske RAM. dikstra kan skrive K-NN-data
-direkte inn i en `wgpu::Buffer` med `MAP_WRITE | STORAGE`, og brooom sin
-GPU-megakernel leser det uten kopi. Det sparer ~92 MB peak RAM ved N=50k.
-Se `crates/dikstra/integration.txt` §8 og `crates/brooom/integration.txt` §5
-for koden.
+On the M-series the CPU and GPU share the same physical RAM. dijkstra
+can write K-NN data directly into a `wgpu::Buffer` mapped with
+`MAP_WRITE | STORAGE`, and brooom's GPU megakernel reads it without a
+copy. That saves ~92 MB of peak RAM at N=50k. See
+`crates/dijkstra/integration.txt` §8 and `crates/brooom/integration.txt`
+§5 for the code.
 
 ---
 
-## Trådmodell
+## Threading model
 
-Begge motorer bruker `rayon` over en delt global thread pool. dikstra anbefaler
-**én `PathScratch` per worker** for å unngå allocator-strid (drop fra 51k til
-14k spørringer/s ellers). brooom sitt lokalsøk er allerede `Send + Sync` og
-trives med samme pool. Mpe-cli skal sette opp pool-en én gang og la begge
-operere innenfor `pool.install(|| { … })`.
+Both engines use `rayon` over a shared global thread pool. dijkstra
+recommends **one `PathScratch` per worker** to avoid allocator
+contention (drops from 51k to 14k queries/s otherwise). brooom's
+local-search is already `Send + Sync` and is happy with the same pool.
+mpe-cli should configure the pool once and let both operate inside
+`pool.install(|| { … })`.
 
 ---
 
-## Referanseimplementasjon
+## Reference implementation
 
-Når denne integrasjonen ferdigstilles havner glue-koden i
-`crates/mpe-cli/src/main.rs` (subkommandoene `solve` og `pipeline`). Mønsteret
-er allerede skissert som kommentar-block der.
+When this integration is finished, the glue code lives in
+`crates/mpe-cli/src/main.rs` (the `solve` and `pipeline` subcommands).
+The pattern is already sketched as comments there.

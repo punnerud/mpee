@@ -1,12 +1,13 @@
-//! Word ladder graph: hver node er et ord. To ord er naboer hvis de har
-//! samme lengde og skiller seg på *nøyaktig* én bokstav.
+//! Word ladder graph: each node is a word. Two words are neighbours if they
+//! have the same length and differ in *exactly* one letter.
 //!
-//! Eksempel: cat → bat → bag → big → pig
+//! Example: cat → bat → bag → big → pig
 //!
-//! Effektiv naboberegning: for hvert ord, generer alle "wildcard"-mønstre
-//! (én bokstav byttet ut med '*'). Ord som deler samme wildcard er naboer.
+//! Efficient neighbour computation: for each word, generate all "wildcard"
+//! patterns (one letter replaced with '*'). Words sharing a wildcard are
+//! neighbours.
 //!
-//! Vekter: alle = 1.0. SSSP gir BFS-avstand (antall bokstavbytter).
+//! Weights: all = 1.0. SSSP gives BFS distance (number of letter swaps).
 
 use crate::graph::CsrGraph;
 use std::collections::HashMap;
@@ -74,8 +75,8 @@ pub fn build_word_ladder<P: AsRef<Path>>(
     Ok((g, words))
 }
 
-/// Finn ordet med høyest indeks i kandidatene som er gyldig (som en
-/// rimelig `src` for SSSP). Returnerer (idx, ord).
+/// Find the word with the highest index in the candidates that is valid (as
+/// a reasonable `src` for SSSP). Returns (idx, word).
 pub fn pick_word<'a>(words: &'a [String], target: &str) -> Option<(u32, &'a str)> {
     words
         .iter()

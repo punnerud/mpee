@@ -1,4 +1,4 @@
-//! Binær disk-cache for CSR-graf og koordinater.
+//! Binary disk cache for CSR graph and coordinates.
 //!
 //! Format (little-endian, native f32/u32):
 //!   magic:   8 bytes "SSSPCSR1"
@@ -9,13 +9,13 @@
 //!   edge_w:  m × f32
 //!   coords:  n × (f32, f32)
 //!
-//! To lasterier:
-//!   * `load`     — leser hele fila inn i Vec via `read_exact`. ~4 ms for
-//!                  London (cache i page cache).
-//!   * `load_mmap`— mmap-er fila og returnerer en CsrGraph der head/edge_to/
-//!                  edge_w peker direkte inn i page-cachen. ~1 ms uansett
-//!                  graf-størrelse, og spørringer touch'er sider lazy via
-//!                  page-fault.
+//! Two loaders:
+//!   * `load`     — reads the whole file into Vec via `read_exact`. ~4 ms for
+//!                  London (cached in page cache).
+//!   * `load_mmap`— mmaps the file and returns a CsrGraph where head/edge_to/
+//!                  edge_w point directly into the page cache. ~1 ms regardless
+//!                  of graph size, and queries touch pages lazily via
+//!                  page fault.
 
 use crate::buffer::Buffer;
 use crate::graph::CsrGraph;
@@ -39,8 +39,8 @@ pub fn save<P: AsRef<Path>>(
     coords: &[(f32, f32)],
     edge_dist: &[f32],
 ) -> std::io::Result<()> {
-    assert_eq!(coords.len(), g.n, "coords-lengde må matche n");
-    assert_eq!(edge_dist.len(), g.m(), "edge_dist må matche m");
+    assert_eq!(coords.len(), g.n, "coords length must match n");
+    assert_eq!(edge_dist.len(), g.m(), "edge_dist must match m");
     let f = OpenOptions::new()
         .write(true)
         .create(true)
@@ -59,8 +59,8 @@ pub fn save<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Eager-load: kopier hele fila inn i Vecs. Trygg og garantert at all data
-/// er i prosess-RAM når funksjonen returnerer.
+/// Eager load: copy the whole file into Vecs. Safe and guarantees that all
+/// data is in process RAM when the function returns.
 pub fn load<P: AsRef<Path>>(
     path: P,
 ) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>)> {
@@ -70,7 +70,7 @@ pub fn load<P: AsRef<Path>>(
     if &magic != MAGIC {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "ugyldig magic — cache-fil korrupt eller annen versjon",
+            "invalid magic — cache file corrupt or wrong version",
         ));
     }
     let mut buf8 = [0u8; 8];
@@ -106,12 +106,12 @@ pub fn load<P: AsRef<Path>>(
     ))
 }
 
-/// Mmap-load: åpner fila og returnerer CsrGraph der head/edge_to/edge_w er
-/// pekere inn i mmappet. Faktisk lasting skjer lazy via page-fault. Fungerer
-/// for grafer langt større enn RAM (OS dropper sider under press).
+/// Mmap load: opens the file and returns a CsrGraph where head/edge_to/edge_w
+/// are pointers into the mmap. Actual loading happens lazily via page fault.
+/// Works for graphs much larger than RAM (the OS drops pages under pressure).
 ///
-/// Coords returneres også som Buffer (mmap-backed). Bruk `.as_slice()` for
-/// direkte tilgang.
+/// Coords are also returned as a Buffer (mmap-backed). Use `.as_slice()` for
+/// direct access.
 pub fn load_mmap<P: AsRef<Path>>(
     path: P,
 ) -> std::io::Result<(CsrGraph, Buffer<(f32, f32)>, Buffer<f32>)> {
@@ -120,7 +120,7 @@ pub fn load_mmap<P: AsRef<Path>>(
     if mmap.len() < HEADER_BYTES || &mmap[..8] != MAGIC {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "ugyldig magic — cache-fil korrupt eller annen versjon",
+            "invalid magic — cache file corrupt or wrong version",
         ));
     }
     let n = u64::from_le_bytes(mmap[8..16].try_into().unwrap()) as usize;
@@ -135,7 +135,7 @@ pub fn load_mmap<P: AsRef<Path>>(
     if mmap.len() < expected {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("cache-fil for liten: {} bytes, forventet {}", mmap.len(), expected),
+            format!("cache file too small: {} bytes, expected {}", mmap.len(), expected),
         ));
     }
 

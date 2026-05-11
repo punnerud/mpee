@@ -1,10 +1,10 @@
-//! Megakernel demo: hele 2-opt LS-loopen i én GPU-dispatch.
+//! Megakernel demo: the entire 2-opt LS loop in a single GPU dispatch.
 //!
-//! Sammenligner mot Phase-4 multi-dispatch loop på samme problem og samme
-//! starting point, måler:
-//!   - Wallclock per LS-loop
-//!   - Sluttkostnad (skal være identisk — samme 2-opt-search-rom)
-//!   - Antall iterasjoner til konvergens
+//! Compares against the Phase-4 multi-dispatch loop on the same problem and
+//! same starting point, measures:
+//!   - Wallclock per LS loop
+//!   - Final cost (should be identical — same 2-opt search space)
+//!   - Iteration count to convergence
 //!
 //! Distance-only 2-opt; TW validates after via precompute_all + rollback
 //! if needed (handled in user code, not in megakernel).

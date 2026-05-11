@@ -1,5 +1,5 @@
-// Test delta_stepping AND duan_inspired på flere delta-verdier på London-graf.
-// Hvis vi kan reprodusere FAIL med en spesifikk delta, kan vi minimere.
+// Test delta_stepping AND duan_inspired on multiple delta values on the London graph.
+// If we can reproduce FAIL with a specific delta, we can minimize.
 
 use sssp_bench::delta_step::delta_stepping;
 use sssp_bench::dijkstra::{dijkstra_binary, INF};
@@ -42,7 +42,7 @@ fn main() -> std::io::Result<()> {
     let deltas = [
         0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0, 640.0,
     ];
-    println!("delta_stepping sweep (kilde={src}):");
+    println!("delta_stepping sweep (source={src}):");
     for &d in &deltas {
         let s = delta_stepping(&g, src, d);
         let (bad, first) = count_bad(&r, &s);

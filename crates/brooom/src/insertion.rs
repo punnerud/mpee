@@ -442,32 +442,32 @@ pub fn solomon_i1_insertion(problem: &Problem, matrix: &Matrix, lambda: f64) -> 
 }
 
 
-/// Komplett Solomon I1 (1987) med både c11 og c12.
+/// Complete Solomon I1 (1987) with both c11 and c12.
 ///
-/// **Status: implementert men ikke aktivert.** Min c12-beregning fanger kun
-/// arrival-shift ved IMMEDIATE next position, ikke kumulativ push-forward
-/// gjennom hele ruten. Klassisk Solomon I1 propagerer skiftet helt til ruten
-/// stabiliserer seg ved en stop med tilstrekkelig slack. Test viste +3.8 til
-/// +4.6% regresjon på N=500 vs greedy multi-start. Full kumulativ
-/// implementasjon krever O(L) per probe = O(N·M·L²) total — for tregt for
-/// N=1000.
+/// **Status: implemented but not activated.** Our c12 computation only
+/// captures arrival shift at the IMMEDIATE next position, not cumulative
+/// push-forward through the entire route. Classical Solomon I1 propagates
+/// the shift until the route stabilizes at a stop with enough slack. Tests
+/// showed +3.8 to +4.6% regression on N=500 vs greedy multi-start. A full
+/// cumulative implementation costs O(L) per probe = O(N*M*L^2) total — too
+/// slow for N=1000.
 #[allow(dead_code)]
 ///
-/// For hver iter: for hver pending task u, finn beste innsettingsposisjon
-/// (i, u, j) i åpne ruter ved å minimere
-///   c1(i, u, j) = α1·c11(i, u, j) + α2·c12(i, u, j)
-/// hvor
-///   c11 = d_iu + d_uj − μ·d_ij        (insertion cost, vi bruker cost-delta)
-///   c12 = b_uj_new − b_uj_old         (TW arrival shift at j)
+/// For each iter: for each pending task u, find the best insertion position
+/// (i, u, j) in open routes by minimizing
+///   c1(i, u, j) = a1*c11(i, u, j) + a2*c12(i, u, j)
+/// where
+///   c11 = d_iu + d_uj - mu*d_ij        (insertion cost, we use cost-delta)
+///   c12 = b_uj_new - b_uj_old          (TW arrival shift at j)
 ///
-/// Velg jobb u med max c2(u) = λ·d_0u − c1(u). Insert.
+/// Pick job u with max c2(u) = lambda*d_0u - c1(u). Insert.
 ///
-/// Sammenliknet med `solomon_i1_insertion`: den eldre versjonen mangler c12.
-/// Solomon I1's TW-bevissthet ligger i c12 — fremover-shift av downstream
-/// stops får jobben "straffet" hvis insertingen pusher ankomster nær eller
-/// over tidsvindu-grenser.
+/// Compared to `solomon_i1_insertion`: the older version lacks c12.
+/// Solomon I1's TW awareness is in c12 — the forward shift of downstream
+/// stops penalizes a job if insertion pushes arrivals near or past
+/// time-window bounds.
 ///
-/// Standard Solomon-parametere (1987): α1=α2=0.5, μ=1, λ=2.
+/// Standard Solomon parameters (1987): a1=a2=0.5, mu=1, lambda=2.
 pub fn solomon_i1_full(
     problem: &Problem,
     matrix: &Matrix,

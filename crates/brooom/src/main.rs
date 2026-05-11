@@ -153,7 +153,7 @@ struct Cli {
     /// Cross-seed validering (rest_list 33c, 2026-05-10): N=1000 K=10 ga
     /// −2.43% mot flat med 9.4× speedup, og lukket Vroom-gap fra +2.56%
     /// til +0.08%. N=500 K=5 ga −0.72% med 3.7× speedup. N<500 ikke nyttig.
-    /// Pass eksplisitt 1 for å deaktivere selv på N≥500.
+    /// Pass 1 explicitly to disable even on N>=500.
     #[arg(long, default_value_t = 0)]
     decompose: usize,
 
@@ -221,7 +221,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Effective hyperparameters — start from CLI values, optionally override
-    // with the median of cached neighbors (Nivå 3: hyperparameter-overføring).
+    // with the median of cached neighbors (Level 3: hyperparameter transfer).
     let mut eff_max_passes = cli.max_passes;
     // None on the CLI means "auto-tune by N"; cache paths below set this to
     // false when they override granular_k explicitly.
@@ -294,10 +294,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if auto_k_active {
-        // Cross-seed validering (rest_list 26f/26h, 2026-05-10):
-        //   N≥500 → K=80 (brings N=500 nær Vroom-paritet, +0.18%)
-        //   N≥100 → K=40 (vinner cross-seed mot Vroom på N=100/250)
-        //   ellers → K=20 (default, N=50 ikke-konkluderende)
+        // Cross-seed validation (rest_list 26f/26h, 2026-05-10):
+        //   N>=500 -> K=80 (brings N=500 near Vroom parity, +0.18%)
+        //   N>=100 -> K=40 (wins cross-seed vs Vroom on N=100/250)
+        //   else   -> K=20 (default, N=50 inconclusive)
         let n = problem.jobs.len() + problem.shipments.len();
         eff_granular_k = if n >= 500 { 80 }
                          else if n >= 100 { 40 }

@@ -465,13 +465,13 @@ fn try_two_opt_star(
     }
 }
 
-/// SwapStar (Vidal 2022, HGS-CVRP): bytt to tasks t1∈r1, t2∈r2 men plasser
-/// hver task på sin BESTE posisjon i den andre ruten — ikke på den gamle
-/// posisjonen til den utbyttede tasken. Ulik try_exchange_with som låser
-/// byttet til samme posisjon. Dyrere men finner moves de andre operatorene
-/// systematisk overser.
+/// SwapStar (Vidal 2022, HGS-CVRP): swap two tasks t1 in r1, t2 in r2 but
+/// place each task at its BEST position in the other route — not at the
+/// old position of the swapped-out task. Unlike try_exchange_with, which
+/// locks the swap to the same position. More expensive but finds moves
+/// the other operators systematically miss.
 ///
-/// Granular: kun par (t1, t2) hvor t2 ligger blant K nærmeste til t1.
+/// Granular: only pairs (t1, t2) where t2 is among the K nearest to t1.
 fn try_swap_star(
     problem: &Problem,
     matrix: &Matrix,
@@ -508,14 +508,14 @@ fn try_swap_star(
         for j in 0..n2 {
             let t2 = route2.steps[j];
 
-            // Granular-filter: hopp over par der t2 ikke er nær t1.
+            // Granular filter: skip pairs where t2 is not near t1.
             if let Some(set) = &neighbor_set {
                 let l = t2.description(problem).location.index;
                 if l.map_or(true, |l| !set.contains(&l)) { continue; }
             }
             if !veh1.has_skills(t2.skills(problem)) { continue; }
 
-            // Beste posisjon for t2 i r1\{t1}
+            // Best position for t2 in r1\{t1}
             let best1 = best_insertion(problem, matrix, veh1, &r1_minus, t2);
             let Some((cand1, m1)) = best1 else { continue };
 
@@ -524,7 +524,7 @@ fn try_swap_star(
             r2_minus.extend_from_slice(&route2.steps[..j]);
             r2_minus.extend_from_slice(&route2.steps[j + 1..]);
 
-            // Beste posisjon for t1 i r2\{t2}
+            // Best position for t1 in r2\{t2}
             let best2 = best_insertion(problem, matrix, veh2, &r2_minus, t1);
             let Some((cand2, m2)) = best2 else { continue };
 
@@ -542,8 +542,8 @@ fn try_swap_star(
     }
 }
 
-/// Hjelper for SwapStar: prøv hver innsettingsposisjon for `task` i `base`,
-/// returner den med lavest evaluert kost (eller None hvis ingen er feasible).
+/// Helper for SwapStar: try each insertion position for `task` in `base`,
+/// return the one with the lowest evaluated cost (or None if none feasible).
 fn best_insertion(
     problem: &Problem,
     matrix: &Matrix,

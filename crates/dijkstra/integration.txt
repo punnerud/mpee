@@ -6,7 +6,8 @@ This file is the practical reference for anyone wiring the routing engine into
 another Rust binary (a solver, a GUI, an HTTP service). Audience: brooom-style
 VRP solvers, custom route consumers, future agents continuing this work.
 
-Repo: /Users/punnerud/Downloads/dikstra
+Original standalone repo path: /Users/punnerud/Downloads/dikstra
+(Now lives at crates/dijkstra/ inside the mpe-engine workspace.)
 Crate name: sssp_bench
 Target machine baseline: Apple M3 Pro (6P + 5E cores, 36 GB unified RAM)
 Test graph baseline: Greater London OSM, n=1 159 073, m_aug=3 899 581
@@ -521,8 +522,10 @@ Not implemented (in order of likely future need):
 12. CONTACT POINTS  (for the next agent who picks this up)
 ================================================================================
 
-    Memory at /Users/punnerud/.claude/projects/-Users-punnerud-Downloads-dikstra/memory/
-        documents user preferences (engine-layer focus, not VRP optimiser).
+    Historical user-preferences notes were kept at
+        ~/.claude/projects/-Users-punnerud-Downloads-dikstra/memory/
+        (engine-layer focus, not VRP optimiser). The crate itself now
+        lives at crates/dijkstra/ inside the mpe-engine workspace.
     README.md — architecture overview, benchmarks, build instructions.
 
 End of integration.txt

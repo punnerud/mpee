@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/brooom",
-    "crates/dikstra",
+    "crates/dijkstra",
     "crates/mpe-cli",
 ]
 

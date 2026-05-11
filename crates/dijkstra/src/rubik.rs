@@ -1,16 +1,16 @@
-//! Rubik's pocket cube (2×2×2) state graph — *kun hjørne-permutasjon*.
+//! Rubik's pocket cube (2×2×2) state graph — *corner permutation only*.
 //!
-//! Vi ignorerer hjørne-orientering for enkelhet. Det gir en mindre, men
-//! fortsatt regulær graf:
-//!   * 8! = 40 320 stillinger
-//!   * 6 grunntrekk: U, U2, R, R2, F, F2 (clockwise + halvtrekk)
-//!   * Hvert trekk er sin egen invers eller halvtrekk er selvinvers; vi
-//!     legger til både trekk og inverse ved å gjøre grafen undirected.
+//! We ignore corner orientation for simplicity. This gives a smaller, but
+//! still regular graph:
+//!   * 8! = 40 320 positions
+//!   * 6 base moves: U, U2, R, R2, F, F2 (clockwise + half turn)
+//!   * Each move is its own inverse or a half turn is self-inverse; we
+//!     add both move and inverse by making the graph undirected.
 //!
-//! Diameter: 6 (alle posisjon-permutasjoner kan løses i ≤ 6 trekk).
-//! BFS-distansen fra SOLVED gir oss den klassiske "God's number"-regningen.
+//! Diameter: 6 (every position permutation can be solved in ≤ 6 moves).
+//! BFS distance from SOLVED gives us the classic "God's number" calculation.
 //!
-//! Vekter: alle = 1. SSSP fra SOLVED gir antall trekk til hver stilling.
+//! Weights: all = 1. SSSP from SOLVED gives the number of moves to each position.
 
 use crate::graph::CsrGraph;
 use std::collections::HashMap;
@@ -19,9 +19,9 @@ pub type State = [u8; 8];
 
 pub const SOLVED: State = [0, 1, 2, 3, 4, 5, 6, 7];
 
-/// Anvend ett av 6 grunntrekk (clockwise) på state. Halvtrekk kan oppnås
-/// ved å anvende clockwise to ganger; inverse ved å anvende halvtrekk +
-/// clockwise eller la oss generere det eksplisitt.
+/// Apply one of 6 base moves (clockwise) to state. Half turns can be obtained
+/// by applying clockwise twice; inverses by applying half turn +
+/// clockwise, or we generate it explicitly.
 #[inline]
 pub fn apply_cw(s: State, m: u8) -> State {
     let mut t = s;
@@ -62,8 +62,8 @@ pub fn apply_half(s: State, m: u8) -> State {
     apply_cw(apply_cw(s, m), m)
 }
 
-/// BFS fra SOLVED og bygg full graf over alle nådde tilstander. Returnerer
-/// (CsrGraph, dybder).
+/// BFS from SOLVED and build the full graph over all reached states. Returns
+/// (CsrGraph, depths).
 pub fn build_pocket_cube_graph() -> (CsrGraph, Vec<u8>) {
     let mut id_of: HashMap<State, u32> = HashMap::with_capacity(50_000);
     let mut depth: Vec<u8> = Vec::with_capacity(50_000);

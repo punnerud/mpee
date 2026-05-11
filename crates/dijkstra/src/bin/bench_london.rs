@@ -1,8 +1,8 @@
-//! Benchmark SSSP-algoritmer på Greater London routing-graf.
+//! Benchmark SSSP algorithms on the Greater London routing graph.
 //!
-//! Hver SSSP fra én kilde gir korteste avstand til alle ~1M noder, dvs.
-//! ~1M (fra, til) ruter. Vi kjører fra K random kilder og rapporterer
-//! gjennomsnitt + spredning.
+//! Each SSSP from a single source gives the shortest distance to all ~1M
+//! nodes, i.e. ~1M (from, to) routes. We run from K random sources and report
+//! mean + spread.
 
 use std::time::Instant;
 
@@ -16,10 +16,10 @@ use sssp_bench::osm_profile::Profile;
 
 fn verify(reference: &[f32], other: &[f32], label: &str) -> bool {
     if reference.len() != other.len() {
-        println!("    ! {label}: lengde stemmer ikke");
+        println!("    ! {label}: length mismatch");
         return false;
     }
-    let eps = 1e-3_f32; // litt slappere enn syntetic siden vekter er meter (større tall)
+    let eps = 1e-3_f32; // a bit looser than synthetic since weights are metres (larger numbers)
     let mut bad = 0usize;
     let mut first_bad = None;
     for i in 0..reference.len() {
@@ -42,7 +42,7 @@ fn verify(reference: &[f32], other: &[f32], label: &str) -> bool {
     } else {
         let (i, a, b) = first_bad.unwrap();
         println!(
-            "    FAIL {label}: {bad} mismatches (første v={i}: ref={a}, fikk={b})"
+            "    FAIL {label}: {bad} mismatches (first v={i}: ref={a}, got={b})"
         );
         false
     }
@@ -125,9 +125,9 @@ fn main() -> std::io::Result<()> {
     let bw = 4.0 * delta;
     println!("  delta = {delta:.2} m, bucket_width(duan) = {bw:.2} m");
 
-    // Vi vil kjøre fra K random kilder. Men på en realistisk OSM-graf er
-    // mange noder ikke på den største komponenten — pick kun noder med grad
-    // ≥ 1.
+    // We want to run from K random sources. But on a realistic OSM graph
+    // many nodes are not in the largest component — pick only nodes with
+    // degree ≥ 1.
     let mut candidates: Vec<u32> = Vec::new();
     for u in 0..g.n {
         if g.head[u + 1] - g.head[u] > 0 {
@@ -135,10 +135,10 @@ fn main() -> std::io::Result<()> {
         }
     }
     if candidates.is_empty() {
-        eprintln!("ingen vertices med kanter — avbryter");
+        eprintln!("no vertices with edges — aborting");
         std::process::exit(1);
     }
-    println!("  {} vertices har minst én kant (kandidater for kilde)", candidates.len());
+    println!("  {} vertices have at least one edge (source candidates)", candidates.len());
 
     let k_sources = 5usize;
     let mut rng = Rng(20260509);
@@ -147,7 +147,7 @@ fn main() -> std::io::Result<()> {
         let pick = rng.range(candidates.len() as u32) as usize;
         sources.push(candidates[pick]);
     }
-    println!("  kilder: {:?}", sources);
+    println!("  sources: {:?}", sources);
     println!();
 
     // For each algorithm, accumulate timings across the K sources.
@@ -161,7 +161,7 @@ fn main() -> std::io::Result<()> {
     let mut total_checks = 0usize;
 
     for (idx, &src) in sources.iter().enumerate() {
-        println!("[kilde {}: vertex {}]", idx + 1, src);
+        println!("[source {}: vertex {}]", idx + 1, src);
 
         let t = Instant::now();
         let d_bin = dijkstra_binary(&g, src);
@@ -169,7 +169,7 @@ fn main() -> std::io::Result<()> {
         t_bin.add(dt);
         let reachable = count_reachable(&d_bin);
         println!(
-            "  dijkstra_binary: {:>7.1} ms   ({} av {} noder nådd)",
+            "  dijkstra_binary: {:>7.1} ms   ({} of {} nodes reached)",
             dt, reachable, g.n
         );
 

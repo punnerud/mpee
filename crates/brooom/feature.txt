@@ -1,146 +1,146 @@
-brooom — VRP-løser i Rust (alternativ til Vroom)
-=================================================
+brooom — VRP solver in Rust (alternative to Vroom)
+==================================================
 
-Status-symboler:
-  [x] ferdig    [~] delvis    [ ] ikke startet
-
-------------------------------------------------------------
-KJERNE — DATAMODELL OG PROBLEMTYPER
-------------------------------------------------------------
-[x] Problem-struktur (jobs, shipments, vehicles, matrices)
-[x] Job med location, service-tid, tidsvinduer, mengde, skills, prioritet
-[x] Shipment (pickup + delivery par, samme rute)
-[x] Vehicle med start/end, kapasitet, skills, tidsvindu, kostnad, hastighet
-[x] Multidimensjonal kapasitet (vektorer)
-[x] Time windows (flere per jobb)
-[x] Service- og setup-tid
-[x] Open trips (kjøretøy returnerer ikke til depot — utelat `end`)
-[x] Skills/krav (jobb må matche kjøretøyets ferdigheter)
-[x] Priority (sortering ved insetting)
-[x] Max travel time / distance / tasks per rute
-[x] Speed factor per kjøretøy
-[x] Fixed cost og kostnad per time
+Status symbols:
+  [x] done    [~] partial    [ ] not started
 
 ------------------------------------------------------------
-DISTANSE/VARIGHETS-MATRISE
+CORE — DATA MODEL AND PROBLEM TYPES
 ------------------------------------------------------------
-[x] Matrix-trait (durations + distances)  -> trait MatrixSource
-[x] Haversine fallback (ingen ekstern tjeneste)
-[x] OSRM table-API klient (HTTP)
-[ ] Valhalla matrix-klient
-[ ] OpenRouteService matrix-klient
-[x] Custom user-supplied matrise (i input under "matrices")
-[ ] Caching av matrise på disk
-[x] Profilvalg (kjøretøy.profile -> OSRM /table profile)
-[ ] Geometry/polyline-henting per rute (ekstra kall)
+[x] Problem structure (jobs, shipments, vehicles, matrices)
+[x] Job with location, service time, time windows, amount, skills, priority
+[x] Shipment (pickup + delivery pair, same route)
+[x] Vehicle with start/end, capacity, skills, time window, cost, speed
+[x] Multidimensional capacity (vectors)
+[x] Time windows (multiple per job)
+[x] Service and setup time
+[x] Open trips (vehicle does not return to depot — omit `end`)
+[x] Skills / requirements (job must match the vehicle's skills)
+[x] Priority (ordering at insertion time)
+[x] Max travel time / distance / tasks per route
+[x] Speed factor per vehicle
+[x] Fixed cost and per-hour cost
 
 ------------------------------------------------------------
-LØSNINGSALGORITMER
+DISTANCE / DURATION MATRIX
 ------------------------------------------------------------
-[x] Solution-representasjon (ruter + ikke-tilordnede)
+[x] Matrix trait (durations + distances)  -> trait MatrixSource
+[x] Haversine fallback (no external service)
+[x] OSRM table-API client (HTTP)
+[ ] Valhalla matrix client
+[ ] OpenRouteService matrix client
+[x] User-supplied custom matrix (in input under "matrices")
+[ ] Caching matrices to disk
+[x] Profile selection (vehicle.profile -> OSRM /table profile)
+[ ] Geometry/polyline fetch per route (extra call)
+
+------------------------------------------------------------
+SOLUTION ALGORITHMS
+------------------------------------------------------------
+[x] Solution representation (routes + unassigned)
 [x] Greedy cheapest insertion (Solomon-style sequential)
-[~] Parallel insertion — bare den greedy varianten foreløpig
-[ ] Regret-k insertion (k=2,3) — VIKTIG for å lukke kostgap mot Vroom
-[ ] Flere startløsninger med varierte parametere
-[x] Lokalsøk-rammeverk (per-task best-improvement med don't-look bits)
-[x] Operator: Relocate (Or-opt 1-3 noder, intra og inter)
-[x] Operator: 2-opt intra-route (segmentreversering)
-[x] Operator: Exchange inter-route (bytt to enkeltnoder)
-[ ] Operator: Cross-exchange (bytt segmenter mellom ruter)
+[~] Parallel insertion — only the greedy variant so far
+[ ] Regret-k insertion (k=2,3) — IMPORTANT for closing the cost gap to Vroom
+[ ] Multiple starting solutions with varied parameters
+[x] Local-search framework (per-task best-improvement with don't-look bits)
+[x] Operator: Relocate (Or-opt 1-3 nodes, intra and inter)
+[x] Operator: 2-opt intra-route (segment reversal)
+[x] Operator: Exchange inter-route (swap two single nodes)
+[ ] Operator: Cross-exchange (swap segments between routes)
 [ ] Operator: Reverse 2-opt
 [ ] Operator: Mixed exchange
 [ ] Operator: Tour split / merge
-[ ] Operator: Priority replace (bytt ut lav-prioritet med høy)
+[ ] Operator: Priority replace (swap a low-priority node for a high-priority one)
 [x] Forward time slack + cumulative load precompute (eval.rs)
-[x] O(1) probe for innsettings-feasibility + Δ-cost
-[x] Flat-layout last-arrays (positions × dim) — minne/cache
-[x] Don't-look bits i lokalsøk — kunder som ingen forbedring gir hoppes over
-[x] Granular neighborhoods (Toth–Vigo, K=20) — skip alt utenfor topp-K
-[x] i32 i Matrix (var i64) — halv minneavtrykk
-[x] Bounded top-K probe-lager (BinaryHeap) — kapper insertion-minne
-[x] Streaming JSON-parser + slipp matriser fra problem etter bygging
-[x] Gjenbrukbar load-buffer (thread_local) i evaluator — null alloc per kandidat
-[ ] Multi-tråd: parallelle startløsninger med rayon
-[ ] Tidsbudsjett (--exploration-level/--threads)
-[ ] Warm start fra forhåndsdefinert plan
+[x] O(1) probe for insertion feasibility + Δ-cost
+[x] Flat-layout load arrays (positions × dim) — memory/cache
+[x] Don't-look bits in local search — customers that yielded no improvement are skipped
+[x] Granular neighborhoods (Toth–Vigo, K=20) — skip everything outside the top-K
+[x] i32 in Matrix (was i64) — half the memory footprint
+[x] Bounded top-K probe storage (BinaryHeap) — caps insertion-time memory
+[x] Streaming JSON parser + drop matrices from the problem after build
+[x] Reusable load buffer (thread_local) in the evaluator — zero alloc per candidate
+[ ] Multi-thread: parallel starting solutions with rayon
+[ ] Time budget (--exploration-level / --threads)
+[ ] Warm start from a predefined plan
 
 ------------------------------------------------------------
-CONSTRAINT-EVALUERING
+CONSTRAINT EVALUATION
 ------------------------------------------------------------
-[~] Forward time slack — TW-sjekk gjøres lineært, ikke med precompute
-[~] Capacity precomputation per rute
-[x] Skill-mask sjekk
+[~] Forward time slack — TW check is done linearly, not with precompute
+[~] Capacity precomputation per route
+[x] Skill-mask check
 [x] Max-distance / max-load / max-tasks
-[x] Pickup-precedence-sjekk for shipments
+[x] Pickup-precedence check for shipments
 
 ------------------------------------------------------------
-INPUT/OUTPUT (Vroom-kompatibel JSON)
+INPUT/OUTPUT (Vroom-compatible JSON)
 ------------------------------------------------------------
-[x] Les Vroom JSON-input (jobs, shipments, vehicles, matrices)
-[x] Skriv Vroom JSON-output (routes, summary, unassigned)
-[x] Steg per rute (start, job, pickup, delivery, end)
-[x] Kostnads- og varighetsoppsummering
-[ ] Geometry i output (valgfritt)
-[ ] Plan mode (ingen optimering, evaluer gitt plan)
-[x] Pretty-print og kompakt utskrift
+[x] Read Vroom JSON input (jobs, shipments, vehicles, matrices)
+[x] Write Vroom JSON output (routes, summary, unassigned)
+[x] Step per route (start, job, pickup, delivery, end)
+[x] Cost and duration summary
+[ ] Geometry in output (optional)
+[ ] Plan mode (no optimisation, evaluate a given plan)
+[x] Pretty-print and compact output
 
 ------------------------------------------------------------
 CLI
 ------------------------------------------------------------
-[x] `brooom` CLI med clap
+[x] `brooom` CLI built on clap
 [x] -i input.json, -o output.json
-[~] -p max-passes (ikke ekte threads/exploration enda)
+[~] -p max-passes (no real threads/exploration yet)
 [x] -r routing (haversine|osrm)
 [x] --osrm-host / --osrm-profile
 [ ] -g include geometry
 [ ] -l time-limit
-[x] Stdin/stdout-modus
+[x] Stdin/stdout mode
 
 ------------------------------------------------------------
-SERVERMODUS (som vroom-express)
+SERVER MODE (like vroom-express)
 ------------------------------------------------------------
-[ ] HTTP-server med axum/actix
-[ ] POST /  -> løs problem
+[ ] HTTP server with axum/actix
+[ ] POST /  -> solve problem
 [ ] /health endpoint
-[ ] CORS-konfig
+[ ] CORS config
 
 ------------------------------------------------------------
-BENCHMARK MOT VROOM 1.15 (syntetiske R1-instanser, Euclidean matrise)
+BENCHMARK AGAINST VROOM 1.15 (synthetic R1 instances, Euclidean matrix)
 ------------------------------------------------------------
-Hastighet (sekunder, mindre er bedre):
+Speed (seconds, smaller is better):
   N=50    Vroom 0.09s   brooom 0.025s   = 3.8×
   N=100   Vroom 0.36s   brooom 0.035s   = 10.5×
   N=250   Vroom 2.28s   brooom 0.091s   = 25.0×
   N=500   Vroom 11.80s  brooom 0.462s   = 25.5×
   N=1000  Vroom 59.64s  brooom 3.227s   = 18.5×
 
-Minne (peak RSS, mindre er bedre):
-  N=50    Vroom 5.4 MB    brooom 1.8 MB     = 3.0× mindre
-  N=100   Vroom 11.1 MB   brooom 2.4 MB     = 4.6× mindre
-  N=250   Vroom 39.2 MB   brooom 3.9 MB     = 10.1× mindre
-  N=500   Vroom 104.0 MB  brooom 8.8 MB     = 11.8× mindre
-  N=1000  Vroom 320.5 MB  brooom 28.7 MB    = 11.2× mindre
+Memory (peak RSS, smaller is better):
+  N=50    Vroom 5.4 MB    brooom 1.8 MB     = 3.0× smaller
+  N=100   Vroom 11.1 MB   brooom 2.4 MB     = 4.6× smaller
+  N=250   Vroom 39.2 MB   brooom 3.9 MB     = 10.1× smaller
+  N=500   Vroom 104.0 MB  brooom 8.8 MB     = 11.8× smaller
+  N=1000  Vroom 320.5 MB  brooom 28.7 MB    = 11.2× smaller
 
-Kost (lavere er bedre):
+Cost (lower is better):
   N=50    Vroom 1554   brooom 1692   (+9%)
   N=100   Vroom 2466   brooom 2750   (+12%)
   N=250   Vroom 4472   brooom 5841   (+31%)
   N=500   Vroom 7132   brooom 8654   (+21%)
   N=1000  Vroom 11748  brooom 15174  (+29%)
 
-Status: 5-50× hastighet OG 3-12× mindre minne på alle størrelser. Kostgap
-9-31% gjenstår — neste runde for å lukke det:
-  1) Regret-2 insertion → bedre startløsning
-  2) Cross-exchange operator i lokalsøk
-  3) Multi-tråd parallel multi-start
+Status: 5-50× speed AND 3-12× less memory at every size. A 9-31 % cost
+gap remains — next round to close it:
+  1) Regret-2 insertion → better starting solution
+  2) Cross-exchange operator in local search
+  3) Multi-threaded parallel multi-start
 
 ------------------------------------------------------------
-KVALITET / DRIFT
+QUALITY / OPERATIONS
 ------------------------------------------------------------
-[x] Strukturert feilhåndtering (thiserror)
-[~] Logging — bare eprintln på `-v` foreløpig (tracing er importert)
-[x] Enhetstester for matrise/haversine
-[x] Integrasjonstest: CVRP, kapasitet, TW, skills, shipment, LS-validitet
-[x] Kompilerer på stable Rust
-[~] cargo fmt — kjørt; clippy ikke kjørt
-[x] Eksempel-datasett under examples/oslo_5jobs.json
+[x] Structured error handling (thiserror)
+[~] Logging — only eprintln on `-v` so far (tracing is imported)
+[x] Unit tests for matrix/haversine
+[x] Integration test: CVRP, capacity, TW, skills, shipment, LS validity
+[x] Compiles on stable Rust
+[~] cargo fmt — done; clippy not run
+[x] Sample dataset under examples/oslo_5jobs.json

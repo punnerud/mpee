@@ -1,37 +1,42 @@
 # mpe-engine
 
-En åpen, samlet Rust-arbeidsbenk for ruting og kjøretøysruteoptimering —
-en alternativ stakk til **OSRM** + **VROOM**, der begge motorene kjører
-i samme prosess og deler minne direkte.
+An open, unified Rust workbench for routing and vehicle-routing
+optimisation — an alternative stack to **OSRM** + **VROOM**, where both
+engines run in the same process and share memory directly.
 
-| Lag                       | Crate                                  | Alternativ til    |
-|---------------------------|----------------------------------------|--------------------|
-| Veinetts-router (CH)      | [`crates/dikstra/`](crates/dikstra/)   | OSRM               |
-| VRP-løser (GPU + CPU LS)  | [`crates/brooom/`](crates/brooom/)     | VROOM              |
-| Felles CLI / orkestrering | [`crates/mpe-cli/`](crates/mpe-cli/)   | (ny)               |
+| Layer                       | Crate                                  | Alternative to    |
+|-----------------------------|----------------------------------------|--------------------|
+| Road-network router (CH)    | [`crates/dijkstra/`](crates/dijkstra/) | OSRM               |
+| VRP solver (GPU + CPU LS)   | [`crates/brooom/`](crates/brooom/)     | VROOM              |
+| Shared CLI / orchestration  | [`crates/mpe-cli/`](crates/mpe-cli/)   | (new)              |
 
-Begge motorene **er** selvstendige Rust-prosjekter (egen `Cargo.toml`, egne
-binærer, egne tester) og kan kjøres helt frikoblet. mpe-engine pakker dem
-som workspace-medlemmer slik at en tredje crate, `mpe-cli`, kan bruke begge
-biblioteks-API-ene i samme adresseplass — ingen IPC, ingen fil-overlevering
-på hot path.
+Both engines **are** standalone Rust projects (each with its own
+`Cargo.toml`, its own binaries, its own tests) and can be run completely
+independently. mpe-engine wraps them as workspace members so a third
+crate, `mpe-cli`, can use both library APIs in the same address space —
+no IPC, no file hand-off on the hot path.
+
+> Note on the folder name: the routing crate lives in `crates/dijkstra/`
+> after Edsger W. Dijkstra. The earlier spelling `dikstra` was a typo.
+> The Cargo crate name itself is still `sssp_bench` (the original
+> standalone-project name).
 
 ---
 
-## Bakgrunn
+## Background
 
-Både dikstra og brooom ble nylig optimalisert for å kjøre beregninger
-**on the fly** istedenfor å prekalkulere hele N×N-matrisen:
+Both dijkstra and brooom were recently optimised to compute distances
+**on the fly** rather than precomputing the entire N×N matrix:
 
-- **dikstra** har bucket-basert many-to-many MMM som streamer rader,
-  granulær K-NN (K=160 → 92 MB istedenfor 20 GB for 50k kunder), og
-  88 µs single-pair CH-spørringer.
-- **brooom** sin lokal-søk-løkke leser bare K-nærmeste-naboer på hot path
-  og faller tilbake til single-pair-spørringer for ruteevaluering — så
-  full matrise er aldri nødvendig.
+- **dijkstra** has bucket-based many-to-many MMM that streams rows,
+  granular K-NN (K=160 → 92 MB instead of 20 GB for 50k customers), and
+  88 µs single-pair CH queries.
+- **brooom**'s local-search loop reads only K-nearest neighbours on the
+  hot path and falls back to single-pair queries for route evaluation —
+  so the full matrix is never required.
 
-Sammen betyr det at man kan løse et 50 000-kunders VRP på en bærbar uten
-å materialisere noen full avstandsmatrise.
+Together they make it possible to solve a 50 000-customer VRP on a
+laptop without ever materialising a full distance matrix.
 
 ---
 
@@ -39,46 +44,46 @@ Sammen betyr det at man kan løse et 50 000-kunders VRP på en bærbar uten
 
 ```
 mpe-engine/
-├── Cargo.toml                      # Workspace-rot
-├── README.md                       # Du er her
-├── INTEGRATION.md                  # Hvordan crate-ene snakker sammen
+├── Cargo.toml                      # Workspace root
+├── README.md                       # You are here
+├── INTEGRATION.md                  # How the crates talk to each other
 ├── .gitignore
 └── crates/
-    ├── brooom/                     # VRP-løser  (Vroom-alternativ)
-    │   ├── Cargo.toml              # Standalone — `cargo build` virker her
-    │   ├── README.md               # Solver-detaljer + benchmarks
-    │   ├── integration.txt         # API-kontrakt mot ekstern routing-motor
+    ├── brooom/                     # VRP solver  (Vroom alternative)
+    │   ├── Cargo.toml              # Standalone — `cargo build` works in-place
+    │   ├── README.md               # Solver details + benchmarks
+    │   ├── integration.txt         # API contract with an external router
     │   └── src/
-    ├── dikstra/                    # CH routing-motor  (OSRM-alternativ)
-    │   ├── Cargo.toml              # Standalone — `cargo build` virker her
-    │   ├── README.md               # Routing-detaljer + benchmarks
-    │   ├── integration.txt         # API-kontrakt mot solver
+    ├── dijkstra/                   # CH routing engine (OSRM alternative)
+    │   ├── Cargo.toml              # Standalone — `cargo build` works in-place
+    │   ├── README.md               # Routing details + benchmarks
+    │   ├── integration.txt         # API contract with the solver
     │   └── src/
-    └── mpe-cli/                    # Tynn felles driver
-        ├── Cargo.toml              # Path-dep på begge motorer
-        └── src/main.rs             # Subkommandoer: download / build / solve / pipeline
+    └── mpe-cli/                    # Thin shared driver
+        ├── Cargo.toml              # Path-deps on both engines
+        └── src/main.rs             # Subcommands: download / build / solve / pipeline
 ```
 
-Hver motor har sin egen `integration.txt` som beskriver akkurat hvilke
-typer og funksjoner som er det støttede grensesnittet. [`INTEGRATION.md`](INTEGRATION.md)
-på rot-nivå er ovenfra-perspektivet — hvordan de to passer sammen.
+Each engine has its own `integration.txt` describing exactly which types
+and functions form its supported interface. [`INTEGRATION.md`](INTEGRATION.md)
+at the workspace root is the bird's-eye view — how the two fit together.
 
 ---
 
-## Komme i gang
+## Getting started
 
-### Krav
-- Rust stabil (testet på 1.76+).
-- For brooom GPU-pathen: en wgpu-støttet GPU (Metal på Mac, Vulkan på Linux, DX12 på Win).
-- For brooom sin nevrale del: `ort` laster ned ~200 MB ONNX-runtime ved første bygg.
+### Requirements
+- Stable Rust (tested with 1.76+).
+- For the brooom GPU path: a wgpu-supported GPU (Metal on Mac, Vulkan on Linux, DX12 on Windows).
+- For brooom's neural module: `ort` downloads ~200 MB of ONNX Runtime on first build.
 
-### Bygge hele workspace
+### Build the whole workspace
 
 ```bash
 cargo build --release --workspace
 ```
 
-### Bygge bare én del
+### Build a single crate
 
 ```bash
 cargo build --release -p brooom
@@ -86,49 +91,53 @@ cargo build --release -p sssp_bench
 cargo build --release -p mpe-cli
 ```
 
-Eller kjør crate-en helt selvstendig:
+Or build a crate completely standalone:
 
 ```bash
 cd crates/brooom && cargo build --release
-cd crates/dikstra && cargo build --release
+cd crates/dijkstra && cargo build --release
 ```
 
-### Kjøre
+### Run
 
 ```bash
-# CLI-helpen
+# CLI help
 cargo run --release -p mpe-cli -- --help
 
-# Direkte VRP-solve med brooom (Vroom-kompatibel JSON)
+# Direct VRP solve with brooom (Vroom-compatible JSON)
 cargo run --release -p brooom -- -i problem.json -o solution.json
 
-# Bygg en CH-cache for London (én gang, ~3-4 min)
+# Build a CH cache for London (one-off, ~3-4 min)
 cargo run --release -p sssp_bench --bin bench_pp -- london car
 cargo run --release -p sssp_bench --bin bench_ch -- london car
 ```
 
 ---
 
-## Hva er status?
+## Status
 
-- **dikstra**: full produksjonsklar routing — CH bygges, K-NN på 1.2 s for
-  50k kunder, OSRM-kompatibel HTTP-server (`bench_osrm`, `serve`), korrekthet
-  verifisert mot full Dijkstra. Se [crates/dikstra/README.md](crates/dikstra/README.md).
-- **brooom**: GPU-akselerert VRP, vinner mot PyVRP/Vroom/OR-Tools på Solomon
-  R1-1000 (p ≈ 3·10⁻⁸), Vroom-kompatibel I/O. Se [crates/brooom/README.md](crates/brooom/README.md).
-- **mpe-cli**: scaffolding. Subkommandoene `download`, `build`, `solve`,
-  `pipeline` er definert, men `build/solve/pipeline` returnerer en bail-melding
-  som ber deg bruke de underliggende binærene direkte. Path-dep-ene mot brooom
-  og sssp_bench er forberedt (utkommentert) i `crates/mpe-cli/Cargo.toml` —
-  selve sammenkoblingen er kjent (se [INTEGRATION.md](INTEGRATION.md)) og kan
-  legges inn uten arkitektur-endringer.
+- **dijkstra**: production-ready routing — CH build, K-NN in 1.2 s for
+  50k customers, OSRM-compatible HTTP server (`bench_osrm`, `serve`),
+  correctness verified against full Dijkstra. See
+  [crates/dijkstra/README.md](crates/dijkstra/README.md).
+- **brooom**: GPU-accelerated VRP, beats PyVRP / Vroom / OR-Tools on
+  Solomon R1-1000 (p ≈ 3·10⁻⁸), Vroom-compatible I/O. See
+  [crates/brooom/README.md](crates/brooom/README.md).
 
-Begge motorer **kommuniserer ikke ennå** — de er forberedt for det. Når
-`mpe-cli` aktiveres som planlagt deler de samme `Vec<(u32, f32, f32)>` for
-K-NN-tabellen, uten kopi.
+- **mpe-cli**: scaffolding. The `download`, `build`, `solve`, `pipeline`
+  subcommands are defined but `build/solve/pipeline` currently bail out
+  with a message asking you to invoke the underlying binaries directly.
+  The path dependencies on brooom and sssp_bench are prepared (commented
+  out) in `crates/mpe-cli/Cargo.toml` — wiring is documented in
+  [INTEGRATION.md](INTEGRATION.md) and can be added without further
+  restructuring.
+
+The two engines **do not yet communicate** — they are prepared for it.
+Once `mpe-cli` is activated as planned, they will share the same
+`Vec<(u32, f32, f32)>` for the K-NN table with no copy.
 
 ---
 
-## Lisens
+## License
 
-MIT for brooom og mpe-cli. Se hver crate for detaljer.
+MIT for brooom and mpe-cli. See each crate for details.

@@ -1,21 +1,21 @@
 //! Preprocessing for SSSP.
 //!
-//! To valgfrie preprocesserings-trinn:
+//! Two optional preprocessing steps:
 //!
-//!   1. **Vertex reorder (BFS-orden)**: numererer vertices slik at en vertex
-//!      og dens nære naboer ligger i samme cache-linje. Reduserer L2/L3-
-//!      cache-misses i alle SSSP-algoritmer. Typisk gevinst 1.2–1.5×.
+//!   1. **Vertex reorder (BFS order)**: numbers vertices so that a vertex
+//!      and its near neighbours lie in the same cache line. Reduces L2/L3
+//!      cache misses across all SSSP algorithms. Typical gain 1.2–1.5×.
 //!
-//!   2. **Edge partition på `delta`**: for hver vertex sortere kantene slik
-//!      at LIGHT (w ≤ delta) ligger først, HEAVY etterpå. Δ-stepping kan
-//!      hoppe direkte til den partisjonen som er aktuell for hver phase, og
-//!      sparer en branch per kant.
+//!   2. **Edge partition on `delta`**: for each vertex sort the edges so
+//!      that LIGHT (w ≤ delta) comes first, HEAVY after. Δ-stepping can
+//!      jump straight to the partition relevant for each phase, saving a
+//!      branch per edge.
 //!
-//! Resultatet er en ny `CsrGraph` + en `light_count[u]`-tabell. Algoritmer
-//! kan ta hint om light_count for å skippe branchen.
+//! The result is a new `CsrGraph` + a `light_count[u]` table. Algorithms
+//! can take a light_count hint to skip the branch.
 //!
-//! Hele resultatet kan caches til disk (`cache_pp.rs`) for instant cold-
-//! start.
+//! The whole result can be cached to disk (`cache_pp.rs`) for instant
+//! cold start.
 
 use crate::buffer::Buffer;
 use crate::graph::CsrGraph;
@@ -27,20 +27,20 @@ pub struct Preprocessed {
     /// Per-edge distance in metres, in the same order as `graph.edge_to`.
     /// Empty if the input had no distance channel.
     pub edge_dist: Buffer<f32>,
-    /// `light_count[u]` = antall light-kanter (w ≤ delta) blant adjacency
-    /// til u. Kantene `[head[u] .. head[u]+light_count[u]]` er light;
-    /// `[head[u]+light_count[u] .. head[u+1]]` er heavy.
+    /// `light_count[u]` = number of light edges (w ≤ delta) among u's
+    /// adjacency. The edges `[head[u] .. head[u]+light_count[u]]` are light;
+    /// `[head[u]+light_count[u] .. head[u+1]]` are heavy.
     pub light_count: Buffer<u32>,
-    /// Permutasjon: `new_id[old_id]` = ny id for hver gammel.
+    /// Permutation: `new_id[old_id]` = new id for each old one.
     pub new_id: Buffer<u32>,
-    /// Δ-verdien som ble brukt for partisjonering (0.0 hvis ikke partisjonert).
+    /// The Δ value used for partitioning (0.0 if not partitioned).
     pub delta_used: f32,
 }
 
-/// BFS fra vertex 0 (eller en vertex med høyest grad) gir en orden hvor
-/// nære naboer havner i sammen-rang i den nye nummereringen.
-/// Argumenter: `partition_delta` = Some(d) hvis vi skal partisjonere kantene
-/// på light/heavy med delta=d. None betyr at light_count fylles med 0.
+/// BFS from vertex 0 (or a vertex with the highest degree) gives an order
+/// where near neighbours end up adjacent in the new numbering.
+/// Arguments: `partition_delta` = Some(d) if we should partition edges on
+/// light/heavy with delta=d. None means light_count is filled with 0.
 /// `edge_dist`: parallel per-edge distance channel (empty slice if absent).
 /// If non-empty it is reordered in lockstep with `edge_w`.
 pub fn preprocess(
@@ -52,7 +52,7 @@ pub fn preprocess(
     let new_id = bfs_reorder(g);
     let has_dist = edge_dist.len() == g.m();
 
-    // Bygg ny CSR med reordered vertices.
+    // Build new CSR with reordered vertices.
     let mut new_head = vec![0u32; n + 1];
     for u in 0..n {
         let nu = new_id[u] as usize;
@@ -69,7 +69,7 @@ pub fn preprocess(
     let mut new_dist: Vec<f32> = if has_dist { vec![0.0; m] } else { Vec::new() };
     let mut light_count: Vec<u32> = vec![0; n];
 
-    // Fyll inn — ev. partisjonere på light/heavy per vertex.
+    // Fill in — optionally partition into light/heavy per vertex.
     for u in 0..n {
         let nu = new_id[u] as usize;
         let s = g.head[u] as usize;
@@ -126,12 +126,12 @@ pub fn preprocess(
     }
 }
 
-/// BFS fra den vertex med høyest grad. Returnerer permutasjon
+/// BFS from the vertex with the highest degree. Returns permutation
 /// `new_id[old] -> new`.
 fn bfs_reorder(g: &CsrGraph) -> Vec<u32> {
     let n = g.n;
-    // Start fra den med høyest grad — det gir en mer "kompakt" front for
-    // road networks og sosiale grafer.
+    // Start from the highest-degree vertex — gives a more "compact" front for
+    // road networks and social graphs.
     let mut start = 0u32;
     let mut max_deg = 0u32;
     for u in 0..n {
@@ -162,7 +162,7 @@ fn bfs_reorder(g: &CsrGraph) -> Vec<u32> {
         }
     }
 
-    // Vertices ikke nådd via BFS: gi dem ID-er på slutten.
+    // Vertices not reached by BFS: give them IDs at the end.
     for u in 0..n {
         if new_id[u] == u32::MAX {
             new_id[u] = next_id;

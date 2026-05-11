@@ -33,7 +33,7 @@ fn main() {
     }
 
     let routes = model.route(&nodes).expect("route");
-    println!("Trent CVRPTW pointer-NN på N=20:");
+    println!("Trained CVRPTW pointer-NN on N=20:");
     println!("  Routes: {}", routes.len());
     let total_visited: usize = routes.iter().map(|r| r.len()).sum();
     println!("  Customers visited: {} / {}", total_visited, n_cust);

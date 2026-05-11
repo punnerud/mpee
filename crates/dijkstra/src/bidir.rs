@@ -1,11 +1,11 @@
 //! Bidirectional Dijkstra for ren point-to-point shortest path.
 //!
-//! Søker fra src og dst samtidig: forward i original-grafen, backward i den
-//! transponerte. Stopper når top_f.dist + top_b.dist >= best (optimal cutoff).
-//! På road networks gir dette 2–3× speedup vs full SSSP.
+//! Searches from src and dst simultaneously: forward in the original graph,
+//! backward in the transpose. Stops when top_f.dist + top_b.dist >= best
+//! (optimal cutoff). On road networks this gives 2–3× speedup vs full SSSP.
 //!
-//! Krever en transpose-funksjon for directed grafer. For undirected
-//! (asym-CSR med kanter i begge retninger) kan g_fwd == g_bwd.
+//! Requires a transpose function for directed graphs. For undirected
+//! (asym-CSR with edges in both directions) g_fwd == g_bwd is fine.
 
 use crate::dijkstra::INF;
 use crate::graph::CsrGraph;
@@ -61,7 +61,7 @@ pub fn transpose_with_dist(g: &CsrGraph, edge_dist: &[f32]) -> (CsrGraph, Vec<f3
     )
 }
 
-/// Returnerer korteste avstand mellom src og dst, eller None hvis uoppnåelig.
+/// Returns the shortest distance between src and dst, or None if unreachable.
 pub fn bidir_dijkstra(
     g_fwd: &CsrGraph,
     g_bwd: &CsrGraph,

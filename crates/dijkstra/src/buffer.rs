@@ -1,6 +1,6 @@
-//! `Buffer<T>` — transparent slice-eier som er enten en eid `Vec<T>` eller
-//! en peker inn i et memory-mapped område. Alle algoritmer som tar `&[T]`
-//! eller bruker indeksering fungerer uendret takket være `Deref<Target=[T]>`.
+//! `Buffer<T>` — transparent slice owner that is either an owned `Vec<T>` or
+//! a pointer into a memory-mapped region. All algorithms that take `&[T]`
+//! or use indexing work unchanged thanks to `Deref<Target=[T]>`.
 
 use memmap2::Mmap;
 use std::ops::Deref;

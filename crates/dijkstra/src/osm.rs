@@ -1,10 +1,10 @@
-//! Last inn en OSM .pbf-fil og bygg en routing-graf (CSR) med haversine-vekter.
+//! Load an OSM .pbf file and build a routing graph (CSR) with haversine weights.
 //!
-//! Strategi: én-pass parsing. PBF lagrer noder først, så ways. Vi samler
-//! ALLE node-koordinater i en stor HashMap, deretter materialize-r vi
-//! drivable ways direkte til kanter. Det sparer en hel ekstra pass over
-//! filen sammenlignet med to-pass-strategien (filtrer ways → finn ut hvilke
-//! noder vi trenger → andre pass for å hente koordinater).
+//! Strategy: one-pass parsing. PBF stores nodes first, then ways. We collect
+//! ALL node coordinates in a large HashMap, then materialize drivable ways
+//! directly into edges. That saves a whole extra pass over the file compared
+//! to the two-pass strategy (filter ways → figure out which nodes we need →
+//! second pass to fetch coordinates).
 
 use crate::cache;
 use crate::graph::CsrGraph;
@@ -46,7 +46,7 @@ pub fn load_with_cache<P: AsRef<Path>>(
         match cache::load_mmap(cache_p) {
             Ok((g, c, ed)) => {
                 println!(
-                    "[osm/{prof}] mmap-cache: åpnet {} noder + {} kanter på {:.2} ms (instant start)",
+                    "[osm/{prof}] mmap cache: opened {} nodes + {} edges in {:.2} ms (instant start)",
                     g.n,
                     g.m(),
                     t.elapsed().as_secs_f64() * 1000.0,
@@ -55,7 +55,7 @@ pub fn load_with_cache<P: AsRef<Path>>(
                 return Ok((g, c, ed));
             }
             Err(e) => {
-                println!("[osm/{}] cache korrupt ({e}) — re-parser", profile.name());
+                println!("[osm/{}] cache corrupt ({e}) — reparsing", profile.name());
             }
         }
     }
@@ -63,10 +63,10 @@ pub fn load_with_cache<P: AsRef<Path>>(
     let (g, coords, edge_dist) = load_osm_routing_par(pbf, profile)?;
     let t = std::time::Instant::now();
     if let Err(e) = cache::save(cache_p, &g, &coords, &edge_dist) {
-        eprintln!("[osm/{}] kunne ikke lagre cache: {e}", profile.name());
+        eprintln!("[osm/{}] failed to save cache: {e}", profile.name());
     } else {
         println!(
-            "[osm/{}] cache skrevet ({:.0} ms): {}",
+            "[osm/{}] cache written ({:.0} ms): {}",
             profile.name(),
             t.elapsed().as_secs_f64() * 1000.0,
             cache_p.display()
@@ -79,15 +79,15 @@ pub fn load_with_cache<P: AsRef<Path>>(
     ))
 }
 
-/// Parallell parse via BlobReader + rayon: hver blob (~8000 elementer)
-/// dekodes på sin egen tråd og produserer en lokal (ways, nodes)-akkumulator.
-/// Reducer slår sammen. Etterpå bygges CSR (sekvensielt — det dominerer ikke).
+/// Parallel parse via BlobReader + rayon: each blob (~8000 elements) is
+/// decoded on its own thread and produces a local (ways, nodes) accumulator.
+/// Reduce merges them. Afterwards CSR is built (sequentially — it doesn't dominate).
 pub fn load_osm_routing_par<P: AsRef<Path>>(
     path: P,
     profile: Profile,
 ) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>)> {
     let path = path.as_ref();
-    println!("[osm] åpner {} (parallell)", path.display());
+    println!("[osm] opening {} (parallel)", path.display());
 
     let blob_reader = BlobReader::from_path(path).map_err(io_err)?;
     let t = std::time::Instant::now();
@@ -102,7 +102,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
             _ => None,
         })
         .map(|block| -> Acc {
-            // Rimelig forhåndsallokering — typisk PrimitiveBlock har 8000 elementer.
+            // Reasonable pre-allocation — a typical PrimitiveBlock has 8000 elements.
             let mut ways: Vec<(Vec<i64>, OneWay, f32)> = Vec::with_capacity(64);
             let mut nodes: Vec<(i64, f32, f32)> = Vec::with_capacity(8000);
             for elem in block.elements() {
@@ -172,14 +172,14 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
         ways.len()
     );
 
-    // Bygg HashMap for koordinatslå-opp.
+    // Build HashMap for coordinate lookup.
     let t2 = std::time::Instant::now();
     let mut node_coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(nodes_data.len());
     for (id, lat, lon) in nodes_data {
         node_coords.insert(id, (lat, lon));
     }
     println!(
-        "[osm] node-hashmap: {:.2} s ({} noder)",
+        "[osm] node-hashmap: {:.2} s ({} nodes)",
         t2.elapsed().as_secs_f64(),
         node_coords.len()
     );
@@ -187,17 +187,17 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
     finalize_csr(ways, node_coords)
 }
 
-/// Single-pass parse: samle alle node-koordinater + drivable ways.
+/// Single-pass parse: collect all node coordinates + drivable ways.
 pub fn load_osm_routing<P: AsRef<Path>>(
     path: P,
     profile: Profile,
 ) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>)> {
     let path = path.as_ref();
-    println!("[osm] åpner {}", path.display());
+    println!("[osm] opening {}", path.display());
 
-    // Vi samler ALLE noder i én stor HashMap. Det er greedy minne-bruk —
-    // for London ~5-10M noder × 16 bytes ≈ 80-160 MB — men det lar oss
-    // lese filen i én pass.
+    // We collect ALL nodes in one large HashMap. That's greedy memory use —
+    // for London ~5-10M nodes × 16 bytes ≈ 80-160 MB — but it lets us
+    // read the file in a single pass.
     let mut node_coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(8_000_000);
     let mut ways: Vec<(Vec<i64>, OneWay, f32)> = Vec::with_capacity(300_000);
     let mut total_nodes = 0usize;

@@ -1,16 +1,16 @@
 """Refiner v3: cost-delta target.
 
-I stedet for binær "edge-er-i-vroom", lærer vi å predikere KOST-DELTAEN
-av en 2-opt swap som fjerner edgen. Sterkere kontinuerlig signal,
-direkte koblet til kost-funksjonen.
+Instead of binary "edge-is-in-vroom", we learn to predict the COST DELTA
+of a 2-opt swap that removes the edge. Stronger continuous signal,
+directly tied to the cost function.
 
-For hver brooom-edge (a, b) i en rute:
-  - Random sample en annen edge (c, d) lenger ute i samme rute
-  - Beregn 2-opt-gain: ny edges (a, c) + (b, d) vs gamle (a, b) + (c, d)
-  - Target = -gain (positiv hvis swap forbedrer)
+For each brooom edge (a, b) in a route:
+  - Randomly sample another edge (c, d) further along in the same route
+  - Compute 2-opt gain: new edges (a, c) + (b, d) vs old (a, b) + (c, d)
+  - Target = -gain (positive if swap improves)
 
-Modellen lærer å predikere "hvor mye kan vi spare ved å fjerne denne edgen
-i favør av en bedre alternativ".
+The model learns to predict "how much can we save by removing this edge
+in favor of a better alternative".
 """
 
 import os
@@ -214,7 +214,7 @@ def main():
                    f"val_mse={val_mse:.5f}  top10_hit={hit:.0%}")
             print(msg); log.write(msg + "\n"); log.flush()
 
-    print(f"Trent på {time.perf_counter()-t0:.1f}s")
+    print(f"Trained in {time.perf_counter()-t0:.1f}s")
     log.close()
 
 

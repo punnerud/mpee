@@ -1,17 +1,17 @@
-brooom — kost-matching mot Vroom (runde 3)
+brooom — cost matching against Vroom (round 3)
 ================================================
 
-Ny regel:
-  - Kost MÅ ned mot Vroom-paritet — viktigst.
-  - Tid kan øke. Mål: holde oss under Vroom's tid hvis mulig (vi har 30-40×
-    headroom på store instanser), men ikke kritisk.
-  - RSS bør holdes lavt; ikke et hardt krav.
+New rule:
+  - Cost MUST come down toward Vroom parity — most important.
+  - Time may increase. Goal: stay under Vroom's time if possible (we have 30-40×
+    headroom on large instances), but not critical.
+  - RSS should be kept low; not a hard requirement.
 
-Status-symboler:
-  [ ] ikke startet    [>] pågår    [x] gjennomført, beholdt    [-] testet, reverte
+Status symbols:
+  [ ] not started    [>] in progress    [x] completed, kept    [-] tested, reverted
 
 ------------------------------------------------------------
-BASELINE (runde 2 default)
+BASELINE (round 2 default)
 ------------------------------------------------------------
 N=50    time=0.008s  cost=1692  (Vroom 1554, +9%)
 N=100   time=0.019s  cost=2860  (Vroom 2466, +16%)
@@ -19,63 +19,63 @@ N=250   time=0.071s  cost=5448  (Vroom 4472, +22%)
 N=500   time=0.262s  cost=9030  (Vroom 7132, +27%)
 N=1000  time=1.729s  cost=14208 (Vroom 11748, +21%)
 
-Tids-headroom mot Vroom: 9-35× på alle størrelser.
+Time headroom vs Vroom: 9-35× on all sizes.
 
 ------------------------------------------------------------
-EKSPERIMENTER
+EXPERIMENTS
 ------------------------------------------------------------
 
-[x] 1. Re-aktiver 2-opt* (var STOR vinner på N=100/250: -7 til -10.6%)
-   Strategi: aktivér i default. Tidligere hadde N=500/1000 +0.7%
-             regresjon — sjekk om dette holder med multi-start.
-   Endrer:    local_search.rs
-   Resultat:  N=50    1692→1679  (-0.8%)  +noise
-              N=100   2860→2659  (-7.0%)  tid +24%
-              N=250   5448→4871  (-10.6%) tid +25%
-              N=500   9030→9095  (+0.7%)  tid +10%
-              N=1000  14208→14313 (+0.7%) tid +5%
-              vs Vroom: N=100/250 fra +16/+22% → +7.8/+8.9%. Stort.
-              N=500/1000 marginal regresjon — håper multi-start dekker.
-   Verdikt:   AKTIVERT. Stort kostvinn på N=100/250.
+[x] 1. Re-enable 2-opt* (was BIG winner on N=100/250: -7 to -10.6%)
+   Strategy: enable in default. Previously N=500/1000 had a +0.7%
+             regression — check if this holds with multi-start.
+   Changes:   local_search.rs
+   Result:    N=50    1692→1679  (-0.8%)  +noise
+              N=100   2860→2659  (-7.0%)  time +24%
+              N=250   5448→4871  (-10.6%) time +25%
+              N=500   9030→9095  (+0.7%)  time +10%
+              N=1000  14208→14313 (+0.7%) time +5%
+              vs Vroom: N=100/250 from +16/+22% → +7.8/+8.9%. Big.
+              N=500/1000 marginal regression — hope multi-start covers it.
+   Verdict:   ENABLED. Big cost win on N=100/250.
 
-[x] 2. Re-aktiver cross-exchange (segmenter mellom ruter)
-   Strategi: aktivér med kun len=2 (var minst destruktiv).
-   Resultat:  Marginal kostforbedring (0-0.7%) over 2-opt*+multi-start.
-              Tid ~uendret.
-   Verdikt:   AKTIVERT.
+[x] 2. Re-enable cross-exchange (segments between routes)
+   Strategy: enable with len=2 only (was least destructive).
+   Result:    Marginal cost improvement (0-0.7%) over 2-opt*+multi-start.
+              Time ~unchanged.
+   Verdict:   ENABLED.
 
-[x] 3. Re-aktiver or-opt med reversal
-   Strategi: la relocate prøve reversed segmenter også.
-   Resultat:  N=250 -1.9%, N=1000 -0.5%, andre uendret.
-   Verdikt:   AKTIVERT.
+[x] 3. Re-enable or-opt with reversal
+   Strategy: let relocate try reversed segments too.
+   Result:    N=250 -1.9%, N=1000 -0.5%, others unchanged.
+   Verdict:   ENABLED.
 
 [x] 4. Default multi-start K=8
-   Strategi: bruk all CPU for diversitet — seed 0 deterministisk + 1..7
-             shuffler ventende tasks innen prioritetsklasse.
-   Resultat:  Stort kostvinn på N=50/100/250 (~5-10% over single-start).
-              Tidskostnad: ~3-4× single-start men fortsatt under Vroom på
-              N≤500. Ingen regresjon på noen størrelse.
-   Verdikt:   AKTIVERT (default=8).
+   Strategy: use all CPU for diversity — seed 0 deterministic + 1..7
+             shuffle pending tasks within priority class.
+   Result:    Big cost win on N=50/100/250 (~5-10% over single-start).
+              Time cost: ~3-4× single-start but still under Vroom on
+              N≤500. No regression on any size.
+   Verdict:   ENABLED (default=8).
 
-[x] 5. Iterated Local Search (ILS) med destroy-and-repair kicks
-   Strategi: etter LS-konvergens, fjern frac% av tasks tilfeldig,
+[x] 5. Iterated Local Search (ILS) with destroy-and-repair kicks
+   Strategy: after LS convergence, remove frac% of tasks randomly,
              reinsert via cheapest-feasible (try_insert_single +
-             evaluate_route validering), re-LS. Track best-ever.
-   Resultat:  Default ils_iters=30, kick=0.4. På N=100/250 ga dette
-              vinneren (-1.0% / -0.8% vs Vroom). På N=500/1000 marginal
-              forbedring uten å slå Vroom.
-   Verdikt:   AKTIVERT (default ils_iters=30, ils_kick_size=0.4).
+             evaluate_route validation), re-LS. Track best-ever.
+   Result:    Default ils_iters=30, kick=0.4. On N=100/250 this gave
+              the winner (-1.0% / -0.8% vs Vroom). On N=500/1000 marginal
+              improvement without beating Vroom.
+   Verdict:   ENABLED (default ils_iters=30, ils_kick_size=0.4).
 
-[x] 5b. LRU-cache for evaluate_route (thread-local + global epoch)
-   Strategi: HashMap<(vehicle_hash, steps_hash), Result<RouteMetrics>>
-             per worker-thread; global AtomicU64 epoch som solver bumper
-             ved start. Workers sjekker epoch og tømmer ved stale.
-   Resultat:  Modest hastighetsforbedring (~5-15% på ILS-tunge runs).
-              Ingen kostendring (cache er korrekthetsbevarende).
-   Verdikt:   AKTIVERT.
+[x] 5b. LRU cache for evaluate_route (thread-local + global epoch)
+   Strategy: HashMap<(vehicle_hash, steps_hash), Result<RouteMetrics>>
+             per worker thread; global AtomicU64 epoch that the solver bumps
+             at start. Workers check epoch and flush on stale.
+   Result:    Modest speedup (~5-15% on ILS-heavy runs).
+              No cost change (cache is correctness-preserving).
+   Verdict:   ENABLED.
 
 ------------------------------------------------------------
-RUNDE 3-RESULTATER (default config etter alle x-eksperimenter):
+ROUND 3 RESULTS (default config after all x-experiments):
 N      Vroom t/cost          brooom t/cost          Δcost
 N=50    0.07s/1554           0.49s/1565            +0.7%
 N=100   0.34s/2466           1.54s/2441            -1.0% WIN
@@ -83,470 +83,471 @@ N=250   2.34s/4472           8.09s/4435            -0.8% WIN
 N=500   11.69s/7132          43.87s/7241           +1.5%
 N=1000  61.18s/11748         398.13s/13351         +13.6%
 
-Konklusjon: N=50/100/250/500 innen ±1.5% av Vroom. N=1000 har
-strukturelt gap (+13.6%) som krever sterkere operatorer — neste steg er
-mixed-exchange og tour-split som er på sliste.
+Conclusion: N=50/100/250/500 within ±1.5% of Vroom. N=1000 has a
+structural gap (+13.6%) that requires stronger operators — next step is
+mixed-exchange and tour-split, which are on the list.
 ------------------------------------------------------------
 
-[-] 6. Øk max_passes til 200 (var 50)
-   Strategi: gi LS lengre konvergens-budsjett.
-   Resultat:  Identisk kost som 50. LS konvergerer rundt pass 30-50 med
-              don't-look bits — flere passer hjelper ikke.
-   Verdikt:   REVERTERT.
+[-] 6. Increase max_passes to 200 (was 50)
+   Strategy: give LS a longer convergence budget.
+   Result:    Identical cost to 50. LS converges around pass 30-50 with
+              don't-look bits — more passes don't help.
+   Verdict:   REVERTED.
 
 [-] 7. Mixed-exchange operator (2-1 swap)
-   Strategi: bytt 2 noder fra én rute mot 1 node fra annen
-             (asymmetrisk — Vroom har dette).
-   Resultat:  N=50    1569→1569 (uendret)
+   Strategy: swap 2 nodes from one route for 1 node from another
+             (asymmetric — Vroom has this).
+   Result:    N=50    1569→1569 (unchanged)
               N=100   2441→2453 (+0.5%)
               N=250   4435→4444 (+0.2%)
-              N=500   7241→7408 (+2.3%)  REGRESJON
+              N=500   7241→7408 (+2.3%)  REGRESSION
               N=1000  13351→13373 (+0.2%)
-              Tid +10-20% pga ekstra operator-passering.
-              Sannsynlig årsak: mixed-exchange forstyrrer balansen
-              mellom rutene som relocate+exchange allerede har funnet,
-              og 2-1 byttet er ofte feil retning (skiller heller enn
-              samler). LS havner i et annet, ofte verre, lokalt optimum.
-   Verdikt:   REVERTERT.
+              Time +10-20% due to extra operator pass.
+              Likely cause: mixed-exchange disturbs the balance
+              between routes that relocate+exchange has already found,
+              and the 2-1 swap is often the wrong direction (separates
+              rather than gathers). LS ends up in a different, often worse,
+              local optimum.
+   Verdict:   REVERTED.
 
-[+] 7b. Bug-fix: cache-nøkkel inkluderer nå Problem-pointer
-   Strategi: cache-nøkkelen var (vehicle.id, hash_steps) — to ulike
-             Problemer (eks. parallelle tester) med samme vehicle.id
-             og kolliderende step-hash kunne dele cache-entries.
-             Lagt til `*const Problem as usize` i nøkkel.
-   Resultat:  Fikser intermitterende capacity_splits_routes-feil ved
-             parallell test-kjøring. Ingen kostendring.
-   Verdikt:   AKTIVERT.
+[+] 7b. Bug-fix: cache key now includes Problem pointer
+   Strategy: the cache key was (vehicle.id, hash_steps) — two different
+             Problems (e.g. parallel tests) with the same vehicle.id
+             and colliding step-hash could share cache entries.
+             Added `*const Problem as usize` to the key.
+   Result:    Fixes intermittent capacity_splits_routes failure during
+             parallel test runs. No cost change.
+   Verdict:   ENABLED.
 
 [x] 8a. SwapStar (Vidal 2022, HGS-CVRP)
-   Strategi: bytt to tasks t1∈r1, t2∈r2 men plasser hver task på sin
-             BESTE posisjon i den andre ruten — ikke på den gamle
-             posisjonen. Forskjellig fra try_exchange_with som låser
-             byttet til samme posisjon. Granular K=20 begrenser par.
-   Resultat:  N=50    1569→1565 (-0.3%)
+   Strategy: swap two tasks t1∈r1, t2∈r2 but place each task at its
+             BEST position in the other route — not at the old
+             position. Different from try_exchange_with, which locks
+             the swap to the same position. Granular K=20 limits pairs.
+   Result:    N=50    1569→1565 (-0.3%)
               N=100   2499→2435 (-2.6%)
               N=250   4396→4377 (-0.4%)
               N=500   7312→7278 (-0.5%)
-              N=1000  13240→12976 (-2.0%)  STORT VINN
-              vs Vroom: N=100/250 sterke WINs, N=1000 fra +12.7% → +10.5%
-              Tidskostnad: +30-60% pga ekstra operator (verdt det).
-              Verifisert stabilt over flere kjøringer (deterministisk).
-   Verdikt:   AKTIVERT.
+              N=1000  13240→12976 (-2.0%)  BIG WIN
+              vs Vroom: N=100/250 strong WINs, N=1000 from +12.7% → +10.5%
+              Time cost: +30-60% due to extra operator (worth it).
+              Verified stable over several runs (deterministic).
+   Verdict:   ENABLED.
 
-[x] 11. Disk-cache for solve-resultater (rainbow-table)
-   Strategi: fingerprint = hash(normalisert matrise + jobs + vehicles +
-             solve-flagg). Matrisen normaliseres ved å dele på minste
-             positive verdi før hash, så proporsjonalt skalerte matriser
-             treffer SAMME cache-key. ~/.cache/brooom/{fp}.json holder
-             output-JSON. Aktiveres via --cache-dir eller env BROOOM_CACHE_DIR.
-   Resultat:  N=250: 6.9s (cache miss) → 0.006s (cache hit). 1100× speedup
-              ved gjentatt kjøring.
-              Verifisert rainbow-table: matrise skalert 7× treffer samme
+[x] 11. Disk cache for solve results (rainbow table)
+   Strategy: fingerprint = hash(normalized matrix + jobs + vehicles +
+             solve flags). The matrix is normalized by dividing by the smallest
+             positive value before hashing, so proportionally scaled matrices
+             hit the SAME cache key. ~/.cache/brooom/{fp}.json holds
+             output JSON. Activated via --cache-dir or env BROOOM_CACHE_DIR.
+   Result:    N=250: 6.9s (cache miss) → 0.006s (cache hit). 1100× speedup
+              on repeated runs.
+              Verified rainbow table: matrix scaled 7× hits the same
               fingerprint (f34ff28354637c3b).
-              Output er bit-identisk med non-cached run.
-   Verdikt:   AKTIVERT (opt-in via flagg, default off).
-   Bruk:      perfekt for DoE-runner som kjører samme instans flere
-              ganger med samme hyperparametre (deduplisering),
-              eller for produksjonsservere som ser repeterte requests.
+              Output is bit-identical to a non-cached run.
+   Verdict:   ENABLED (opt-in via flag, default off).
+   Usage:     perfect for DoE runners that run the same instance multiple
+              times with the same hyperparameters (deduplication),
+              or for production servers seeing repeated requests.
 
-[+] 12. DoE-runner for hyperparameter-eksperimenter
-   Filer:     benchmarks/doe.py + benchmarks/factors_example.json
+[+] 12. DoE runner for hyperparameter experiments
+   Files:     benchmarks/doe.py + benchmarks/factors_example.json
    Designs:   full factorial / Plackett-Burman screening / one-at-a-time
-   Output:    CSV + main-effects-tabell + beste konfigurasjon
-   Demo:      Kjørt 2³ factorial på N=250 (8 konfigs, 36s totalt):
+   Output:    CSV + main-effects table + best configuration
+   Demo:      Ran 2³ factorial on N=250 (8 configs, 36s total):
               Main effects (range over levels):
-                ils_iters    : 86.3  (10→30 sparer 86 i kost)  ← største
-                granular_k   : 65.7  (10→20 sparer 66)
-                ils_kick_size: 39.8  (0.3→0.5 sparer 40)
-              Beste config: ils_iters=30, granular_k=20, kick=0.3
-              cost=4440 (vs default 4377 — kicker_size=0.4 finjustert).
-   Bruk:      ./benchmarks/doe.py --instance r1_0500 \
+                ils_iters    : 86.3  (10→30 saves 86 in cost)  ← largest
+                granular_k   : 65.7  (10→20 saves 66)
+                ils_kick_size: 39.8  (0.3→0.5 saves 40)
+              Best config: ils_iters=30, granular_k=20, kick=0.3
+              cost=4440 (vs default 4377 — kicker_size=0.4 fine-tuned).
+   Usage:     ./benchmarks/doe.py --instance r1_0500 \
                   --factors factors.json --design full
-   Verdikt:   FERDIG — generelt verktøy for fremtidige eksperimenter.
+   Verdict:   DONE — general-purpose tool for future experiments.
 
-[-] 13. Solomon I1 initial-heuristikk (partiell)
-   Strategi: 4 av 8 multi-start seeds bruker Solomon I1 (c2 = λ·d_0u − c1)
-             med λ ∈ {1.5, 2.5, 3.5, 4.5}. Skulle gi diversifisering vha
-             "fjerne stops først" prinsippet.
-   Diagnose før: ils=0/30/100 = 13822/12976/12746 — flatter ut, så
-                 initial-løsning, ikke ILS-budsjett, er flaskehalsen.
-   Resultat:  N=1000 = 12976 (identisk med pure-greedy multi-start)
-              Tid +15%.
-   Årsak:     Min implementasjon mangler c12-termen (TW-arrival-skift).
-              Uten c12 er det effektivt cost-and-depot-distance-vekted
-              greedy. Solomon I1's faktiske TW-bevissthet ligger i c12.
-              For å implementere riktig: trengs custom probe som
-              returnerer (cost-delta, arrival-shift-at-next-step).
-   Verdikt:   REVERTERT (funksjonen står som #[allow(dead_code)] i
-              insertion.rs som scaffolding for fremtidig komplett impl).
+[-] 13. Solomon I1 initial heuristic (partial)
+   Strategy: 4 of 8 multi-start seeds use Solomon I1 (c2 = λ·d_0u − c1)
+             with λ ∈ {1.5, 2.5, 3.5, 4.5}. Was meant to give diversification via
+             the "distant stops first" principle.
+   Diagnosis before: ils=0/30/100 = 13822/12976/12746 — flattens, so
+                 initial solution, not ILS budget, is the bottleneck.
+   Result:    N=1000 = 12976 (identical to pure-greedy multi-start)
+              Time +15%.
+   Cause:     My implementation lacks the c12 term (TW arrival shift).
+              Without c12, it's effectively cost-and-depot-distance-weighted
+              greedy. Solomon I1's actual TW awareness lies in c12.
+              To implement properly: needs a custom probe that
+              returns (cost-delta, arrival-shift-at-next-step).
+   Verdict:   REVERTED (the function stands as #[allow(dead_code)] in
+              insertion.rs as scaffolding for a future complete impl).
 
-[x] 14. Embedding + ANN-index for similarity-search (RAG-grunnlag)
-   Filer:     src/embedding.rs (ny modul) + utvidet src/cache.rs
-   Skjema:    16-d float-vektor per problem:
+[x] 14. Embedding + ANN index for similarity search (RAG foundation)
+   Files:     src/embedding.rs (new module) + extended src/cache.rs
+   Schema:    16-d float vector per problem:
               - log_n_jobs, log_n_vehicles, log_n_shipments
               - avg/std distance, max_over_avg, distance_skewness
               - frac_jobs_with_tw, avg/std_tw_width_ratio
               - capacity_utilization, demand_cv
               - frac_skill_constrained, asymmetry
               - geographic_spread, clustering_coefficient
-   Lagring:   {fingerprint}.meta.json sidecar i cache-dir.
-              Innhold: embedding + brukt SolverConfig + cost.
-   Søk:       Brute-force L2 over alle metas, etter z-score-standardisering
-              fra corpus-statistikk. Top-K returneres sortert.
+   Storage:   {fingerprint}.meta.json sidecar in cache-dir.
+              Contents: embedding + used SolverConfig + cost.
+   Search:    Brute-force L2 over all metas, after z-score standardization
+              from corpus statistics. Top-K returned sorted.
    CLI:       --find-similar <K> + --cache-dir
-   Demo:      cache med N=50/100/250 → query N=500 ranger naboer:
+   Demo:      cache with N=50/100/250 → query N=500 ranks neighbors:
               N=250 (d=4.91) → N=100 (d=7.45) → N=50 (d=8.85)
-              Self-query gir d=0.000. Sanity bekreftet.
-   Status:    GRUNNLAG FERDIG. Neste anvendelse: hyperparameter-overføring
-              (Nivå 3) — for nytt problem, hent top-K naboer, beregn
-              median av deres SolverConfig, bruk som default.
-              Senere: sub-rute-templates (Nivå 4), neural prediksjon (5).
-   Verdikt:   AKTIVERT som grunnlag for fremtidig RAG-tilnærming.
+              Self-query gives d=0.000. Sanity confirmed.
+   Status:    FOUNDATION DONE. Next application: hyperparameter transfer
+              (Level 3) — for a new problem, fetch top-K neighbors, compute
+              median of their SolverConfig, use as default.
+              Later: sub-route templates (Level 4), neural prediction (5).
+   Verdict:   ENABLED as foundation for a future RAG approach.
 
-[x] 15. Hyperparameter-overføring (RAG Nivå 3)
-   Filer:     utvidet src/cache.rs (median_config) + src/main.rs
+[x] 15. Hyperparameter transfer (RAG Level 3)
+   Files:     extended src/cache.rs (median_config) + src/main.rs
    CLI:       --use-similar-config <K>
-   Flow:      1. Embed query-problem (16-d vektor via embedding.rs)
-              2. Brute-force ANN-search top-K i cache
-              3. Beregn median av deres SerializedConfig (per-felt)
-              4. Override SolverConfig (time_limit_s ekskludert — task-spesifikk)
-              5. Kjør solve med median config
-   Demo:      Cache med 3 r1_0250-entries med ils ∈ {10, 50, 80}.
+   Flow:      1. Embed query problem (16-d vector via embedding.rs)
+              2. Brute-force ANN search top-K in cache
+              3. Compute median of their SerializedConfig (per field)
+              4. Override SolverConfig (time_limit_s excluded — task-specific)
+              5. Run solve with median config
+   Demo:      Cache with 3 r1_0250 entries with ils ∈ {10, 50, 80}.
               Median: ils_iters=50, kick=0.40.
-              Query r1_0500 (ikke i cache):
+              Query r1_0500 (not in cache):
               - Default: cost=7278
-              - Med transfer: cost=7108 (-2.4%)
-              Riktig: transferen valgte mer søk-budsjett (ils=50 over default 30)
-              fordi cachen viste at den hjelper på lignende problemer.
-   Verdikt:   AKTIVERT. Klar for produksjonsbruk når cachen er populert.
+              - With transfer: cost=7108 (-2.4%)
+              Correct: transfer chose more search budget (ils=50 over default 30)
+              because the cache showed it helps on similar problems.
+   Verdict:   ENABLED. Ready for production use once the cache is populated.
 
-[x] 16. Bedre embedding (16-d → 22-d)
-   Filer:     utvidet src/embedding.rs
-   Nye features (#[serde(default)] for backward-kompatibilitet):
-              - anisotropy_ratio (PCA-eigenverdier på koordinater)
-              - mst_total_weight_norm (Prim's MST på 200-sample)
-              - nn_kurtosis (kurtosis av nærmeste-nabo-distanser)
+[x] 16. Better embedding (16-d → 22-d)
+   Files:     extended src/embedding.rs
+   New features (#[serde(default)] for backward compatibility):
+              - anisotropy_ratio (PCA eigenvalues on coordinates)
+              - mst_total_weight_norm (Prim's MST on 200-sample)
+              - nn_kurtosis (kurtosis of nearest-neighbor distances)
               - depot_distance_norm (mean d_0u / max d_ij)
-              - frac_tight_tw (jobs med TW < 30% av horizon)
-              - skill_diversity (antall unike skill-ID)
-   Resultat:  Solomon-instanser har 0 i geometriske felt (matrise-only),
-              men depot_distance_norm + frac_tight_tw gir ekstra signal.
-              For koordinat-baserte instanser ville alle 22 dimensjoner
-              bidra.
-   Verdikt:   AKTIVERT.
+              - frac_tight_tw (jobs with TW < 30% of horizon)
+              - skill_diversity (number of unique skill IDs)
+   Result:    Solomon instances have 0 in geometric fields (matrix-only),
+              but depot_distance_norm + frac_tight_tw provide extra signal.
+              For coordinate-based instances all 22 dimensions would
+              contribute.
+   Verdict:   ENABLED.
 
-[x] 17. Trent regresjon embedding → config
-   Filer:     ny src/regression.rs
-   Algorithm: Vektet OLS (vekt = 1/cost), 5 separate linregresjoner
-              (en per hyperparameter). Cholesky-faktoring med ridge=1e-6
-              for numerisk stabilitet. Krever P+5 = 28 entries.
+[x] 17. Trained regression embedding → config
+   Files:     new src/regression.rs
+   Algorithm: Weighted OLS (weight = 1/cost), 5 separate linear regressions
+              (one per hyperparameter). Cholesky factoring with ridge=1e-6
+              for numerical stability. Requires P+5 = 28 entries.
    CLI:       --use-regressed-config
-   Demo:      Med 36-entry corpus: predikerer (k=20, ms=8, ils=27, kick=0.40).
-              Faller tilbake til median når corpus er for liten (<28).
-   Begrensning: Reell gevinst krever større + mer diverst corpus
-              (variasjon over hele config-rom på flere problem-typer).
-   Verdikt:   AKTIVERT som infrastruktur. Trener riktig, men gevinst
-              kommer kun med produksjons-corpus.
+   Demo:      With 36-entry corpus: predicts (k=20, ms=8, ils=27, kick=0.40).
+              Falls back to median when corpus is too small (<28).
+   Limitation: Real gain requires a larger + more diverse corpus
+              (variation across the whole config space on multiple problem types).
+   Verdict:   ENABLED as infrastructure. Trains correctly, but gain
+              only comes with a production corpus.
 
-[-] 18. Sub-rute-templates fra cache-løsninger (Niva 4)
-   Status:    SKISSERT, IKKE FULLT IMPLEMENTERT
-   Begrensning: Solomon-testdata er matrise-indeks-basert uten
-              koordinater. Geografisk matching mellom problemer krever
-              koordinat-data. Implementasjon utsatt til reelt brukstilfelle
-              med stabile leverings-områder dukker opp.
-   Arkitektur:
+[-] 18. Sub-route templates from cached solutions (Level 4)
+   Status:    SKETCHED, NOT FULLY IMPLEMENTED
+   Limitation: Solomon test data is matrix-index-based without
+              coordinates. Geographic matching between problems requires
+              coordinate data. Implementation deferred until a real use case
+              with stable delivery areas comes up.
+   Architecture:
               - SubRouteTemplate { centroid: [f64;2], stops, sequence }
               - extract_from_cache_output(meta) → Vec<Template>
               - match_to_problem(template, problem) → Vec<job_idx>
               - greedy_with_warm_starts(problem, templates) → Solution
-   Verdikt:   UTSATT.
+   Verdict:   DEFERRED.
 
-[-] 19. HNSW-index for cache-skalering
-   Skipped:   Brute-force benchmarket. 100/1K/10K entries → 24/34/162 ms.
-              Lineær skalering, JSON-parsing dominerer ved små N.
-   Verdikt:   IKKE NØDVENDIG før cache vokser >100K entries. Hvis det
-              skjer: bruk hnsw_rs eller instant-distance crate.
+[-] 19. HNSW index for cache scaling
+   Skipped:   Brute-force benchmarked. 100/1K/10K entries → 24/34/162 ms.
+              Linear scaling, JSON parsing dominates at small N.
+   Verdict:   NOT NECESSARY until cache grows >100K entries. If that
+              happens: use hnsw_rs or instant-distance crate.
 
-[+] 20. Kombo-test av alle RAG-features
-   Resultat:  Alle 4 features integrerer pent. Same cost (7278) på r1_0500
-              fordi corpus var for ensartet i config-rom (bare ils_iters
-              variasjon). Reell differensiering krever fullt 5-D config-grid.
+[+] 20. Combo test of all RAG features
+   Result:    All 4 features integrate cleanly. Same cost (7278) on r1_0500
+              because the corpus was too uniform in config space (only ils_iters
+              variation). Real differentiation requires full 5-D config grid.
 
-[-] 8. Tour-split (Vroom RouteSplit-stil)
-   Strategi: post-LS pass som splitter lange ruter (≥10 stops) i to ved å
-             tildele andre halvdel til en ledig bil. Solomon r1_1000 har
-             200 biler tilgjengelig, 67 brukt → 133 ledige.
-   Implementert: route_split_pass i local_search.rs.
-   Resultat:  N=500   7278 → 7225 (-0.7%)  FORBEDRING
-              N=1000  12976 → 13056 (+0.6%) REGRESJON
-              Med "revert hvis regresjon" wrapper: N=500 forbedret holdt,
-              N=1000 forbedret IKKE — split + re-LS havnet på subtily verre
-              lokal-optimum-bane som revert-sjekken ikke fanget pga
-              variant-interaksjoner i multi-start.
-   Årsak:     Tour-split endrer rute-strukturen så at re-LS finner et nytt
-              lokalt optimum som kan være VERRE enn pre-split-banen, selv
-              om split-trinnet selv reduserte kost. Krever smartere accept/
-              reject-logikk (eks. sammenligne best-of-K-uten vs best-of-K-med).
-   Verdikt:   REVERTERT. Funksjonen står som #[allow(dead_code)] for
-              fremtidig integrasjon med riktig accept/reject.
+[-] 8. Tour-split (Vroom RouteSplit style)
+   Strategy: post-LS pass that splits long routes (≥10 stops) in two by
+             assigning the second half to an idle vehicle. Solomon r1_1000 has
+             200 vehicles available, 67 used → 133 idle.
+   Implemented: route_split_pass in local_search.rs.
+   Result:    N=500   7278 → 7225 (-0.7%)  IMPROVEMENT
+              N=1000  12976 → 13056 (+0.6%) REGRESSION
+              With "revert if regression" wrapper: N=500 improvement held,
+              N=1000 did NOT improve — split + re-LS landed in a subtly worse
+              local-optimum trajectory that the revert check did not catch due to
+              variant interactions in multi-start.
+   Cause:     Tour-split changes the route structure so that re-LS finds a new
+              local optimum that may be WORSE than the pre-split trajectory, even
+              if the split step itself reduced cost. Requires smarter accept/
+              reject logic (e.g. compare best-of-K-without vs best-of-K-with).
+   Verdict:   REVERTED. The function stands as #[allow(dead_code)] for
+              future integration with proper accept/reject.
 
-[x] 21. Regret-2 reinsertion ved ILS-kick
-   Strategi: erstatt cheapest-feasible reinsertion med regret-2:
-             for hver pulled task, beregn (best, 2nd_best) insertion-cost.
-             Sortér på regret = (2nd_best - best). Plasser høyest regret
-             først. Tasks som er "vanskelige å passe" får forrang før
-             ruteposisjoner som passer dem blir tatt.
-   Resultat:  N=50    1565→1563 (-0.1%)
-              N=100   2435→2447 (+0.5%, fortsatt WIN)
-              N=250   4377→4418 (+0.9%, fortsatt WIN)
-              N=500   7278→7134 (-2.0%)  STOR FORBEDRING
-              N=1000  12976→12510 (-3.6%) STOR FORBEDRING
-              vs Vroom: N=500 fra +2.0% → +0.03% BUNDET
-                        N=1000 fra +10.5% → +6.5% (-4 prosentpoeng)
-   Verdikt:   AKTIVERT. Største enkelt-forbedring etter SwapStar.
+[x] 21. Regret-2 reinsertion on ILS kick
+   Strategy: replace cheapest-feasible reinsertion with regret-2:
+             for each pulled task, compute (best, 2nd_best) insertion cost.
+             Sort by regret = (2nd_best - best). Place highest regret
+             first. Tasks that are "hard to fit" get priority before
+             route positions that suit them are taken.
+   Result:    N=50    1565→1563 (-0.1%)
+              N=100   2435→2447 (+0.5%, still a WIN)
+              N=250   4377→4418 (+0.9%, still a WIN)
+              N=500   7278→7134 (-2.0%)  BIG IMPROVEMENT
+              N=1000  12976→12510 (-3.6%) BIG IMPROVEMENT
+              vs Vroom: N=500 from +2.0% → +0.03% TIED
+                        N=1000 from +10.5% → +6.5% (-4 percentage points)
+   Verdict:   ENABLED. Largest single improvement after SwapStar.
 
-[-] 22. Komplett Solomon I1 med c11+c12
-   Strategi: bygg solomon_i1_full(α1, α2, μ, λ) som returnerer (cost,
-             travel_delta_seconds, time_shift_seconds) fra try_insert_single_with_shift.
-             Brukt for 4 av 8 multi-start seeds.
-   Bruker bekreftelse: standard params er μ=1, α1=α2=0.5, λ=1.
-   Resultat:  N=500: +3.8 til +4.6% REGRESJON
-              N=1000: 12976 (uendret)
-   Årsak:     Min c12-beregning fanger kun arrival-shift ved IMMEDIATE
-              next position, ikke kumulativ push-forward gjennom hele
-              ruten. Klassisk Solomon I1 propagerer skiftet til ruten
-              stabiliserer ved en stop med slack. Korrekt impl krever O(L)
-              per probe = O(N·M·L²) total — for tregt på N=1000.
-   Verdikt:   REVERTERT. solomon_i1_full står som #[allow(dead_code)] for
-              fremtidig komplett impl med propagation-precomp.
-   Bonus-spørsmål fra bruker: kan parameterne (α1, α2, μ, λ) tunes basert
-   på problem-embedding? Ja — naturlig utvidelse av regression.rs til å
-   predicere disse i tillegg til de eksisterende hyperparameterne.
-   Implementeres når komplett c12 fungerer.
+[-] 22. Complete Solomon I1 with c11+c12
+   Strategy: build solomon_i1_full(α1, α2, μ, λ) that returns (cost,
+             travel_delta_seconds, time_shift_seconds) from try_insert_single_with_shift.
+             Used for 4 of 8 multi-start seeds.
+   User confirmation: standard params are μ=1, α1=α2=0.5, λ=1.
+   Result:    N=500: +3.8 to +4.6% REGRESSION
+              N=1000: 12976 (unchanged)
+   Cause:     My c12 computation captures only arrival shift at the IMMEDIATE
+              next position, not the cumulative push-forward through the entire
+              route. Classic Solomon I1 propagates the shift until the route
+              stabilizes at a stop with slack. Correct impl requires O(L)
+              per probe = O(N·M·L²) total — too slow on N=1000.
+   Verdict:   REVERTED. solomon_i1_full stands as #[allow(dead_code)] for
+              a future complete impl with propagation precomp.
+   Bonus question from user: can parameters (α1, α2, μ, λ) be tuned based
+   on problem embedding? Yes — natural extension of regression.rs to
+   predict these in addition to existing hyperparameters.
+   Implemented when complete c12 works.
 
-[x] 23. RouteSplit smart accept/reject (best-of-K-trick)
-   Strategi: Aktiver tour-split BARE for én av 8 multi-start variants
-             (seed=7). Best-of-K-mekanismen sikrer: hvis split-varianten
-             vinner, behold den; hvis ikke, ingen tap.
-   Resultat:  N=500/1000 uendret. Split-varianten vant ikke best-of-K på
-             noen testinstans, men vi taper heller ingenting (sikkerhetsnett).
-   Verdikt:   AKTIVERT som no-cost-no-loss safety net.
+[x] 23. RouteSplit smart accept/reject (best-of-K trick)
+   Strategy: Enable tour-split for only one of 8 multi-start variants
+             (seed=7). The best-of-K mechanism ensures: if the split variant
+             wins, keep it; if not, no loss.
+   Result:    N=500/1000 unchanged. The split variant didn't win best-of-K on
+             any test instance, but we don't lose anything either (safety net).
+   Verdict:   ENABLED as a no-cost-no-loss safety net.
 
-[x] 24. Best-improvement final polish-pass
-   Strategi: Etter multi-start ferdig, kjør local_search_full (uten
-             don't-look-bits) på vinneren. Hver task reconsidered hver
-             pass — Vroom-stil. Don't-look-LS kan settle tasks for tidlig
-             som senere moves kunne frigjort.
-   Resultat:  N=50    1565→1563 (-0.1%)
-              N=100   2435→2447  (gevinst kompenserer ikke regret-2-tapet)
-              N=250   4377→4418  (samme)
+[x] 24. Best-improvement final polish pass
+   Strategy: After multi-start finishes, run local_search_full (without
+             don't-look-bits) on the winner. Each task reconsidered every
+             pass — Vroom style. Don't-look LS can settle tasks too early
+             that later moves could have freed.
+   Result:    N=50    1565→1563 (-0.1%)
+              N=100   2435→2447  (gain doesn't offset the regret-2 loss)
+              N=250   4377→4418  (same)
               N=500   7134→7130 (-0.06%)
               N=1000  12510→12435 (-0.6%)
-              vs Vroom: N=500 +0.03% → -0.03% (NÅ BUNDEN BEGGE VEIER)
-                        N=1000 +6.5% → +5.8% (-0.7 prosentpoeng)
-              Tidskostnad: +5-10% pga ekstra pass på vinneren.
-   Verdikt:   AKTIVERT.
+              vs Vroom: N=500 +0.03% → -0.03% (NOW TIED BOTH WAYS)
+                        N=1000 +6.5% → +5.8% (-0.7 percentage points)
+              Time cost: +5-10% due to extra pass on the winner.
+   Verdict:   ENABLED.
 
 [x] 25. Regret-3 reinsertion (Potvin & Rousseau 1993)
-   Strategi: spore (best, 2nd_best, 3rd_best) per pulled task. Regret =
-             (2nd + 3rd) − 2·best. Plasser høyest-regret først.
-             Generaliserer regret-2; gir bedre signal om "trapped" tasks
-             som har få gode alternativer utover sitt top-valg.
-   Resultat:  N=50    1563→1563 (uendret)
-              N=100   2447→2463 (+0.7%, mistet WIN)
-              N=250   4418→4373 (-1.0%, BEDRE WIN)
-              N=500   7130→7091 (-0.5%)  WIN BEHOLDT
-              N=1000  12435→12162 (-2.2%) STOR FORBEDRING
-              vs Vroom: N=500 fra +0.03% → -0.6% WIN!
-                        N=1000 fra +5.8% → +3.5% (-2.3 prosentpoeng)
-   Verdikt:   AKTIVERT. Tredje store enkelt-forbedring (etter SwapStar +
-              regret-2). Total seier på 4 av 5 instanser: 3 wins + 1 nær-bunden.
+   Strategy: track (best, 2nd_best, 3rd_best) per pulled task. Regret =
+             (2nd + 3rd) − 2·best. Place highest-regret first.
+             Generalizes regret-2; gives better signal about "trapped" tasks
+             that have few good alternatives beyond their top pick.
+   Result:    N=50    1563→1563 (unchanged)
+              N=100   2447→2463 (+0.7%, lost WIN)
+              N=250   4418→4373 (-1.0%, BETTER WIN)
+              N=500   7130→7091 (-0.5%)  WIN KEPT
+              N=1000  12435→12162 (-2.2%) BIG IMPROVEMENT
+              vs Vroom: N=500 from +0.03% → -0.6% WIN!
+                        N=1000 from +5.8% → +3.5% (-2.3 percentage points)
+   Verdict:   ENABLED. Third major single improvement (after SwapStar +
+              regret-2). Total win on 4 of 5 instances: 3 wins + 1 near-tie.
 
-[+] 26. Asymptote-test ils=100 etter regret-2+polish
-   Strategi: Måle hvor lavt vi kan nå med ils=100 vs default ils=30.
-   Resultat:  ils=30  → 12435 (gap +5.8% vs Vroom)  [pre-regret-3]
+[+] 26. Asymptote test ils=100 after regret-2+polish
+   Strategy: Measure how low we can reach with ils=100 vs default ils=30.
+   Result:    ils=30  → 12435 (gap +5.8% vs Vroom)  [pre-regret-3]
               ils=100 → 12348 (gap +5.1%)           [pre-regret-3]
-   Trend:     Marginal gevinst (-0.7% for 3× tid). Vi er nær lokal-
-              optimum-låsing, ikke ILS-budsjett-bundet.
-   Verdikt:   Default beholdes ils=30. Brukere med tids-budsjett kan
-              kjøre med --ils-iters 100 for ekstra ~0.5% reduksjon.
+   Trend:     Marginal gain (-0.7% for 3× time). We are near local-
+              optimum lock-in, not ILS budget bound.
+   Verdict:   Default kept at ils=30. Users with time budget can
+              run with --ils-iters 100 for an extra ~0.5% reduction.
 
-[+] 26b. Asymptote-test re-kjørt POST-regret-3+polish (2026-05-10)
-   Strategi: Etter regret-3 + polish-pass: er ils=100 fortsatt verdt?
-   Resultat:  ils=30  → 12162.1 (208s, baseline)
-              ils=100 → 12162.1 (583s, 2.8× tid)
-              IDENTISK kost.
-   Trend:     STRIKT PLATEAU. ILS-budsjettøkning gir 0% gevinst nå.
-              Vi har låst oss på 12162.1 med nåværende destroy/repair-
-              operatorer; gapet til Vroom (+3.5%) er strukturelt, ikke
-              budsjettbundet.
-   Implikasjon: For å lukke videre må vi:
-              - Endre destroy-operator (større/smartere kicks)
-              - Endre repair (regret-4? ekte ALNS med simulated annealing?)
-              - Større multi-start diversitet (forsøkt: -m 16, se 26c)
-              - Helt ny mekanisme (ML-warm-start, lambda-route-merge etc.)
-   Verdikt:   ils=100 GIR INGEN GEVINST etter regret-3. Default beholdes.
-              Future work: utvid kick-mekanisme eller annen operator.
+[+] 26b. Asymptote test re-run POST regret-3+polish (2026-05-10)
+   Strategy: After regret-3 + polish pass: is ils=100 still worth it?
+   Result:    ils=30  → 12162.1 (208s, baseline)
+              ils=100 → 12162.1 (583s, 2.8× time)
+              IDENTICAL cost.
+   Trend:     STRICT PLATEAU. ILS budget increase gives 0% gain now.
+              We have locked at 12162.1 with current destroy/repair
+              operators; the gap to Vroom (+3.5%) is structural, not
+              budget-bound.
+   Implication: To close further we must:
+              - Change destroy operator (larger/smarter kicks)
+              - Change repair (regret-4? real ALNS with simulated annealing?)
+              - Larger multi-start diversity (tried: -m 16, see 26c)
+              - Entirely new mechanism (ML warm-start, lambda-route-merge etc.)
+   Verdict:   ils=100 GIVES NO GAIN after regret-3. Default kept.
+              Future work: extend kick mechanism or other operator.
 
-[+] 26c. Diversitets-test -m 16 vs -m 8 (2026-05-10)
-   Strategi: Doble multi-start-varianter for å se om diversitet bryter
-             plateau-låsing.
-   Resultat:  -m 8  (208s) → 12162.1
+[+] 26c. Diversity test -m 16 vs -m 8 (2026-05-10)
+   Strategy: Double multi-start variants to see if diversity breaks
+             plateau lock-in.
+   Result:    -m 8  (208s) → 12162.1
               -m 16 (363s) → 12162.1
-              IDENTISK. 2× variants gir 0% gevinst.
-   Trend:     Plateauen er IKKE multi-start-diversitet-bundet heller.
-              Alle 16 variants konvergerer til samme basin.
-   Implikasjon: Stochastic søk bryter ikke ut. Basin attractor er for stort.
-   Verdikt:   -m 16 GIR INGEN GEVINST. Default -m 8 beholdes.
+              IDENTICAL. 2× variants gives 0% gain.
+   Trend:     The plateau is NOT multi-start-diversity bound either.
+              All 16 variants converge to the same basin.
+   Implication: Stochastic search doesn't break out. The basin attractor is too large.
+   Verdict:   -m 16 GIVES NO GAIN. Default -m 8 kept.
 
 [+] 26d. Kick-size sweep (2026-05-10)
-   Strategi: Større kick (0.7 vs default 0.4) for å rømme basin.
-   Resultat:  kick=0.4 (208s) → 12162.1
-              kick=0.7 (203s) → 12526.1  (+3.0% REGRESJON)
-   Trend:     Større destroy klarer ikke å reparere tilbake. Default er
-              kalibrert; å rømme basin koster mer enn det gir.
-   Verdikt:   kick=0.4 beholdes.
+   Strategy: Larger kick (0.7 vs default 0.4) to escape basin.
+   Result:    kick=0.4 (208s) → 12162.1
+              kick=0.7 (203s) → 12526.1  (+3.0% REGRESSION)
+   Trend:     Larger destroy can't repair back. Default is
+              calibrated; escaping the basin costs more than it yields.
+   Verdict:   kick=0.4 kept.
 
-[+] 26e. Granular-K-utvidelse BRYTER PLATEAU (2026-05-10) ⭐
-   Strategi: Bredere LS-nabolag — K=40 vs default K=20.
-   Resultat:  K=20 (208s) → 12162.1
+[+] 26e. Granular K extension BREAKS PLATEAU (2026-05-10) ⭐
+   Strategy: Wider LS neighborhood — K=40 vs default K=20.
+   Result:    K=20 (208s) → 12162.1
               K=40 (286s) → 12070.1  (−0.76%, gap +3.5% → +2.7%)
-              FØRSTE PARAMETER SOM BRYTER PLATEAU.
-   Trend:     Wider neighborhood finner forbedrings-moves som K=20 missed.
-              Gap til Vroom (11748): −0.8 prosentpoeng.
-   Pris:      +38% wall time.
-   Resultat:  K=20 (208s) → 12162.1
+              FIRST PARAMETER TO BREAK THE PLATEAU.
+   Trend:     Wider neighborhood finds improvement moves K=20 missed.
+              Gap to Vroom (11748): −0.8 percentage points.
+   Cost:      +38% wall time.
+   Result:    K=20 (208s) → 12162.1
               K=40 (286s) → 12070.1  (−0.76%, gap +3.5% → +2.7%) ⭐ best
-              K=60 (386s) → 12075.1  (+0.04% vs K=40, 35% tregere)
-   Trend:     Sweet spot ved K=40. K=60 marginal degradering, K>>40 ikke
-              verdt tiden.
+              K=60 (386s) → 12075.1  (+0.04% vs K=40, 35% slower)
+   Trend:     Sweet spot at K=40. K=60 marginal degradation, K>>40 not
+              worth the time.
    Cross-N:   K=20 vs K=40 sweep:
-              N=50    1563 → 1569  (+0.4% verre)
-              N=100   2463 → 2450  (−0.5% bedre — NY WIN vs Vroom)
-              N=250   4373 → 4415  (+1.0% verre, mister litt av WIN)
-              N=500   7091 → 7137  (+0.6% verre, MISTER WIN vs Vroom)
-              N=1000  12162 → 12070 (−0.8% bedre, gap +3.5% → +2.7%)
-   Mønster:   K=40 hjelper N=100 og N=1000, skader N=50/250/500.
-              Wider neighborhood gir gevinst når N >> K-default; for
-              middels N er K=20 allerede tilstrekkelig og K=40 bare
-              utvanner search-trykket.
-   Forslag:   N-adaptiv K i `main.rs`:
+              N=50    1563 → 1569  (+0.4% worse)
+              N=100   2463 → 2450  (−0.5% better — NEW WIN vs Vroom)
+              N=250   4373 → 4415  (+1.0% worse, loses some of the WIN)
+              N=500   7091 → 7137  (+0.6% worse, LOSES WIN vs Vroom)
+              N=1000  12162 → 12070 (−0.8% better, gap +3.5% → +2.7%)
+   Pattern:   K=40 helps N=100 and N=1000, hurts N=50/250/500.
+              Wider neighborhood gives gain when N >> K-default; for
+              medium N, K=20 is already sufficient and K=40 just
+              dilutes search pressure.
+   Proposal:  N-adaptive K in `main.rs`:
               ```
               eff_granular_k = if n_locations > 500 { 40 } else { 20 };
               ```
-              (kun når brukeren ikke har overridet --granular-k)
-   Verdikt:   FØRSTE PARAMETER SOM BRYTER PLATEAU.
-              Single-seed cross-N viste motstridende signal — kjørte
-              cross-seed-validering (se 26f).
+              (only when the user has not overridden --granular-k)
+   Verdict:   FIRST PARAMETER TO BREAK THE PLATEAU.
+              Single-seed cross-N showed conflicting signal — ran
+              cross-seed validation (see 26f).
 
-[+] 26f. Cross-seed validering K=20 vs K=40 (2026-05-10) ⭐
-   Strategi: 10 seeds per N for å skille signal fra støy.
-   Resultat:  N=50    K20_μ=1559.5  K40_μ=1563.5  Δ=+0.25% (σ=1.19) — innen støy
-              N=100   K20_μ=2376.2  K40_μ=2365.1  Δ=−0.45% (σ=1.02) ⭐ K40 bedre
-              N=250   K20_μ=4283.8  K40_μ=4270.1  Δ=−0.32% (σ=0.82) ⭐ K40 bedre
+[+] 26f. Cross-seed validation K=20 vs K=40 (2026-05-10) ⭐
+   Strategy: 10 seeds per N to separate signal from noise.
+   Result:    N=50    K20_μ=1559.5  K40_μ=1563.5  Δ=+0.25% (σ=1.19) — within noise
+              N=100   K20_μ=2376.2  K40_μ=2365.1  Δ=−0.45% (σ=1.02) ⭐ K40 better
+              N=250   K20_μ=4283.8  K40_μ=4270.1  Δ=−0.32% (σ=0.82) ⭐ K40 better
               N=500   K20_μ=7234.6  K40_μ=7119.8  Δ=−1.56% (σ=1.62) ⭐ K40 9/10
               N=1000  K20_μ=12590.7 K40_μ=12376.9 Δ=−1.69% (σ=0.62) ⭐ K40 5/5
 
-[+] 35. GPU compute kernel for 2-opt sweep (2026-05-10) — fundament lagt
-   Filer:    Cargo.toml (wgpu 0.20 + pollster + bytemuck deps)
+[+] 35. GPU compute kernel for 2-opt sweep (2026-05-10) — foundation laid
+   Files:    Cargo.toml (wgpu 0.20 + pollster + bytemuck deps)
             src/gpu_sweep.rs (GpuSweep + WGSL shader)
             examples/gpu_sweep_bench.rs (CPU vs GPU bench)
-   Plattform: wgpu er cross-platform — Metal på M3, Vulkan på Linux,
-            DX12 på Windows. Samme WGSL-shader fungerer overalt.
-   Korrekthet: GPU-output matcher CPU eksakt på N=100/500/1000/2000.
-   Ytelse (naiv versjon, M3):
+   Platform: wgpu is cross-platform — Metal on M3, Vulkan on Linux,
+            DX12 on Windows. The same WGSL shader works everywhere.
+   Correctness: GPU output matches CPU exactly on N=100/500/1000/2000.
+   Performance (naive version, M3):
             | N    | CPU (µs) | GPU (µs) | speedup |
             |------|----------|----------|---------|
             | 100  | 12.9     | 2291     | 0.01×   |
             | 500  | 192.4    | 2342     | 0.08×   |
             | 1000 | 854.5    | 2701     | 0.32×   |
             | 2000 | 3974.2   | 7682     | 0.52×   |
-   Bottleneck: full N² delta-array leses tilbake hver call. På N=2000
-            blir det 16 MB readback. Naiv versjon bruker mer tid på
-            data-transfer enn compute.
-   Optimaliseringer (ikke implementert):
-            - Argmin-på-GPU: returner kun top-K, ikke full N² array.
-              Forventet: GPU vinner ved N≥1000.
-            - Persistent staging buffers (alloker engang).
-            - For 240 multi-start trajektorier samtidig: sterkest GPU-fit.
-   Verdikt: Fundament + cross-platform funker. Optimalisering nødvendig
-            før produksjonsbruk. Estimert 1-2 dager mer for argmin-GPU.
+   Bottleneck: full N² delta array is read back every call. At N=2000
+            that's 16 MB readback. The naive version spends more time on
+            data transfer than compute.
+   Optimizations (not implemented):
+            - Argmin-on-GPU: return only top-K, not the full N² array.
+              Expected: GPU wins at N≥1000.
+            - Persistent staging buffers (allocate once).
+            - For 240 multi-start trajectories simultaneously: strongest GPU fit.
+   Verdict: Foundation + cross-platform works. Optimization needed
+            before production use. Estimated 1-2 more days for argmin-GPU.
 
-[+] 35b. GPU argmin-on-GPU reduksjon (2026-05-10) ⭐
-   Endring: Ny `best_2opt()` API. WGSL-shader gjør sweep + atomicMin
-            i samme kernel. Kun [delta, i, j] (12 bytes) leses tilbake
-            i stedet for hele N²×4 byte delta-matrisen.
-   Korrekthet: argmin-delta matcher CPU eksakt på alle størrelser:
+[+] 35b. GPU argmin-on-GPU reduction (2026-05-10) ⭐
+   Change: New `best_2opt()` API. WGSL shader does sweep + atomicMin
+            in the same kernel. Only [delta, i, j] (12 bytes) is read back
+            instead of the entire N²×4 byte delta matrix.
+   Correctness: argmin-delta matches CPU exactly at all sizes:
             N=100 (-182), N=500 (-184), N=1000 (-196), N=2000 (-194).
-   Ytelse:
+   Performance:
             | N    | CPU       | GPU all-deltas | GPU argmin | argmin speedup |
             |------|-----------|----------------|------------|----------------|
             | 100  | 13.1 µs   | 2003 µs        | 2034 µs    | 0.01×          |
             | 500  | 192.6 µs  | 2246 µs        | 1881 µs    | 0.10×          |
             | 1000 | 875 µs    | 3016 µs        | 1925 µs    | 0.45×          |
             | 2000 | 3785 µs   | 7923 µs        | 1831 µs    | 2.07× ⭐       |
-   Trend: GPU-tid er nesten konstant ~1.8-2 ms (per-call overhead floor).
-            CPU vokser O(N²). Crossover ved N≈1500.
-            Forventet på N=5000: CPU ~25 ms, GPU ~2 ms = 10× speedup.
-            Forventet på N=10000: CPU ~100 ms, GPU ~3 ms = 30× speedup.
-   Race-betraktning: WGSL atomicMin på delta vinner alltid; (i, j) kan
-            henge etter under contention. LS-pipelinen verifiserer
-            uansett før den anvender, så ingen korrekthetsproblem.
-   Verdikt: GPU argmin er nå produksjonsklart for store N. Integrasjon i
-            local_search.rs er neste skritt.
+   Trend: GPU time is nearly constant ~1.8-2 ms (per-call overhead floor).
+            CPU grows O(N²). Crossover at N≈1500.
+            Expected at N=5000: CPU ~25 ms, GPU ~2 ms = 10× speedup.
+            Expected at N=10000: CPU ~100 ms, GPU ~3 ms = 30× speedup.
+   Race consideration: WGSL atomicMin on delta always wins; (i, j) may
+            lag under contention. The LS pipeline verifies
+            before applying anyway, so no correctness issue.
+   Verdict: GPU argmin is now production-ready for large N. Integration in
+            local_search.rs is the next step.
 
-[+] 35c. Batched per-route GPU 2-opt (2026-05-10) — ærlig negativt
-   Endring: Ny `batched_best_2opt(routes)` API. WGSL-shader: én workgroup
-            per rute, threads i workgroup samarbeider om (i,j)-par via
-            atomicMin. Returnerer en BestMove per rute i én dispatch.
-   Korrekthet: bekreftet på første 5 ruter i hvert scenario.
-   Ytelse:
+[+] 35c. Batched per-route GPU 2-opt (2026-05-10) — honestly negative
+   Change: New `batched_best_2opt(routes)` API. WGSL shader: one workgroup
+            per route, threads in the workgroup cooperate on (i,j) pairs via
+            atomicMin. Returns a BestMove per route in a single dispatch.
+   Correctness: confirmed on first 5 routes in each scenario.
+   Performance:
             | Scenario                          | CPU seq | GPU batch | Speedup |
             |-----------------------------------|---------|-----------|---------|
-            | 67 ruter × 15 stops (typisk N=1K) | 9.8 µs  | 2019 µs   | 0.00×   |
-            | 10 ruter × 100 stops              | 74 µs   | 2007 µs   | 0.04×   |
-            | 200 ruter × 25 stops              | 90 µs   | 2082 µs   | 0.04×   |
-            | 50 ruter × 50 stops               | 54 µs   | 2075 µs   | 0.03×   |
-   Diagnose: GPU per-call overhead ~2 ms uansett N. For typisk VRPLT
-            (få-titalls µs arbeid per polish-step) er CPU 100-200×
-            raskere. GPU-launch dominerer.
+            | 67 routes × 15 stops (typical N=1K) | 9.8 µs  | 2019 µs   | 0.00×   |
+            | 10 routes × 100 stops              | 74 µs   | 2007 µs   | 0.04×   |
+            | 200 routes × 25 stops              | 90 µs   | 2082 µs   | 0.04×   |
+            | 50 routes × 50 stops               | 54 µs   | 2075 µs   | 0.03×   |
+   Diagnosis: GPU per-call overhead ~2 ms regardless of N. For typical VRPLT
+            (a few tens of µs of work per polish step) CPU is 100-200×
+            faster. GPU launch dominates.
 
-[+] 35d. GPU "alt-på-GPU"-vurdering (2026-05-10)
-   Konklusjon: For brooom som single-instans-solver er GPU ikke verdt
-            kompleksiteten. Per-call overhead (~2 ms) er for høy og
-            VRPLT-arbeidsmengde per LS-step er for lav.
-   GPU er fortsatt riktig retning hvis:
-            - Multi-instans batch (100+ samtidig)  → GPU dominerer
-            - Veldig store instanser (N≥10K)       → CPU O(N²) sliter
-            - Solver-as-a-service (mange brukere)  → batch over brukere
-   For "alt-på-GPU brooom" (persistent tour-state, alle LS-operatorer
-            som WGSL, TW/capacity i shader, outer loop på GPU): 4-6
-            ukers fokustert arbeid.
-   Levert nå: cross-platform GPU-fundament + sweep-kernel + argmin-
-            reduksjon + batched-routes-shader. Klart for de spesifikke
-            bruksområdene over hvis/når de blir aktuelle.
+[+] 35d. GPU "all-on-GPU" assessment (2026-05-10)
+   Conclusion: For brooom as a single-instance solver, GPU is not worth
+            the complexity. Per-call overhead (~2 ms) is too high and
+            VRPLT workload per LS step is too low.
+   GPU is still the right direction if:
+            - Multi-instance batch (100+ at once)   → GPU dominates
+            - Very large instances (N≥10K)          → CPU O(N²) struggles
+            - Solver-as-a-service (many users)      → batch over users
+   For "all-on-GPU brooom" (persistent tour state, all LS operators
+            as WGSL, TW/capacity in shader, outer loop on GPU): 4-6
+            weeks of focused work.
+   Delivered now: cross-platform GPU foundation + sweep kernel + argmin
+            reduction + batched-routes shader. Ready for the specific
+            use cases above if/when they become relevant.
 
-[+] 35k. Megakernel + inter-rute relocate (2026-05-10) ⭐⭐⭐⭐⭐
-   Filer: src/gpu_population.rs (utvidet — 2 nye storage bindings:
-          demand + vehicle_capacity, ny relocate-search phase i kernel,
-          op_type-branch i apply, wg_route_load precompute)
-          examples/gpu_megakernel_demo.rs (utvidet med task-preservation check)
+[+] 35k. Megakernel + inter-route relocate (2026-05-10) ⭐⭐⭐⭐⭐
+   Files: src/gpu_population.rs (extended — 2 new storage bindings:
+          demand + vehicle_capacity, new relocate-search phase in kernel,
+          op_type branch in apply, wg_route_load precompute)
+          examples/gpu_megakernel_demo.rs (extended with task-preservation check)
 
-   Operator: Inter-route relocate. For hver kandidat (src_r, src_i, dst_r, dst_p):
+   Operator: Inter-route relocate. For each candidate (src_r, src_i, dst_r, dst_p):
       1. Skip same-position no-ops
       2. Cost delta = dst_added - src_savings
-      3. Capacity check (kun inter-rute): wg_route_load[dst_r] + demand[task] ≤ cap
-      4. TW check: walk both source (skipping src_i) og destination (inserting at dst_p)
-      5. Atomic-min med op_type=1, lagrer (src_r, src_i, dst_r, dst_p) i 4 atomic-felter
-      Apply phase brancher på op_type: 0 = 2-opt reverse, 1 = relocate shift+insert.
+      3. Capacity check (inter-route only): wg_route_load[dst_r] + demand[task] ≤ cap
+      4. TW check: walk both source (skipping src_i) and destination (inserting at dst_p)
+      5. Atomic-min with op_type=1, storing (src_r, src_i, dst_r, dst_p) in 4 atomic fields
+      Apply phase branches on op_type: 0 = 2-opt reverse, 1 = relocate shift+insert.
 
-   Race condition håndtering: atomic-min på delta er atomisk, men 4 (i, j, ...)
-      atomic-stores er ikke samlet — kan lese inkonsistente kombinasjoner. Demo-
-      filter rejecterer ugyldige par (j ≤ i+1). Megakernel bruker selv
-      `atomicLoad(&wg_best_op)` etter barrier; siste skriver vinner med konsistent
-      lagring av sine egne felter (verifisert ved at task-count bevares).
+   Race condition handling: atomic-min on delta is atomic, but 4 (i, j, ...)
+      atomic stores are not grouped — can read inconsistent combinations. Demo
+      filter rejects invalid pairs (j ≤ i+1). Megakernel itself uses
+      `atomicLoad(&wg_best_op)` after barrier; last writer wins with consistent
+      storage of its own fields (verified by task-count preservation).
 
-   Resultater (insertion-only baseline):
+   Results (insertion-only baseline):
    r1_0100 cost=3475:
         2-opt only:                    -1.58%
         2-opt + relocate (single):     -22.91% (cost 2679)
@@ -556,45 +557,45 @@ mixed-exchange og tour-split som er på sliste.
         2-opt + relocate (single):     -18.10% (cost 8355)
         Phase 8 (best-of-64, kick=4):  -19.51% (cost 8212)
 
-   Vs CPU LS-konvergent (alle 6 operatorer + granular K=20 + don't-look):
-        r1_0100: CPU LS = 2846, GPU best = 2653 → GPU **6.8% bedre**
-        r1_0500: CPU LS = 8623, GPU best = 8212 → GPU **4.8% bedre**
+   Vs CPU LS-converged (all 6 operators + granular K=20 + don't-look):
+        r1_0100: CPU LS = 2846, GPU best = 2653 → GPU **6.8% better**
+        r1_0500: CPU LS = 8623, GPU best = 8212 → GPU **4.8% better**
 
-   Hvorfor GPU slår CPU full-stack:
-      1. Ingen granular K-cap → GPU vurderer alle (rute, posisjon)-kandidater
-      2. Ingen don't-look-bits → GPU re-vurderer alt hver iter
-      3. Megakernel-arkitektur eliminerer dispatch-overhead → kan iterere mer
+   Why GPU beats CPU full-stack:
+      1. No granular K cap → GPU considers all (route, position) candidates
+      2. No don't-look bits → GPU re-evaluates everything every iter
+      3. Megakernel architecture eliminates dispatch overhead → can iterate more
 
-   Tasks-bevaring verifisert: 100/100 customers før/etter, sjekket via demo.
+   Tasks preservation verified: 100/100 customers before/after, checked via demo.
 
    Wallclock:
-        r1_0100 batch=64: ~25 ms (vs 220 ms sekvensiell × 64)
-        r1_0500 batch=64: ~600 ms (vs 7600 ms sekvensiell × 64)
+        r1_0100 batch=64: ~25 ms (vs 220 ms sequential × 64)
+        r1_0500 batch=64: ~600 ms (vs 7600 ms sequential × 64)
         Speedup: 13-23× via batch.
 
-   Status: Phase 5 (relocate kernel) effektivt levert via megakernel-
-           integrasjon. Phase 6 (cross-exchange, swap-star) gjenstår.
+   Status: Phase 5 (relocate kernel) effectively delivered via megakernel
+           integration. Phase 6 (cross-exchange, swap-star) remains.
 
 [+] 35j. Megakernel + Phase 8 destroy-and-repair (2026-05-10) ⭐⭐⭐⭐⭐
-   Filer: src/gpu_population.rs (utvidet — fixed-slot upload + regret-style
+   Files: src/gpu_population.rs (extended — fixed-slot upload + regret-style
           reinsert kick), examples/gpu_megakernel_batch.rs
 
-   Layout-refactor først:
-      Endret upload() til fixed-slot layout: hver rute får
-      tour_capacity / max_routes slots uavhengig av faktisk lengde. Det
-      lar remove/insert mutere route_lengths uten at andre ruters offsets
-      endres. Eksisterende kernels (precompute, find_2opt, apply_2opt)
-      virker uendret siden de bruker route_starts. Demoer oppdatert.
+   Layout refactor first:
+      Changed upload() to fixed-slot layout: each route gets
+      tour_capacity / max_routes slots regardless of actual length. This
+      lets remove/insert mutate route_lengths without other routes' offsets
+      changing. Existing kernels (precompute, find_2opt, apply_2opt)
+      work unchanged since they use route_starts. Demos updated.
 
    Regret-style reinsert:
-      Phase 0a: Thread 0 fjerner K random tasks, lagrer i workgroup-shared
-        limbo, decrementer route_lengths.
-      Phase 0b: For hver pulled task: alle 1024 tråder strider over
-        (route, position) insertion-kandidater. Atomic-min etter cheapest
-        TW-feasible. Thread 0 shifter tail og setter inn.
-        Hvis ingen feasible insertion: drop task, track i wg_dropped_count.
+      Phase 0a: Thread 0 removes K random tasks, stores them in workgroup-shared
+        limbo, decrements route_lengths.
+      Phase 0b: For each pulled task: all 1024 threads compete over
+        (route, position) insertion candidates. Atomic-min for cheapest
+        TW-feasible. Thread 0 shifts tail and inserts.
+        If no feasible insertion: drop task, track in wg_dropped_count.
 
-   Resultater (insertion-only baseline):
+   Results (insertion-only baseline):
    r1_0100 cost=3475:
         kick=0: 64/64 feas, best=-1.58%, 6.2 ms
         kick=1: 52/64 feas, best=**-2.91%**, 7.6 ms
@@ -607,230 +608,230 @@ mixed-exchange og tour-split som er på sliste.
         kick=4:  9/64 feas, best=-3.35%
 
    Vs CPU rayon-population polish (35e+):
-        CPU: r1_1000_s1 -0.43% i **234 sekunder**
-        GPU: r1_0500_s1 -4.26% i **22 millisekunder**
-   GPU er ~10000× raskere og finner større forbedringer.
+        CPU: r1_1000_s1 -0.43% in **234 seconds**
+        GPU: r1_0500_s1 -4.26% in **22 milliseconds**
+   GPU is ~10000× faster and finds bigger improvements.
 
-   Status: **PHASE 8 KOMPLETT.** Multi-workgroup + feasibility-bevarende
-   destroy-and-repair leverer ekte kvalitetsvinning på Solomon r1.
+   Status: **PHASE 8 COMPLETE.** Multi-workgroup + feasibility-preserving
+   destroy-and-repair delivers real quality gain on Solomon r1.
 
-[+] 35i. Megakernel + ILS-kick (swap-basert, REVIDERT) (2026-05-10) ⭐⭐
-   Bygde først swap-basert kick (#65) som ikke ga kvalitet (95-100% TW-
-   broken på r1). Erstattet med regret-style reinsert i 35j som virker.
-   Swap-koden gjenværende som test-baseline.
-   Filer: src/gpu_population.rs::run_megakernel_2opt_batch_with_kick()
-          examples/gpu_megakernel_batch.rs (utvidet)
+[+] 35i. Megakernel + ILS kick (swap-based, REVISED) (2026-05-10) ⭐⭐
+   First built swap-based kick (#65), which did not deliver quality (95-100% TW-
+   broken on r1). Replaced with regret-style reinsert in 35j, which works.
+   Swap code remains as a test baseline.
+   Files: src/gpu_population.rs::run_megakernel_2opt_batch_with_kick()
+          examples/gpu_megakernel_batch.rs (extended)
 
-   Implementasjon: Pre-LS phase i megakernelen. Thread 0 av hver workgroup
-      utfører kick_count random inter-route task swaps, LCG-RNG seedet
-      med (workgroup_id × 2654435761 + kick_seed). Etter swap kjører
-      eksisterende 2-opt LS-loop med TW-check.
+   Implementation: Pre-LS phase in the megakernel. Thread 0 of each workgroup
+      performs kick_count random inter-route task swaps, LCG-RNG seeded
+      with (workgroup_id × 2654435761 + kick_seed). After swap, the existing
+      2-opt LS loop runs with TW check.
 
-   Resultat r1_0100 (insertion-only baseline cost=3475):
+   Result r1_0100 (insertion-only baseline cost=3475):
       kick=0: 64/64 feas, best=-1.58%
-      kick=1: 3/64 feas,  best=-1.58% (samme som uten kick)
-      kick=2: 2/64 feas,  best=+0.03% (verre)
-      kick=4: 0/64 feas   (alle TW-broken)
-      Wallclock alle varianter: ~7-8 ms total
+      kick=1: 3/64 feas,  best=-1.58% (same as no kick)
+      kick=2: 2/64 feas,  best=+0.03% (worse)
+      kick=4: 0/64 feas   (all TW-broken)
+      Wallclock all variants: ~7-8 ms total
 
-   Konklusjon: Swap-basert kick fungerer mekanisk (RNG diversifiserer per
-      workgroup, kick utføres atomisk under workgroup-barrier). MEN gir
-      ikke kvalitetsforbedring på r1 fordi tett-TW betyr random swaps
-      bryter TW i 95-100% av tilfellene, og 2-opt kan ikke fikse
-      fundamental TW-brudd. Best vi observerer er fortsatt -1.58% (likt
-      kick=0) når ett av få overlevende trajektorier finner samme local
-      optimum som uten kick.
+   Conclusion: Swap-based kick works mechanically (RNG diversifies per
+      workgroup, kick performed atomically under workgroup barrier). BUT yields
+      no quality improvement on r1 because tight TW means random swaps
+      break TW in 95-100% of cases, and 2-opt cannot fix
+      fundamental TW violations. The best we observe is still -1.58% (same as
+      kick=0) when one of few surviving trajectories finds the same local
+      optimum as without kick.
 
-   For ekte Phase 8 kvalitetsvinning: bygg regret-3 reinsert i megakernel
-      (~800 WGSL-linjer ekstra). Det er denne operatoren som bevarer
-      feasibility under destroy-and-repair. Anbefales som neste sesjon.
+   For real Phase 8 quality gain: build regret-3 reinsert in megakernel
+      (~800 extra WGSL lines). It is this operator that preserves
+      feasibility under destroy-and-repair. Recommended for the next session.
 
 [+] 35h. Megakernel TW-aware + multi-workgroup (2026-05-10) ⭐⭐⭐⭐
-   Bygde to utvidelser på toppen av 35g (megakernel POC):
+   Built two extensions on top of 35g (megakernel POC):
 
    TW-aware 2-opt:
-      Per kandidat (i, j): walk hele forslåtte rute, sjekk per-stop TW
-      og final vehicle-TW. Atomisk-min only feasible candidates.
-      Bindings ekstra: service, tw_start, tw_end, vehicle_tw_start,
-      vehicle_tw_end (alle Phase 2-buffers).
-      Resultat r1_0100 insertion-only (cost 3475):
-        Phase 4 (distance-only): 8 kandidater alle TW-broken, 0 forbedring
-        Megakernel TW-aware: 8 kandidater alle TW-feasible, **-1.58%**
-      Resultat r1_0500_s1 insertion-only (cost 10202):
-        Phase 4: 217 iter, 1.48s, 0% forbedring
+      Per candidate (i, j): walk the entire proposed route, check per-stop TW
+      and final vehicle TW. Atomic-min only feasible candidates.
+      Extra bindings: service, tw_start, tw_end, vehicle_tw_start,
+      vehicle_tw_end (all Phase 2 buffers).
+      Result r1_0100 insertion-only (cost 3475):
+        Phase 4 (distance-only): 8 candidates all TW-broken, 0 improvement
+        Megakernel TW-aware: 8 candidates all TW-feasible, **-1.58%**
+      Result r1_0500_s1 insertion-only (cost 10202):
+        Phase 4: 217 iter, 1.48s, 0% improvement
         Megakernel TW-aware: 41 iter, 16ms, **-3.21%** (95.9× speedup)
 
    Multi-workgroup batch (Phase 8 mode):
-      pop_size workgroups dispatched i én kall. Hver workgroup kjører
-      LS-loop på sin trajektori uavhengig (ingen cross-workgroup sync
-      nødvendig). batch_mode flag i uniform — t = wg.x i stedet for
-      params.traj. Status-buffer utvidet til pop_size × 4 i32.
-      Resultat r1_0100 pop=64 identiske starter:
-        Sekvensiell × 64 megakerneler: 226ms (3.5ms hver, 512 iter total)
-        Batch 1 dispatch:                8.3ms (130µs hver, 512 iter)
+      pop_size workgroups dispatched in one call. Each workgroup runs
+      LS loop on its trajectory independently (no cross-workgroup sync
+      needed). batch_mode flag in uniform — t = wg.x instead of
+      params.traj. Status buffer extended to pop_size × 4 i32.
+      Result r1_0100 pop=64 identical starts:
+        Sequential × 64 megakernels: 226ms (3.5ms each, 512 iter total)
+        Batch 1 dispatch:                8.3ms (130µs each, 512 iter)
         Speedup: **27.3×**
-      For ekte Phase-8 kvalitetsvinning trenger vi feasible-bevarende
-      diversifikasjon (ILS-kick + regret-3 reinsert). Med naive
-      perturbasjoner (rotasjon) ble alle 64 trajektorier TW-infeasible.
+      For real Phase-8 quality gain we need feasibility-preserving
+      diversification (ILS kick + regret-3 reinsert). With naive
+      perturbations (rotation), all 64 trajectories became TW-infeasible.
 
-   Filer: src/gpu_population.rs::run_megakernel_2opt() (utvidet)
-          src/gpu_population.rs::run_megakernel_2opt_batch() (ny)
+   Files: src/gpu_population.rs::run_megakernel_2opt() (extended)
+          src/gpu_population.rs::run_megakernel_2opt_batch() (new)
           examples/gpu_megakernel_demo.rs (TW-aware demo)
           examples/gpu_megakernel_batch.rs (batch demo)
 
-   Ikke gjort denne sesjonen:
-      - Relocate-operator i megakernel (intra og inter-rute)
-      - ILS-kick + regret-3 reinsert i megakernel
-      - Multi-instans batch (forskjellige matriser per workgroup)
-      - --gpu-megakernel CLI-flag (integrasjon i hovedløp)
+   Not done this session:
+      - Relocate operator in megakernel (intra and inter-route)
+      - ILS kick + regret-3 reinsert in megakernel
+      - Multi-instance batch (different matrices per workgroup)
+      - --gpu-megakernel CLI flag (integration into the main loop)
 
 [+] 35g. Megakernel POC — 99× speedup vs Phase 4 (2026-05-10) ⭐⭐⭐⭐
-   Filer:   src/gpu_population.rs::run_megakernel_2opt() + SHADER_MEGAKERNEL_WGSL
+   Files:   src/gpu_population.rs::run_megakernel_2opt() + SHADER_MEGAKERNEL_WGSL
             examples/gpu_megakernel_demo.rs
-   Konsept: Hele 2-opt LS-loopen i én GPU-dispatch via single workgroup
-            (1024 tråder). Phase 4 brukte ~3-4 dispatcher per LS-iter ×
-            ~1.5ms hver = ~6.5ms per iter dispatch-overhead. Megakernel
-            har null per-iter overhead — bare faktisk compute (~50 µs).
-   Implementasjon:
-      - Single workgroup, 1024 threads (krevde bumping av wgpu's
-        max_compute_invocations_per_workgroup fra 256 → 1024).
+   Concept: Entire 2-opt LS loop in one GPU dispatch via single workgroup
+            (1024 threads). Phase 4 used ~3-4 dispatches per LS iter ×
+            ~1.5ms each = ~6.5ms per iter dispatch overhead. Megakernel
+            has zero per-iter overhead — only actual compute (~50 µs).
+   Implementation:
+      - Single workgroup, 1024 threads (required bumping wgpu's
+        max_compute_invocations_per_workgroup from 256 → 1024).
       - Workgroup-shared atomic argmin: best_delta + best_route + best_i
-        + best_j. Race-y på (i,j) men korrekt på delta.
-      - Faser per iter: reset → find (alle threads) → barrier → check
-        convergence → apply (thread 0 reverserer segmentet) → barrier →
+        + best_j. Racy on (i,j) but correct on delta.
+      - Phases per iter: reset → find (all threads) → barrier → check
+        convergence → apply (thread 0 reverses the segment) → barrier →
         loop.
-      - Distance-only — TW-validering må skje av caller via
-        precompute_all etter at megakernel returnerer.
-   Resultat r1_0100 (insertion-only baseline cost=3475, 7 routes):
+      - Distance-only — TW validation must happen at the caller via
+        precompute_all after megakernel returns.
+   Result r1_0100 (insertion-only baseline cost=3475, 7 routes):
       Phase 4 multi-dispatch:  47 iter, 307.5 ms wallclock, 6.5 ms/iter
       Megakernel:              62 iter,   3.1 ms wallclock,  50 µs/iter
       Speedup:                 **98.6×**
-   Korrekthet: begge variantene konvergerer til 2-opt lokal-optimum, men
-            til litt forskjellige tours (atomic-min race på like deltaer).
-            Begge produserer TW-infeasible final tours på r1 (forventet
+   Correctness: both variants converge to a 2-opt local optimum, but
+            to slightly different tours (atomic-min race on equal deltas).
+            Both produce TW-infeasible final tours on r1 (expected
             for distance-only 2-opt).
-   Ikke testet ennå:
+   Not yet tested:
       - Multi-trajectory megakernel (workgroup_id = trajectory_id)
-      - Megakernel + multi-instans-batch (64 instanser samtidig)
-      - TW-bevisst search inne i megakernel
-   Implikasjon for plan: Phase 5-7 må re-tenkes som megakernel-utvidelser,
-            ikke som separate dispatcher. En full operator-suite i én
-            megakernel sparer 100× dispatch-overhead per LS-iter.
+      - Megakernel + multi-instance batch (64 instances at once)
+      - TW-aware search inside megakernel
+   Implication for the plan: Phase 5-7 must be rethought as megakernel
+            extensions, not as separate dispatches. A full operator suite in one
+            megakernel saves 100× dispatch overhead per LS iter.
 
-[+] 35f. CPU eksakt-løser + polish-pass (2026-05-10) ⭐⭐
-   Filer:   src/route_exact.rs (~250 linjer)
+[+] 35f. CPU exact solver + polish pass (2026-05-10) ⭐⭐
+   Files:   src/route_exact.rs (~250 lines)
             examples/exact_solver_verify.rs (correctness)
-            examples/exact_polish_demo.rs (impact-måling)
-            --exact-polish CLI flag i src/main.rs
-   Funksjon: Brute-force DFS + branch-and-bound for ruter ≤ 14 stops.
-            TW + capacity pruning underveis. Leaf bruker evaluate_route
-            for definitiv kost (full feature parity, multi-TW etc).
-            Pickup-før-delivery via 64-bit bitmask.
-   Validering:
-      r1_0100 LS-converged (cost=2846): 1/7 ruter testet, 0 forbedret
-      r1_0050 LS-converged (cost=1668): 3/4 ruter testet, 0 forbedret
-      r1_0050 max_ls=0 (cost=1958):     2 ruter forbedret, -3.88% total
-      r1_0500 LS-converged (cost=8623): 14/33 testet, 0 forbedret
-      Scrambled-recovery test: input rotert til TW-infeasible, eksakt-
-      løser fant samme optimum 404 som LS-converged → algoritme korrekt.
-   Konklusjon: LS er allerede globalt optimal på alle Solomon-korte ruter
-            (≤ 14 stops). Eksakt-løser gir 0 gevinst på LS-converged
-            løsninger, men:
-            - Verifiserer LS-optimum (garanti, ikke i Vroom)
-            - Recovery-mekanisme for max_ls=0 (insertion-only) baseline
+            examples/exact_polish_demo.rs (impact measurement)
+            --exact-polish CLI flag in src/main.rs
+   Function: Brute-force DFS + branch-and-bound for routes ≤ 14 stops.
+            TW + capacity pruning along the way. Leaf uses evaluate_route
+            for definitive cost (full feature parity, multi-TW etc).
+            Pickup-before-delivery via 64-bit bitmask.
+   Validation:
+      r1_0100 LS-converged (cost=2846): 1/7 routes tested, 0 improved
+      r1_0050 LS-converged (cost=1668): 3/4 routes tested, 0 improved
+      r1_0050 max_ls=0 (cost=1958):     2 routes improved, -3.88% total
+      r1_0500 LS-converged (cost=8623): 14/33 tested, 0 improved
+      Scrambled-recovery test: input rotated to TW-infeasible, exact
+      solver found the same optimum 404 as LS-converged → algorithm correct.
+   Conclusion: LS is already globally optimal on all Solomon short routes
+            (≤ 14 stops). Exact solver gives 0 gain on LS-converged
+            solutions, but:
+            - Verifies LS optimum (guarantee, not in Vroom)
+            - Recovery mechanism for max_ls=0 (insertion-only) baseline
             - Cluster_decompose finishing pass
-            - Polish etter ILS-kick
-   Ytelse:  ~10 ms/rute @ 14 stops, ~1 µs @ 8 stops, scaling som O(N!)
-            men med strong pruning typisk sub-ms.
-   Bruk:    --exact-polish flag på CLI. Idempotent og safe.
-   Status:  Etappe 1 av 5 i full-GPU plan.
+            - Polish after ILS kick
+   Performance:  ~10 ms/route @ 14 stops, ~1 µs @ 8 stops, scaling as O(N!)
+            but with strong pruning typically sub-ms.
+   Usage:    --exact-polish flag on CLI. Idempotent and safe.
+   Status:  Step 1 of 5 in the full-GPU plan.
 
-[+] 35e. Full-GPU port Fase 1-4 (2026-05-10) ⭐⭐⭐
+[+] 35e. Full-GPU port Phase 1-4 (2026-05-10) ⭐⭐⭐
    Plan:    /Users/punnerud/.claude/plans/cozy-pondering-panda.md
-            (10-fase plan, 4-6 uker total. Anbefalt rekkefølge: 1-4
-            først som 3-ukers MVP, deretter 5-7, så 8-10.)
-   Filer:   src/gpu_population.rs (ny, ~830 linjer)
-            examples/gpu_population_roundtrip.rs (Fase 1)
-            examples/gpu_precompute_correctness.rs (Fase 2)
-            examples/gpu_evaluate_correctness.rs (Fase 3)
-            examples/gpu_2opt_loop.rs (Fase 4)
-   Fase 1:  GpuPopulation persistent state. Pop_size × max_routes ×
-            tour_capacity buffers på GPU. upload/read_back/distance-
-            kernel. Round-trip byte-eksakt. (verifisert)
-   Fase 2:  precompute-kernel — forward TW + backward TW + load_at +
-            feasibility. Kjører pop × max_routes parallelle workgroups.
-            Bit-eksakt match mot CPU-referanse (depart, latest_arrival,
-            load_at, feasible) over 96 ruter (48 infeasible + 48 wide-
-            TW feasible). Bumpet max_storage_buffers_per_shader_stage
-            til 16 (M3/Vulkan/DX12 støtter, kun WebGPU 8-cap).
-   Fase 3:  evaluate_route som per-rute metrics-output i samme kernel.
-            5 i32 per rute: travel, service, waiting, distance, end_time.
-            Verifisert mot CPU evaluate_route() på r1_0100 (7 ruter):
-            total travel 2846 = 2846 eksakt, alle 4 metrikker matcher
-            per rute. GPU-dispatch ~2 ms, CPU eval per-route 0.1 µs
-            (cache-hot). Ratio ~0.001× — som forventet, kun-GPU vinn
-            kommer fra å holde state på GPU mellom dispatcher.
-   Fase 4:  GPU-only 2-opt LS-loop. Kerneler:
+            (10-phase plan, 4-6 weeks total. Recommended order: 1-4
+            first as a 3-week MVP, then 5-7, then 8-10.)
+   Files:   src/gpu_population.rs (new, ~830 lines)
+            examples/gpu_population_roundtrip.rs (Phase 1)
+            examples/gpu_precompute_correctness.rs (Phase 2)
+            examples/gpu_evaluate_correctness.rs (Phase 3)
+            examples/gpu_2opt_loop.rs (Phase 4)
+   Phase 1: GpuPopulation persistent state. Pop_size × max_routes ×
+            tour_capacity buffers on GPU. upload/read_back/distance
+            kernel. Round-trip byte-exact. (verified)
+   Phase 2: precompute kernel — forward TW + backward TW + load_at +
+            feasibility. Runs pop × max_routes parallel workgroups.
+            Bit-exact match against CPU reference (depart, latest_arrival,
+            load_at, feasible) over 96 routes (48 infeasible + 48 wide-
+            TW feasible). Bumped max_storage_buffers_per_shader_stage
+            to 16 (M3/Vulkan/DX12 support, only WebGPU is 8-capped).
+   Phase 3: evaluate_route as per-route metrics output in the same kernel.
+            5 i32 per route: travel, service, waiting, distance, end_time.
+            Verified against CPU evaluate_route() on r1_0100 (7 routes):
+            total travel 2846 = 2846 exact, all 4 metrics match
+            per route. GPU dispatch ~2 ms, CPU eval per-route 0.1 µs
+            (cache-hot). Ratio ~0.001× — as expected, GPU-only gain
+            comes from keeping state on GPU between dispatches.
+   Phase 4: GPU-only 2-opt LS loop. Kernels:
             - find_best_2opt_per_route (atomic argmin, distance-only)
             - apply_2opt (reverse segment in-place, single workgroup)
-            CPU-styrt loop (variant A): precompute → find → apply →
-            re-precompute → rollback hvis TW broke. Konvergerer korrekt;
-            cross-validering: GPU final travel = CPU evaluate_route
-            byte-eksakt.
-            Kjent begrensning: distance-only 2-opt finner moves som
-            ofte bryter TW på R1-instanser (8/8 rolled back på r1_0100).
-            Fase 5 vil legge til TW-bevisst søk via precomputed
+            CPU-driven loop (variant A): precompute → find → apply →
+            re-precompute → rollback if TW broke. Converges correctly;
+            cross-validation: GPU final travel = CPU evaluate_route
+            byte-exact.
+            Known limitation: distance-only 2-opt finds moves that
+            often break TW on R1 instances (8/8 rolled back on r1_0100).
+            Phase 5 will add TW-aware search via precomputed
             latest_arrival.
-   Antakelser: Fase 2-4 antar single TW per kunde, single capacity-dim,
-            speed=1, no setup, homogen flåte. Dekker Solomon/G-H VRPTW.
-   Begrensning: Bare én trajektori per call brukt så langt; pop_size>1
-            allokert men ikke utnyttet. Ekte multi-trajectory-mode
-            kommer i Fase 8 (population). Fase 5-7 først.
-   Status:  Komplett. Klar for fase 5 (relocate + exchange + 2-opt*).
-   Filer: src/pattern_db.rs, examples/pattern_db_bench.rs
-   Bygging: KD-tree konstrueres automatisk når korpus > 50000 mønstre.
-            Median-split partition i Vec<u32> indices (in-place).
-            Sycler dimensjoner gjennom sig_dim per nivå.
-   Søk:   Backtracking-KNN med top-K kept sorted i Vec (linear-insert
-            er raskere enn BinaryHeap for k ≤ 32). Pruning ved
-            squared perpendicular distance til split-plan.
-   Resultat: 9918 mønstre  → lineær 22.9 µs/query
-            59508 mønstre  → KD-tree 0.5 µs/query
-            Lineær ekstrapolert @ 60K: ~140 µs → KD-tree er ~280×.
-   Verifisert: top-3 mønstre identisk på sanity-test (alle distance=0
-            med samme customer-rekkefølge [32,171,65,86] fra c1_2_2/3/4).
-   Status: Implementert og testet. Threshold automatisk; brukeren
-            trenger ingen flagg.
+   Assumptions: Phase 2-4 assume single TW per customer, single capacity dim,
+            speed=1, no setup, homogeneous fleet. Covers Solomon/G-H VRPTW.
+   Limitation: Only one trajectory per call used so far; pop_size>1
+            allocated but not utilized. Real multi-trajectory mode
+            comes in Phase 8 (population). Phase 5-7 first.
+   Status:  Complete. Ready for Phase 5 (relocate + exchange + 2-opt*).
+   Files: src/pattern_db.rs, examples/pattern_db_bench.rs
+   Build: KD-tree is constructed automatically when corpus > 50000 patterns.
+            Median-split partition in Vec<u32> indices (in-place).
+            Cycles dimensions through sig_dim per level.
+   Search: Backtracking-KNN with top-K kept sorted in Vec (linear insert
+            is faster than BinaryHeap for k ≤ 32). Pruning at
+            squared perpendicular distance to split plane.
+   Result: 9918 patterns  → linear 22.9 µs/query
+            59508 patterns  → KD-tree 0.5 µs/query
+            Linear extrapolated @ 60K: ~140 µs → KD-tree is ~280×.
+   Verified: top-3 patterns identical on sanity test (all distance=0
+            with the same customer order [32,171,65,86] from c1_2_2/3/4).
+   Status: Implemented and tested. Threshold automatic; user
+            needs no flag.
 
-[+] 31. Sub-route pattern-DB med Rust in-memory lookup (2026-05-10) ⭐
-   Konsept: Ekstraher gliderende-vindu-sub-ruter fra BKS-løsninger.
-            Hver sub-rute får translasjons/rotasjons/skala-invariant
-            geometri-signatur. Lagre i Rust in-memory DB for raske KNN-
-            queries. Brukes som RAG-bibliotek for warm-start.
-   Filer:    benchmarks/extract_subroutes.py — Python ekstraksjon
+[+] 31. Sub-route pattern DB with Rust in-memory lookup (2026-05-10) ⭐
+   Concept: Extract sliding-window sub-routes from BKS solutions.
+            Each sub-route gets translation/rotation/scale-invariant
+            geometric signature. Store in a Rust in-memory DB for fast KNN
+            queries. Used as a RAG library for warm-start.
+   Files:    benchmarks/extract_subroutes.py — Python extraction
             benchmarks/bks_to_solution.py    — BKS .txt → Vroom JSON
             benchmarks/gh_canonical/         — 60×N=200 BKS data
-            benchmarks/gh_canonical/subroutes_n200_k4.jsonl — 9918 mønstre
+            benchmarks/gh_canonical/subroutes_n200_k4.jsonl — 9918 patterns
             src/pattern_db.rs                — Rust in-memory KNN
             examples/pattern_db_bench.rs     — bench
-   Resultat: Korpus  9918 mønstre × 4-d signatur (k=4 vindu, N=200 G-H)
-            Last    11.3 ms (engangs)
-            Query   42.7 µs/k=5  (lineær scan, 8 kjerner ikke utnyttet)
-            Cross-instance reuse:  c1-c2 klasse 40-52% (sterk),
-                                   r1-r2 klasse 13-17% (svakere)
-   Sanity:   Pattern[0]=[32,171,65,86] funnet i 3 ulike c1-instanser
-            med distanse 0 — samme rute-mønster gjenbruks reelt.
-   Status:   Pattern-DB ferdig. Mangler:
-            - Klynge-detektor / klynge-DB (level 1)
-            - Warm-start hook i solver (`--warm-start <file>`)
-            - End-to-end test: gjennomsnittsforbedring fra transfer
+   Result: Corpus  9918 patterns × 4-d signature (k=4 window, N=200 G-H)
+            Load    11.3 ms (one-off)
+            Query   42.7 µs/k=5  (linear scan, 8 cores not utilized)
+            Cross-instance reuse:  c1-c2 class 40-52% (strong),
+                                   r1-r2 class 13-17% (weaker)
+   Sanity:   Pattern[0]=[32,171,65,86] found in 3 different c1 instances
+            with distance 0 — the same route pattern is actually reused.
+   Status:   Pattern-DB done. Missing:
+            - Cluster detector / cluster DB (level 1)
+            - Warm-start hook in solver (`--warm-start <file>`)
+            - End-to-end test: mean improvement from transfer
 
 [+] 32. Warm-start hook (--warm-start file.json) (2026-05-10) ⭐
-   Filer: src/warm_start.rs, src/solver.rs (config.warm_start), src/main.rs
-   Konsept: Inject pre-built solution som seed=0; LS poleter den.
-            Andre multi-start-seeds beholder normale starts (best-of-K
-            garanterer at vi aldri taper vs no-warm-start).
-   Test: BKS-injection på alle 60 N=200 G-H-instanser:
+   Files: src/warm_start.rs, src/solver.rs (config.warm_start), src/main.rs
+   Concept: Inject pre-built solution as seed=0; LS polishes it.
+            Other multi-start seeds keep normal starts (best-of-K
+            guarantees we never lose vs no-warm-start).
+   Test: BKS injection on all 60 N=200 G-H instances:
          | family | brooom cold μ | brooom WARM μ | Δ% |
          |--------|---------------|---------------|------|
          | c1     | 2686.9        | 2684.2        | -0.10% |
@@ -841,323 +842,323 @@ mixed-exchange og tour-split som er på sliste.
          | rc2    | 2371.5        | 2368.2        | -0.14% |
          | TOTAL  | -             | -             | -1.10% |
    Vs Vroom: cold -0.20%, warm -1.38% (μ).
-            brooom cold vinner mot Vroom: 25/60. WARM: 41/60.
-   Verdikt: Warm-start ekte virker. Spesielt sterk på r/rc-klasser
-            hvor brooom cold underbruker V. Med BKS som warm-start
-            slår brooom Vroom decisivt.
-   Begrensning: Krever BKS som input. Ekte verdi = lookup-pipeline
-            (klynge + sub-route-DB → "fasit fra naboer").
+            brooom cold beats Vroom: 25/60. WARM: 41/60.
+   Verdict: Warm-start really works. Particularly strong on r/rc classes
+            where brooom cold under-uses V. With BKS as warm-start
+            brooom beats Vroom decisively.
+   Limitation: Requires BKS as input. Real value = lookup pipeline
+            (cluster + sub-route DB → "ground truth from neighbors").
 
 [+] 33. Cluster-decompose (--decompose K) (2026-05-10) ⭐⭐
-   Filer: src/cluster_decompose.rs, src/main.rs (--decompose K), src/lib.rs
-   Konsept: K-medoids på distanse-matrisen splitter N kunder i K
-            klynger. Hver klynge løses parallellt via solve_with_matrix.
-            Sub-løsninger konkateneres til én total-løsning.
+   Files: src/cluster_decompose.rs, src/main.rs (--decompose K), src/lib.rs
+   Concept: K-medoids on the distance matrix splits N customers into K
+            clusters. Each cluster is solved in parallel via solve_with_matrix.
+            Sub-solutions are concatenated into one total solution.
    N=1000 r1_1000.json (auto-K=80, m=8, ils=30):
-            | variant | cost   | routes | tid | Δ cost | speedup |
-            |---------|--------|--------|-----|--------|---------|
-            | flat    | 11985  | 67     | 462s| -      | 1×      |
-            | K=10    | 12071  | 70     | 33s | +0.7%  | 14×     |
-            | K=20    | 12604  | 73     | 15s | +5.2%  | 31×     |
+            | variant | cost   | routes | time | Δ cost | speedup |
+            |---------|--------|--------|------|--------|---------|
+            | flat    | 11985  | 67     | 462s | -      | 1×      |
+            | K=10    | 12071  | 70     | 33s  | +0.7%  | 14×     |
+            | K=20    | 12604  | 73     | 15s  | +5.2%  | 31×     |
    N=200 r1_2_1.json:
-            | variant | cost   | tid | Δ |
-            |---------|--------|-----|---|
-            | flat    | 477088 | 4.0s| - |
-            | K=2     | 493622 | 2.2s| +3.5% |
-            | K=4     | 511892 | 1.3s| +7.3% |
-   K=10 sweet spot for N=1000: 14× raskere med 0.7% tap.
+            | variant | cost   | time | Δ |
+            |---------|--------|------|---|
+            | flat    | 477088 | 4.0s | - |
+            | K=2     | 493622 | 2.2s | +3.5% |
+            | K=4     | 511892 | 1.3s | +7.3% |
+   K=10 sweet spot for N=1000: 14× faster with 0.7% loss.
 
 [+] 33b. Cluster-decompose POST-POLISH (2026-05-10) ⭐⭐⭐
-   Endring: Etter assembly av sub-løsninger, kjør local_search_full
-            med granular K på den kombinerte løsningen.
+   Change: After assembling sub-solutions, run local_search_full
+            with granular K on the combined solution.
    N=1000 r1_1000.json:
-            | variant            | cost   | tid | Δ flat | vs Vroom |
-            |--------------------|--------|-----|--------|----------|
-            | flat (auto-K=80)   | 11985  | 462s| -      | +2.02%   |
-            | K=10 (no polish)   | 12071  | 33s | +0.7%  | +2.75%   |
-            | K=10 + polish      | 11838  | 50s | -1.2%  | +0.77%   |
-   Vroom-gap halvert: +2.02% → +0.77%, samtidig som 9× raskere.
-   Forklaring: Klynge-dekomponering finner ulike basin-attractors.
-            Polish-pass over den kombinerte løsningen utforsker
-            cross-cluster-trekk fra et HELT annet utgangspunkt enn
-            flat-search.
-   Status:  Implementert og testet. Foreløpig på canonical r1_1000.
-            Trenger cross-seed-validering (5 seeds) for å bekrefte
-            ikke kun en enkeltseed-effekt.
+            | variant            | cost   | time | Δ flat | vs Vroom |
+            |--------------------|--------|------|--------|----------|
+            | flat (auto-K=80)   | 11985  | 462s | -      | +2.02%   |
+            | K=10 (no polish)   | 12071  | 33s  | +0.7%  | +2.75%   |
+            | K=10 + polish      | 11838  | 50s  | -1.2%  | +0.77%   |
+   Vroom gap halved: +2.02% → +0.77%, while also 9× faster.
+   Explanation: Cluster decomposition finds different basin attractors.
+            Polish pass over the combined solution explores
+            cross-cluster moves from a TOTALLY different starting point than
+            flat search.
+   Status:  Implemented and tested. So far on canonical r1_1000.
+            Needs cross-seed validation (5 seeds) to confirm it's
+            not just a single-seed effect.
 
-[+] 33c. Cross-seed BEKREFTET — N=1000 5 seeds (2026-05-10) ⭐⭐⭐⭐
-   Resultat:  | seed | Vroom | flat | tid | decomp+polish | tid | Δ flat | speedup |
-              |------|-------|------|-----|---------------|-----|--------|---------|
-              | s1   | 12175 | 12554| 490s| 12173         | 46s | -3.03% | 10.7×   |
-              | s2   | 11927 | 12165| 432s| 11899         | 47s | -2.19% |  9.2×   |
-              | s3   | 11815 | 11993| 429s| 11660         | 48s | -2.78% |  8.9×   |
-              | s4   | 11907 | 12255| 441s| 12024         | 46s | -1.88% |  9.6×   |
-              | s5   | 11947 | 12338| 391s| 12061         | 46s | -2.25% |  8.5×   |
-              | μ    | 11954 | 12261| 437s| 11963         | 47s | -2.43% |  9.4×   |
+[+] 33c. Cross-seed CONFIRMED — N=1000 5 seeds (2026-05-10) ⭐⭐⭐⭐
+   Result:    | seed | Vroom | flat | time | decomp+polish | time | Δ flat | speedup |
+              |------|-------|------|------|---------------|------|--------|---------|
+              | s1   | 12175 | 12554| 490s | 12173         | 46s  | -3.03% | 10.7×   |
+              | s2   | 11927 | 12165| 432s | 11899         | 47s  | -2.19% |  9.2×   |
+              | s3   | 11815 | 11993| 429s | 11660         | 48s  | -2.78% |  8.9×   |
+              | s4   | 11907 | 12255| 441s | 12024         | 46s  | -1.88% |  9.6×   |
+              | s5   | 11947 | 12338| 391s | 12061         | 46s  | -2.25% |  8.5×   |
+              | μ    | 11954 | 12261| 437s | 11963         | 47s  | -2.43% |  9.4×   |
 
    vs Vroom:  flat:           +2.56% (μ)
-              decomp+polish:  +0.08% (μ) ⭐ TILNÆRMET PARITET
+              decomp+polish:  +0.08% (μ) ⭐ NEAR-PARITY
 
-   Vinn-rate: decomp+polish slår flat: 5/5 (100%)
-              decomp+polish slår Vroom: 3/5
+   Win-rate: decomp+polish beats flat: 5/5 (100%)
+              decomp+polish beats Vroom: 3/5
 
-   Gjennombrudd: Vi har gått fra +2.56% bak Vroom (vår vanlige flat-solver)
-                 til +0.08% (effektivt likt) ved å:
-                 1. Splitte i 10 klynger via K-medoids
-                 2. Løse hver parallelt (rayon × 8 multi-start per klynge)
-                 3. Polish-pass på den kombinerte løsningen
-                 Totalt 9.4× raskere enn flat også.
+   Breakthrough: We went from +2.56% behind Vroom (our usual flat solver)
+                 to +0.08% (effectively tied) by:
+                 1. Splitting into 10 clusters via K-medoids
+                 2. Solving each in parallel (rayon × 8 multi-start per cluster)
+                 3. Polish pass on the combined solution
+                 Total 9.4× faster than flat as well.
 
-   Forklaring: Klynge-dekomponering → ulike basin-attractors per sub-solve.
-              Polish-pass på den assemblede løsningen utforsker cross-cluster-
-              moves fra et helt annet utgangspunkt enn flat-search. Effektivt
-              en form for diversifisert multi-start.
+   Explanation: Cluster decomposition → different basin attractors per sub-solve.
+              Polish pass on the assembled solution explores cross-cluster
+              moves from a completely different starting point than flat search. Effectively
+              a form of diversified multi-start.
 
-   Filer:    src/cluster_decompose.rs
+   Files:    src/cluster_decompose.rs
               benchmarks/k_sweep_2026-05-10/decompose_xseed_n1000.csv
 
-   Default-implikasjon: For N=1000 burde --decompose 10 være default.
-              Mangler: studie på N=500/2000/5000 for å finne riktig auto-K.
+   Default implication: For N=1000, --decompose 10 should be default.
+              Missing: study on N=500/2000/5000 to find the right auto-K.
 
 [+] 33d. Auto-decompose-threshold (2026-05-10) ⭐
-   Studie:   N=200 K=2/4: μ +0.7-0.9% (ikke verdt det)
-            N=500 K=5: μ −0.72%, 3.7× speedup, 3/5 vinn
-            N=1000 K=10: μ −2.43%, 9.4× speedup, 5/5 vinn
-   Heuristikk valgt: K = N // 100 for N ≥ 500, ellers flat.
-   Implementert: --decompose 0 = auto, 1 = explicit off, K = explicit K.
-   Verifisert: r1_0050→flat, r1_0100→flat, r1_0500→K=5, r1_1000→K=10.
-   Filer: src/main.rs (auto-block), src/cluster_decompose.rs.
+   Study:    N=200 K=2/4: μ +0.7-0.9% (not worth it)
+            N=500 K=5: μ −0.72%, 3.7× speedup, 3/5 wins
+            N=1000 K=10: μ −2.43%, 9.4× speedup, 5/5 wins
+   Heuristic chosen: K = N // 100 for N ≥ 500, otherwise flat.
+   Implemented: --decompose 0 = auto, 1 = explicit off, K = explicit K.
+   Verified: r1_0050→flat, r1_0100→flat, r1_0500→K=5, r1_1000→K=10.
+   Files: src/main.rs (auto-block), src/cluster_decompose.rs.
 
-[+] 33e. N=2000 skalerings-test (2026-05-10) ⭐
-   Resultat (3 seeds):
-            | seed | Vroom    | brooom auto | Δ cost | Δ tid |
-            |------|----------|-------------|--------|-------|
-            | s1   | 21271/341s | 21192/156s | -0.37% | 2.2×  |
-            | s2   | 20803/311s | 20637/185s | -0.80% | 1.7×  |
-            | s3   | 20873/283s | 20730/170s | -0.69% | 1.7×  |
-            | μ    | 20982/312s | 20853/170s | -0.62% | 1.84× |
-   brooom slår Vroom: 3/3.
-   Auto-decompose K=N/100 (= K=20 her) skalerer.
-   Polish-pass på N=2000 single-threaded — flaskehalsen i de ~170s.
-   Mulig videre: parallell polish (split per rute-cluster) for raskere.
-   Konklusjon: Tidligere "regresjon" på N=250 i 26e var støy.
-              K=40 vinner 6/10 på N=100 og 8/10 på N=250 med 10 seeds.
-   Implikasjon: Hvis N=500/1000 også støtter K=40 → BYTT GLOBAL DEFAULT.
-                Hvis blandet → N-adaptiv (K=20 for N≤50, K=40 ellers).
-   Implementert: 2026-05-10. `--granular-k` ble Option<usize> i CLI;
-                None → auto: K=40 for N≥100, ellers K=20.
-                Verbose logger "auto-K → 40 for N=250" osv.
-                Cache-fingerprint bruker eff_granular_k (etter auto-tune)
-                slik at auto- og eksplisitt K=40 deler cache-treff.
-                Eksplisitt `--granular-k 0` deaktiverer fortsatt granular.
+[+] 33e. N=2000 scaling test (2026-05-10) ⭐
+   Result (3 seeds):
+            | seed | Vroom    | brooom auto | Δ cost | Δ time |
+            |------|----------|-------------|--------|--------|
+            | s1   | 21271/341s | 21192/156s | -0.37% | 2.2×   |
+            | s2   | 20803/311s | 20637/185s | -0.80% | 1.7×   |
+            | s3   | 20873/283s | 20730/170s | -0.69% | 1.7×   |
+            | μ    | 20982/312s | 20853/170s | -0.62% | 1.84×  |
+   brooom beats Vroom: 3/3.
+   Auto-decompose K=N/100 (= K=20 here) scales.
+   Polish pass on N=2000 single-threaded — the bottleneck in those ~170s.
+   Possible follow-up: parallel polish (split per route-cluster) for faster.
+   Conclusion: The earlier "regression" on N=250 in 26e was noise.
+              K=40 wins 6/10 on N=100 and 8/10 on N=250 with 10 seeds.
+   Implication: If N=500/1000 also support K=40 → CHANGE GLOBAL DEFAULT.
+                If mixed → N-adaptive (K=20 for N≤50, K=40 otherwise).
+   Implemented: 2026-05-10. `--granular-k` became Option<usize> in CLI;
+                None → auto: K=40 for N≥100, otherwise K=20.
+                Verbose logs "auto-K → 40 for N=250" etc.
+                Cache fingerprint uses eff_granular_k (after auto-tune)
+                so that auto and explicit K=40 share cache hits.
+                Explicit `--granular-k 0` still disables granular.
 
-[+] 26g. Cross-seed Vroom-baseline (2026-05-10) — REALSJEKK
-   Strategi: Kjør Vroom på samme seed-varianter for ekte sammenligning.
-   Resultat:  N=500   Vroom_μ=7070.3   K20_μ=7234.6 (+2.31%)  K40_μ=7119.8 (+0.70%)
+[+] 26g. Cross-seed Vroom baseline (2026-05-10) — REALITY CHECK
+   Strategy: Run Vroom on the same seed variants for a real comparison.
+   Result:    N=500   Vroom_μ=7070.3   K20_μ=7234.6 (+2.31%)  K40_μ=7119.8 (+0.70%)
               N=1000  Vroom_μ=11954.2  K20_μ=12590.7 (+5.32%) K40_μ=12376.9 (+3.54%)
-   Vroom-vinn: K40 vinner 1/10 mot Vroom på N=500, 0/5 på N=1000.
-   Trend:     Auto-K lukker 1.6-1.8 pp men brooom taper fortsatt globalt.
-   Implikasjon: Canonical r1_1000 (gap +2.7%) var en LETT seed.
-                Realt gap mot Vroom på N=1000 er +3.54%.
-                K=40 er fortsatt en ubetinget gevinst (1.78 pp), men
-                det reelle målet (Vroom-paritet) er fortsatt langt unna.
+   Vroom wins: K40 wins 1/10 against Vroom on N=500, 0/5 on N=1000.
+   Trend:     Auto-K closes 1.6-1.8 pp but brooom still loses globally.
+   Implication: Canonical r1_1000 (gap +2.7%) was an EASY seed.
+                Real gap to Vroom on N=1000 is +3.54%.
+                K=40 is still an unconditional gain (1.78 pp), but
+                the real target (Vroom parity) is still far off.
 
-[+] 26h. K=80 på N=1000 cross-seed (2026-05-10) ⭐
-   Resultat:  Vroom_μ=11954.2  K20=12590.7 (+5.32%)  K40=12376.9 (+3.54%)
+[+] 26h. K=80 on N=1000 cross-seed (2026-05-10) ⭐
+   Result:    Vroom_μ=11954.2  K20=12590.7 (+5.32%)  K40=12376.9 (+3.54%)
               K80_μ=12261.1 (+2.57%) [5/5 seeds]
-   Trend:     Hver K-dobling lukker omtrent halvparten av gjenværende
-              Vroom-gap. K20→K40: −1.78 pp. K40→K80: −0.97 pp.
-   Pris:      K80 wallclock ~6 min vs K40 ~4 min på N=1000.
+   Trend:     Each K doubling closes roughly half of the remaining
+              Vroom gap. K20→K40: −1.78 pp. K40→K80: −0.97 pp.
+   Cost:      K80 wallclock ~6 min vs K40 ~4 min on N=1000.
    N=500 K=80: Vroom_μ=7070.3  K20=7234.6 (+2.32%)  K40=7119.8 (+0.70%)
-                K80_μ=7082.8 (+0.18%) [3/10 seeds vinner mot Vroom]
-   Trend N=500: K20→K40→K80 lukker også her: 2.32 → 0.70 → 0.18 pp.
-                Nær Vroom-paritet på N=500 med K=80.
-   Status K=160 N=1000: STOPPET FØR FERDIG (PC-shutdown).
-                Råkjøring fortsatt mulig fra `benchmarks/k_sweep_2026-05-10/`.
-   Backup:    Alle K-sweep + Vroom-baseline CSVs i
+                K80_μ=7082.8 (+0.18%) [3/10 seeds win vs Vroom]
+   Trend N=500: K20→K40→K80 closes here too: 2.32 → 0.70 → 0.18 pp.
+                Near Vroom parity on N=500 with K=80.
+   Status K=160 N=1000: STOPPED BEFORE COMPLETION (PC shutdown).
+                Raw run still possible from `benchmarks/k_sweep_2026-05-10/`.
+   Backup:    All K-sweep + Vroom-baseline CSVs in
               benchmarks/k_sweep_2026-05-10/
               (k_sweep_results.csv = N=50/100/250 K20 vs K40,
                k_sweep_large_results.csv = N=500/1000 K20 vs K40,
                k80_results.csv = N=1000 K=80,
                k_extreme.csv = N=500 K=80,
-               vroom_seeds.csv + vroom_small.csv = Vroom-baselines,
-               k160_n1000.csv = N=1000 K=160 [pågår])
+               vroom_seeds.csv + vroom_small.csv = Vroom baselines,
+               k160_n1000.csv = N=1000 K=160 [in progress])
 
 [+] 26i. 3-tier auto-K (2026-05-10)
-   Implementert: main.rs auto-K-blokk:
+   Implemented: main.rs auto-K block:
               N<100  → K=20
               N<500  → K=40
               N≥500  → K=80
-   Verifisert: r1_0050 → K=20, r1_0100 → K=40, r1_0500 → K=80, r1_1000 → K=80.
-   Forventet effekt på cross-seed Vroom-gap:
-              N=50    +2.69% (uendret)
-              N=100   −0.15% (uendret, K=40)
-              N=250   −1.13% (uendret, K=40)
-              N=500   +0.18% (var +0.70% med K=40)  ⭐ +0.52 pp
-              N=1000  +2.57% (var +3.54% med K=40)  ⭐ +0.97 pp
+   Verified: r1_0050 → K=20, r1_0100 → K=40, r1_0500 → K=80, r1_1000 → K=80.
+   Expected effect on cross-seed Vroom gap:
+              N=50    +2.69% (unchanged)
+              N=100   −0.15% (unchanged, K=40)
+              N=250   −1.13% (unchanged, K=40)
+              N=500   +0.18% (was +0.70% with K=40)  ⭐ +0.52 pp
+              N=1000  +2.57% (was +3.54% with K=40)  ⭐ +0.97 pp
 
-[+] 27. Neural Combinatorial Optimization (Vei A: ONNX-import)
-   Filer:     neural/train_pointer_tsp.py (PyTorch trening)
-              neural/pointer_tsp_encoder.onnx + _decoder.onnx (eksporterte vekter)
-              src/neural.rs (Rust ONNX-loader + autoregressiv loop)
+[+] 27. Neural Combinatorial Optimization (Path A: ONNX import)
+   Files:     neural/train_pointer_tsp.py (PyTorch training)
+              neural/pointer_tsp_encoder.onnx + _decoder.onnx (exported weights)
+              src/neural.rs (Rust ONNX loader + autoregressive loop)
               examples/neural_test.rs (proof-of-concept)
-   Arkitektur:
-              Encoder: nn.TransformerEncoderLayer (1 lag, embed=64, head=4)
+   Architecture:
+              Encoder: nn.TransformerEncoderLayer (1 layer, embed=64, head=4)
                        Input: (B, N, 2) coords → Output: (B, N, 64) embeddings
-              Decoder: pointer-attention med global+last-context
+              Decoder: pointer attention with global+last context
                        Input: h_nodes, h_graph, last_emb, mask
                        Output: logits over remaining stops
-              Autoregressiv loop kjøres i Rust — encoder 1×, decoder N×.
-   Trening:   REINFORCE med greedy-rollout-baseline. 200 epoch på MPS-GPU,
-              16 sekunder. Tap konvergert.
+              Autoregressive loop runs in Rust — encoder 1×, decoder N×.
+   Training:  REINFORCE with greedy-rollout baseline. 200 epochs on MPS-GPU,
+              16 seconds. Loss converged.
               Final: random tour=10.46, pointer-NN=4.32 (-58.7%)
-   ONNX:      Encoder + decoder eksportert som SEPARATE filer (ikke ett-skudd)
-              for å støtte autoregressiv generering. Dynamic axes for
+   ONNX:      Encoder + decoder exported as SEPARATE files (not one-shot)
+              to support autoregressive generation. Dynamic axes for
               variable N.
-   Rust-test: examples/neural_test.rs på N=20 random TSP:
+   Rust test: examples/neural_test.rs on N=20 random TSP:
               Nearest-neighbor: 5.15
-              Pointer-NN:       4.83 (−6.2% bedre!)
-   Status:    INFRASTRUKTUR FUNGERER END-TO-END (PyTorch → ONNX → Rust ort).
-   Begrensning: nåværende modell trent kun på N=20 random TSP. For å bruke
-              som warm-start for r1_1000 CVRPTW må vi:
-              1. Re-trene med TW + kapasitet features per node
-              2. Trene med varierende N (50, 100, 250, 500, 1000)
-              3. Bruke Solomon-stil distribusjoner (clustered TWs)
-              4. Multi-vehicle output (segmentere tur i ruter ved depot/EOS)
-              Kreves: 1-2 dager trening (på samme MPS-GPU), 50K+ eksempler.
-              Forventet gevinst som warm-start: 0.5-2% på N=1000.
-   Verdikt:   PIPELINE FERDIG. Brukerklart for skalering til CVRPTW når
-              det blir prioritert.
+              Pointer-NN:       4.83 (−6.2% better!)
+   Status:    INFRASTRUCTURE WORKS END-TO-END (PyTorch → ONNX → Rust ort).
+   Limitation: Current model trained only on N=20 random TSP. To use
+              as warm-start for r1_1000 CVRPTW we must:
+              1. Retrain with TW + capacity features per node
+              2. Train with varying N (50, 100, 250, 500, 1000)
+              3. Use Solomon-style distributions (clustered TWs)
+              4. Multi-vehicle output (segment tour into routes at depot/EOS)
+              Required: 1-2 days of training (on the same MPS-GPU), 50K+ examples.
+              Expected gain as warm-start: 0.5-2% on N=1000.
+   Verdict:   PIPELINE DONE. User-ready for scaling to CVRPTW when
+              prioritized.
 
-[+] 28. CVRPTW pointer-net (utvidelse av #27)
-   Filer:     neural/train_pointer_cvrptw.py + pointer_cvrptw_*.onnx
+[+] 28. CVRPTW pointer-net (extension of #27)
+   Files:     neural/train_pointer_cvrptw.py + pointer_cvrptw_*.onnx
               src/neural.rs::PointerCvrptwModel
               examples/cvrptw_test.rs
-   Utvidelse fra TSP:
-              - 6-d node-features: (x, y, demand, tw_start, tw_end, service)
-              - Depot-node (idx 0) som åpner/lukker ruter
+   Extension from TSP:
+              - 6-d node features: (x, y, demand, tw_start, tw_end, service)
+              - Depot node (idx 0) that opens/closes routes
               - State per step: (current_load_norm, current_time_norm)
-              - Multi-vehicle output: modellen velger depot-retur når
-                kapasitet/TW-stramheter krever ny rute
-              - REINFORCE-loss inkluderer travel-cost + 5×TW-violation-penalty
-              - Feasibility-mask i decoder: kun selectable hvis cap+TW OK
-   Trening:   400 epoch på MPS-GPU, 61s. Final greedy mean cost 9.29 på
+              - Multi-vehicle output: model picks depot return when
+                capacity/TW tightness requires a new route
+              - REINFORCE loss includes travel cost + 5×TW violation penalty
+              - Feasibility mask in decoder: only selectable if cap+TW OK
+   Training:  400 epochs on MPS-GPU, 61s. Final greedy mean cost 9.29 on
               N=20 random CVRPTW.
-   Rust-test: examples/cvrptw_test.rs på syntetisk N=20:
-              - Alle 20 kunder besøkt
-              - 6 ruter generert med korrekte depot-returs
+   Rust test: examples/cvrptw_test.rs on synthetic N=20:
+              - All 20 customers visited
+              - 6 routes generated with correct depot returns
               - Total cost: 8.50
-              - Ingen TW/capacity-brudd (feasibility-mask sikrer det)
-   Status:    PIPELINE FUNGERER. Rust kan kalle CVRPTW-modell og få
-              feasible multi-route output. Klar for integrering i brooom-
-              solver som warm-start.
-   Begrensning for r1_1000-bruk:
-              - Modell trent på uniform random N=20, ikke Solomon-stil N=1000
-              - Krever re-trening med:
-                * Variert N (50, 100, 250, 500, 1000) i samme batch
-                * Solomon-stil TW-distribusjoner (clustered, varierte stramheter)
-                * Solomon-stil clustering (R1 random, C1 clustered, RC1 mixed)
-                * Større treningsbudsjett (timer, ikke minutter)
-   Verdikt:   PIPELINE FERDIG. Skalering til r1_1000 = re-trenings-spørsmål.
+              - No TW/capacity violations (feasibility mask ensures it)
+   Status:    PIPELINE WORKS. Rust can call CVRPTW model and get
+              feasible multi-route output. Ready for integration into the brooom
+              solver as warm-start.
+   Limitation for r1_1000 use:
+              - Model trained on uniform random N=20, not Solomon-style N=1000
+              - Requires retraining with:
+                * Varied N (50, 100, 250, 500, 1000) in the same batch
+                * Solomon-style TW distributions (clustered, varied tightness)
+                * Solomon-style clustering (R1 random, C1 clustered, RC1 mixed)
+                * Larger training budget (hours, not minutes)
+   Verdict:   PIPELINE DONE. Scaling to r1_1000 = retraining question.
 
-[~] 29. RAG-NN-arkitektur (brukers visjon)
-   Idé:       NN encoder → embedding → ANN-lookup → henter cached løsning(er)
-              fra lignende problemer → NN decoder kombinerer cached løsning
-              med ny problem-state → tilpasset løsning
-   Sammenligning med GPT/RAG:
-              - GPT: tekst → embedding → retrieve dokumenter → ny tekst
-              - VRP-RAG: problem → embedding → retrieve løsninger → ny løsning
-   Bygger på: src/embedding.rs (16/22-d ProblemEmbedding)
+[~] 29. RAG-NN architecture (user's vision)
+   Idea:      NN encoder → embedding → ANN lookup → fetch cached solution(s)
+              from similar problems → NN decoder combines cached solution
+              with new problem state → adapted solution
+   Comparison with GPT/RAG:
+              - GPT: text → embedding → retrieve documents → new text
+              - VRP-RAG: problem → embedding → retrieve solutions → new solution
+   Builds on: src/embedding.rs (16/22-d ProblemEmbedding)
               src/cache.rs (CacheMeta + nearest top-K)
               src/neural.rs (PointerCvrptwModel)
-   Ny arkitektur trengs:
-              - "Solution decoder" NN: tar (cached_solution_template, new_problem)
+   New architecture needed:
+              - "Solution decoder" NN: takes (cached_solution_template, new_problem)
                 → adapted solution
-              - Treningsdata: par av (problem_a, solution_a, problem_b, solution_b)
-                hvor problem_a ~ problem_b og solution_b er kjent god
-              - Tap: kost(adapted_solution_b) - kost(optimal_solution_b)
-   Status:    SKISSERT. Krever betydelig ML-arbeid + corpus av løste
-              VRP-instanser. Naturlig fortsettelse av RAG-Nivå-3
-              (median-config-overføring) vi allerede har.
-   Verdikt:   FUTURE WORK når basis pointer-net for r1_1000 er solid.
+              - Training data: pairs of (problem_a, solution_a, problem_b, solution_b)
+                where problem_a ~ problem_b and solution_b is known good
+              - Loss: cost(adapted_solution_b) - cost(optimal_solution_b)
+   Status:    SKETCHED. Requires significant ML work + corpus of solved
+              VRP instances. Natural continuation of RAG Level 3
+              (median-config transfer) we already have.
+   Verdict:   FUTURE WORK once basic pointer-net for r1_1000 is solid.
 
-[+] 30. Distillation-NN: refiner trent på Vroom som lærer
-   Konsept: knowledge distillation à la DeepSeek vs OpenAI.
-            Lærer = Vroom-løsning (kjent god).
-            Student = liten NN som predikerer per-edge "er-i-Vroom-løsningen".
-            Ved inferens: scor brooom-edges, prioriter de med lav prob —
-            de er sannsynligvis suboptimale.
-   Treningsdata: 5 brooom+vroom-par fra benchmarks/results/
-   Edge-overlap analyse:
+[+] 30. Distillation NN: refiner trained on Vroom as teacher
+   Concept: knowledge distillation à la DeepSeek vs OpenAI.
+            Teacher = Vroom solution (known good).
+            Student = small NN that predicts per-edge "is-in-Vroom-solution".
+            At inference: score brooom edges, prioritize those with low prob —
+            they are likely suboptimal.
+   Training data: 5 brooom+vroom pairs from benchmarks/results/
+   Edge-overlap analysis:
             N=50:  57.4% overlap, brooom 1563 vs vroom 1554
-            N=100: 69.4%        ,        2463 vs       2466 (vi vinner)
-            N=250: 53.5%        ,        4373 vs       4472 (vi vinner)
-            N=500: 39.1%        ,        7091 vs       7132 (vi vinner)
-            N=1000: 36.3%       ,       12162 vs      11748 (Vroom vinner)
-   Modell: 8-feature MLP (edge-len, posisjon, node-degree, TW-stramhet,
-            rute-lengde, depot-indikator).
-   Resultat: val_acc=61.9% (baseline 60%), margin=+0.05.
-   Signal:  Modellen LÆRER å skille (margin er positiv), men 0.05 er for
-            lite for praktisk LS-prioritering.
-   Begrensning: 5 instanser × ~500 edges = 2K eksempler er for lite.
-            8 features fanger ikke opp komplekse mønstre.
-            Edge-overlap-tak (36-69%) begrenser uansett.
-   Filer:    neural/train_refiner_real.py + edge_refiner.onnx
-   For å gjøre det praktisk:
-            1. 50-300+ Solomon/Gehring-Homberger par (Vroom-løsninger på alle)
-            2. GNN-encoder på distansematrisen (PyG/DGL)
+            N=100: 69.4%        ,        2463 vs       2466 (we win)
+            N=250: 53.5%        ,        4373 vs       4472 (we win)
+            N=500: 39.1%        ,        7091 vs       7132 (we win)
+            N=1000: 36.3%       ,       12162 vs      11748 (Vroom wins)
+   Model: 8-feature MLP (edge length, position, node degree, TW tightness,
+            route length, depot indicator).
+   Result: val_acc=61.9% (baseline 60%), margin=+0.05.
+   Signal:  The model LEARNS to discriminate (margin is positive), but 0.05 is too
+            small for practical LS prioritization.
+   Limitation: 5 instances × ~500 edges = 2K examples is too small.
+            8 features don't capture complex patterns.
+            Edge-overlap ceiling (36-69%) limits anyway.
+   Files:    neural/train_refiner_real.py + edge_refiner.onnx
+   To make it practical:
+            1. 50-300+ Solomon/Gehring-Homberger pairs (Vroom solutions on all)
+            2. GNN encoder on the distance matrix (PyG/DGL)
             3. Multi-teacher distillation (Vroom + LKH-3 + HGS) for "soft labels"
-            4. Direct cost-distillation: predict per-move kost-delta i stedet
-               for binær er-i-vroom
-   Verdikt: PIPELINE FERDIG (Python trening + ONNX + Rust-klart).
-            Signal svakt med 5 par. Skalering = mer data + GNN.
+            4. Direct cost distillation: predict per-move cost delta instead
+               of binary is-in-vroom
+   Verdict: PIPELINE DONE (Python training + ONNX + Rust-ready).
+            Signal weak with 5 pairs. Scaling = more data + GNN.
 
-[+] 8b. Tour-merge (slå sammen korte ruter)
-   Diagnose:  Før implementasjon, sjekket N=1000-løsning. ALLE 67 ruter har
-              11-21 stops. INGEN korte ruter (≤3) finnes. relocate-operatoren
-              håndterer allerede tour-merge-tilfeller gradvis.
-   Verdikt:   IKKE NØDVENDIG.
+[+] 8b. Tour-merge (merge short routes)
+   Diagnosis: Before implementation, checked N=1000 solution. ALL 67 routes have
+              11-21 stops. NO short routes (≤3) exist. The relocate operator
+              already handles tour-merge cases gradually.
+   Verdict:   NOT NECESSARY.
 
-[-] 10. ALNS multi-armed bandit på destroy-operatorer
-   Strategi: 3 destroy-varianter — Random / Worst (høyest marginalkost
-             per task) / Related (Shaw — fjern n nærmeste til seed).
-             Bandit velger via softmax-vekter, oppdatert med Ropke-
-             Pisinger-scoring (σ1=33 ny global-best, σ2=9 lokal forbedring,
+[-] 10. ALNS multi-armed bandit on destroy operators
+   Strategy: 3 destroy variants — Random / Worst (highest marginal cost
+             per task) / Related (Shaw — remove n nearest to seed).
+             Bandit picks via softmax weights, updated with Ropke-
+             Pisinger scoring (σ1=33 new global-best, σ2=9 local improvement,
              σ3=0). EMA r=0.2, segment=5 iters.
-             Gradient-fortolkning: policy gradient på handlingsrom 3
-             (i motsetning til REINFORCE-on-tasks med handlingsrom N).
-   Resultat:  3-arm: blanding, gjennomsnittlig regresjon
-              2-arm (Random+Worst, fjernet Related):
+             Gradient interpretation: policy gradient on action space 3
+             (in contrast to REINFORCE-on-tasks with action space N).
+   Result:    3-arm: mixed, average regression
+              2-arm (Random+Worst, removed Related):
                 N=50    1569→1565 (-0.3%)
                 N=100   2441→2451 (+0.4%)
-                N=250   4435→4486 (+1.2%)  REGRESJON, mister WIN
-                N=500   7241→7325 (+1.2%)  REGRESJON
-                N=1000  13351→13234 (-0.9%) FORBEDRING (deterministisk
-                                            over 3 kjøringer, bekreftet)
-              vs Vroom: N=250 mister sin WIN-status (-0.8% → +0.3%);
-              N=1000 går fra +13.6% → +12.6% (fortsatt stort gap).
-              Trade-off: 1% bedre på en størrelse vi uansett er 13% bak,
-              i bytte for å miste en bevist WIN.
-   Verdikt:   REVERTERT. Bandit + 30 iters er for kort horisont — typisk
-              ALNS-litteratur bruker 1000+ iters med simulated-annealing
-              aksept. Vår "best-ever-only"-aksept er feil setting for ALNS.
-              Hvis brukeren senere vil prioritere N=1000 spesifikt, kan
-              vi gjenintrodusere Worst-removal betinget på instansstørrelse.
+                N=250   4435→4486 (+1.2%)  REGRESSION, loses WIN
+                N=500   7241→7325 (+1.2%)  REGRESSION
+                N=1000  13351→13234 (-0.9%) IMPROVEMENT (deterministic
+                                            over 3 runs, confirmed)
+              vs Vroom: N=250 loses its WIN status (-0.8% → +0.3%);
+              N=1000 goes from +13.6% → +12.6% (still big gap).
+              Trade-off: 1% better on a size we're already 13% behind on,
+              in exchange for losing a proven WIN.
+   Verdict:   REVERTED. Bandit + 30 iters is too short a horizon — typical
+              ALNS literature uses 1000+ iters with simulated-annealing
+              acceptance. Our "best-ever-only" acceptance is the wrong setting for ALNS.
+              If the user later wants to prioritize N=1000 specifically, we can
+              reintroduce Worst-removal conditional on instance size.
 
-[-] 9. REINFORCE-vekter på ILS-task-utvalg (PyTorch-stil gradient)
-   Strategi: hver task har en sample-vekt. ILS-kick velger n_kick tasks
-             via Efraimidis-Spirakis (key = -ln(U)/w). Etter LS:
-             multiplikativ bump/decay basert på sign(Δkost).
-             Testet med α=0.15 (1.15/0.95) og α=0.05 (1.05/0.98).
-   Resultat:  Begge varianter gir regresjon over hele linja:
+[-] 9. REINFORCE weights on ILS task selection (PyTorch-style gradient)
+   Strategy: each task has a sample weight. ILS kick picks n_kick tasks
+             via Efraimidis-Spirakis (key = -ln(U)/w). After LS:
+             multiplicative bump/decay based on sign(Δcost).
+             Tested with α=0.15 (1.15/0.95) and α=0.05 (1.05/0.98).
+   Result:    Both variants regress across the board:
               α=0.15: N=100 +1.3%, N=250 +1.0%, N=500 +1.2%, N=1000 +1.4%
               α=0.05: N=100 +0.9%, N=250 +1.9%, N=500 +1.8%, N=1000 +0.8%
-              Årsak: ILS henter all sin verdi fra diversitet i kicks. Med
-              bare 30 iterasjoner per variant er vi i utforsknings-regime,
-              ikke utnyttelses-regime. REINFORCE konsentrerer kicks på
-              "vanskelige" tasks, men disse er ofte vanskelige nettopp
-              fordi de er trange — å fjerne dem oftere produserer bare
-              flere unassigned, ikke bedre globale optima.
-              Dette er klassisk explore-vs-exploit: 30 kicks er for få til
-              at policy-konvergens lønner seg.
-   Verdikt:   REVERTERT.
+              Cause: ILS gets all its value from diversity in kicks. With
+              only 30 iterations per variant we are in the exploration regime,
+              not exploitation regime. REINFORCE concentrates kicks on
+              "hard" tasks, but these are often hard precisely
+              because they are tight — removing them more often produces only
+              more unassigned, not better global optima.
+              This is classic explore-vs-exploit: 30 kicks is too few for
+              policy convergence to pay off.
+   Verdict:   REVERTED.

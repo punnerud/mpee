@@ -1,11 +1,11 @@
-"""Refiner v2: transformer-encoder over node-features → per-edge classifier.
+"""Refiner v2: transformer-encoder over node-features -> per-edge classifier.
 
-I stedet for flat MLP per edge, encoder vi NODENE først (transformer over
-6-d node-features med matrise-statistikk), så per-edge klassifisering på
-(h_a, h_b, edge-features). Dette fanger opp lokal kontekst som node-degree
-og clustering rundt hver kant.
+Instead of a flat MLP per edge, we encode the NODES first (transformer over
+6-d node features with matrix statistics), then per-edge classification on
+(h_a, h_b, edge-features). This captures local context like node-degree
+and clustering around each edge.
 
-Treningskorpus: alle (brooom, vroom)-par i benchmarks/results/.
+Training corpus: all (brooom, vroom) pairs in benchmarks/results/.
 """
 
 import os
@@ -221,7 +221,7 @@ def main():
                    f"neg_mean={neg_mean:+.3f}  margin={pos_mean-neg_mean:+.3f}")
             print(msg); log.write(msg + "\n"); log.flush()
 
-    print(f"Trent på {time.perf_counter()-t0:.1f}s")
+    print(f"Trained in {time.perf_counter()-t0:.1f}s")
     log.close()
 
 

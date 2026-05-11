@@ -1,20 +1,20 @@
 //! Contraction Hierarchies (CH) — Geisberger et al. 2008-stil.
 //!
-//! To-fase tilnærming:
+//! Two-phase approach:
 //!
-//!   * **Preprocessing**: tildel hver vertex en `rank` (laveste først). For
-//!     hver vertex som kontraheres, sjekk hver par av (innkommende, utgående)-
-//!     naboer og legg til en *shortcut*-kant hvis det ikke allerede finnes
-//!     en kortere "witness"-vei mellom dem som unngår den kontraherte.
+//!   * **Preprocessing**: assign each vertex a `rank` (lowest first). For
+//!     each vertex being contracted, check every pair of (incoming, outgoing)
+//!     neighbors and add a *shortcut* edge if there is no existing shorter
+//!     "witness" path between them that avoids the contracted vertex.
 //!
-//!   * **Query**: bidirectional Dijkstra på den utvidede grafen, men
-//!     relaks **kun** kanter som går oppover i hierarkiet (fra lav rank til
-//!     høy). Dette begrenser søket dramatisk — typisk <1000 noder hver vei
-//!     på road networks.
+//!   * **Query**: bidirectional Dijkstra on the augmented graph, but
+//!     relax **only** edges that go upward in the hierarchy (from low rank to
+//!     high). This limits the search dramatically — typically <1000 nodes each
+//!     way on road networks.
 //!
-//! Dette er en KORREKT, ikke nødvendigvis høyt-tunet implementasjon. Vi
-//! prioriterer matematisk korrekthet (verifisert mot full Dijkstra) før
-//! evt. ytelse-tuning.
+//! This is a CORRECT, not necessarily highly tuned implementation. We
+//! prioritize mathematical correctness (verified against full Dijkstra) before
+//! any performance tuning.
 
 use crate::buffer::Buffer;
 use crate::dijkstra::INF;
@@ -25,11 +25,11 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::Instant;
 
-/// Default hops-limit i witness search. Lavere → raskere preprocessing,
-/// flere shortcuts. Høyere → tregere, færre shortcuts.
+/// Default hops limit in witness search. Lower → faster preprocessing,
+/// more shortcuts. Higher → slower, fewer shortcuts.
 const WITNESS_HOPS_LIMIT: u32 = 5;
 
-/// Den ferdig-bygde Contraction Hierarchy.
+/// The fully built Contraction Hierarchy.
 pub struct ContractionHierarchy {
     /// Augmented forward graph (originals + shortcuts), with every vertex's
     /// out-edges sorted so "upward" (rank[v] > rank[u]) comes first.
@@ -170,9 +170,9 @@ pub fn build_with_dist(g: &CsrGraph, edge_dist: &[f32]) -> ContractionHierarchy 
         (total_shortcuts as f64 + g.m() as f64) / g.m() as f64
     );
 
-    // ---- Bygg augmented CSR fra fwd[] og bwd[] ----
-    // For hver vertex sortér slik at upward-kanter (rank[target] > rank[u])
-    // kommer FØRST. up_count_fwd[u] = antall upward-kanter.
+    // ---- Build augmented CSR from fwd[] and bwd[] ----
+    // For each vertex sort so that upward edges (rank[target] > rank[u])
+    // come FIRST. up_count_fwd[u] = number of upward edges.
     let m_aug: usize = fwd.iter().map(|v| v.len()).sum();
 
     let mut head_fwd = vec![0u32; n + 1];
@@ -1354,7 +1354,7 @@ pub fn query(ch: &ContractionHierarchy, src: u32, dst: u32) -> Option<f32> {
     loop {
         let tf = hf.first().map(|h| h.d).unwrap_or(INF);
         let tb = hb.first().map(|h| h.d).unwrap_or(INF);
-        // Optimal stop: ingen kortere meeting kan oppstå.
+        // Optimal stop: no shorter meeting can occur.
         if tf >= best && tb >= best {
             break;
         }
@@ -1362,22 +1362,22 @@ pub fn query(ch: &ContractionHierarchy, src: u32, dst: u32) -> Option<f32> {
             break;
         }
 
-        // Velg retning: minste top.
+        // Pick direction: smallest top.
         if tf <= tb && !hf.is_empty() {
             let HItem { d, v: u } = pop(&mut hf).unwrap();
             if d > dist_f[u as usize] {
                 continue;
             }
-            // Sjekk meeting: er u nådd i backward også?
+            // Check meeting: has u been reached in backward too?
             let total = d + dist_b[u as usize];
             if total < best {
                 best = total;
             }
-            // Stop hvis denne retningens topp ≥ best.
+            // Stop if this direction's top ≥ best.
             if d >= best {
                 continue;
             }
-            // Relaks bare upward edges: de første up_count[u] kantene.
+            // Relax only upward edges: the first up_count[u] edges.
             let s = ch.graph_fwd.head[u as usize] as usize;
             let up_end = s + ch.up_count_fwd[u as usize] as usize;
             for k in s..up_end {
@@ -1426,14 +1426,14 @@ pub fn query(ch: &ContractionHierarchy, src: u32, dst: u32) -> Option<f32> {
 // Internals: contraction, witness search, priority
 // =============================================================================
 
-/// Witness search state (gjenbrukes for å unngå allokering per call).
+/// Witness search state (reused to avoid allocation per call).
 struct WitnessState {
     dist: Vec<f32>,
     hops: Vec<u32>,
     timestamp: Vec<u64>,
     current_ts: u64,
     heap: Vec<HItem3>,
-    touched: Vec<u32>, // for å nullstille kun de berørte
+    touched: Vec<u32>, // to reset only the touched ones
 }
 
 #[derive(Clone, Copy)]
@@ -1490,7 +1490,7 @@ impl WitnessState {
 
         while let Some(top) = pop_h3(&mut self.heap) {
             if top.d > limit {
-                return false; // sorted by dist; ingen kan være mindre.
+                return false; // sorted by dist; none can be smaller.
             }
             if top.v == target {
                 return true;
@@ -1677,9 +1677,9 @@ fn degree_priority(
     bwd: &[Vec<(u32, f32, f32, u32)>],
     v: u32,
 ) -> i32 {
-    // Heuristikk: in-degree × out-degree er et godt estimat på antall
-    // potensielle shortcuts (worst case). Vi vil contract'e først der
-    // dette tallet er lavest.
+    // Heuristic: in-degree × out-degree is a good estimate of the number of
+    // potential shortcuts (worst case). We want to contract first where
+    // this number is lowest.
     let din = bwd[v as usize].len() as i32;
     let dout = fwd[v as usize].len() as i32;
     din * dout - (din + dout)

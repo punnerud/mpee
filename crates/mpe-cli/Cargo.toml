@@ -2,7 +2,7 @@
 name = "mpe-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Unified CLI driver for mpe-engine — wires the dikstra (CH routing) and brooom (VRP solver) crates into one in-process pipeline with zero-copy shared memory."
+description = "Unified CLI driver for mpe-engine — wires the dijkstra (CH routing) and brooom (VRP solver) crates into one in-process pipeline with zero-copy shared memory."
 license = "MIT"
 
 [[bin]]
@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Both engines as path dependencies. This is the seam where in-process,
-# zero-copy data sharing happens: the CLI loads a CH cache via dikstra
+# zero-copy data sharing happens: the CLI loads a CH cache via dijkstra
 # and passes &Vec / Arc references straight into brooom — no IPC, no
 # serialization round-trip.
 #
@@ -23,7 +23,7 @@ path = "src/main.rs"
 # user wanted a fast, clean first commit. Uncomment as needed.
 #
 # brooom     = { path = "../brooom" }
-# sssp_bench = { path = "../dikstra" }
+# sssp_bench = { path = "../dijkstra" }
 
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

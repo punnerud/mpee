@@ -1,11 +1,11 @@
-//! Benchmark på ekstra (ikke-kart) grafer:
-//!   * RMAT (Graph500-stil syntetisk)
-//!   * Word ladder (engelsk ordliste)
-//!   * SNAP soc-LiveJournal (sosialt nettverk)
+//! Benchmark on extra (non-map) graphs:
+//!   * RMAT (Graph500-style synthetic)
+//!   * Word ladder (English word list)
+//!   * SNAP soc-LiveJournal (social network)
 //!   * Rubik's pocket cube (2x2x2)
 //!
-//! Hver workload kjører alle 5 SSSP-algoritmer fra én fast kilde,
-//! verifiserer mot binary-Dijkstra, rapporterer tider.
+//! Each workload runs all 5 SSSP algorithms from a single fixed source,
+//! verifies against binary Dijkstra, and reports timings.
 
 use std::time::Instant;
 
@@ -131,7 +131,7 @@ fn run_rmat() {
         let t = Instant::now();
         let g = gen_rmat(scale, ef, 42);
         println!(
-            "[rmat] scale={scale} edge_factor={ef} -> n={} m={} ({:.2} s å generere)",
+            "[rmat] scale={scale} edge_factor={ef} -> n={} m={} ({:.2} s to generate)",
             g.n,
             g.m(),
             t.elapsed().as_secs_f64()
@@ -152,19 +152,19 @@ fn run_word_ladder() {
     println!("\n========== Word ladder ==========");
     let path = "/usr/share/dict/words";
     if !std::path::Path::new(path).exists() {
-        println!("Hopper over: {path} finnes ikke");
+        println!("Skipping: {path} does not exist");
         return;
     }
     let t = Instant::now();
     let (g, words) = match build_word_ladder(path, 4, 8) {
         Ok(x) => x,
         Err(e) => {
-            println!("Feil: {e}");
+            println!("Error: {e}");
             return;
         }
     };
     println!(
-        "[ladder] bygget på {:.2} s",
+        "[ladder] built in {:.2} s",
         t.elapsed().as_secs_f64()
     );
     let src = pick_word(&words, "cat")
@@ -173,15 +173,15 @@ fn run_word_ladder() {
         .map(|(i, _w)| i)
         .unwrap_or(0);
     let src_word = words.get(src as usize).cloned().unwrap_or_default();
-    println!("  starter fra ord: \"{}\" (idx={src})", src_word);
-    run_workload("Word ladder (4-8 bokstaver)", &g, src);
+    println!("  starting from word: \"{}\" (idx={src})", src_word);
+    run_workload("Word ladder (4-8 letters)", &g, src);
 }
 
 fn run_snap() {
     println!("\n========== SNAP soc-LiveJournal1 ==========");
     let path = "data/soc-LiveJournal1.txt.gz";
     if !std::path::Path::new(path).exists() {
-        println!("Hopper over: {path} finnes ikke. Last ned med:");
+        println!("Skipping: {path} does not exist. Download with:");
         println!("  curl -L -o data/soc-LiveJournal1.txt.gz \\");
         println!("    https://snap.stanford.edu/data/soc-LiveJournal1.txt.gz");
         return;
@@ -190,12 +190,12 @@ fn run_snap() {
     let (g, nonempty) = match load_snap_edge_list(path) {
         Ok(x) => x,
         Err(e) => {
-            println!("Feil: {e}");
+            println!("Error: {e}");
             return;
         }
     };
     println!(
-        "[snap] bygget på {:.2} s",
+        "[snap] built in {:.2} s",
         t.elapsed().as_secs_f64()
     );
     let src = nonempty.first().copied().unwrap_or(0);
@@ -207,12 +207,12 @@ fn run_rubik() {
     let t = Instant::now();
     let (g, _depth) = build_pocket_cube_graph();
     println!(
-        "[rubik] bygget på {:.2} s",
+        "[rubik] built in {:.2} s",
         t.elapsed().as_secs_f64()
     );
-    // SOLVED er ID 0.
+    // SOLVED is ID 0.
     let _ = SOLVED;
-    run_workload("Rubik 2x2x2 fra SOLVED", &g, 0);
+    run_workload("Rubik 2x2x2 from SOLVED", &g, 0);
 }
 
 fn main() {

@@ -1,12 +1,12 @@
-"""Refiner-NN trent på REELLE brooom + Vroom-par.
+"""Refiner NN trained on REAL brooom + Vroom pairs.
 
-Treningssignal: for hver edge i brooom-løsningen, label = 1 hvis edgen
-også finnes i Vroom-løsningen (good), 0 hvis kun i brooom (suboptimal).
-NN lærer å predikere "er-i-vroom" = "edge-er-good".
+Training signal: for each edge in the brooom solution, label = 1 if the edge
+also appears in the Vroom solution (good), 0 if only in brooom (suboptimal).
+NN learns to predict "is-in-vroom" = "edge-is-good".
 
-Bruk: i Rust-LS, identifiser brooom-edges med lav score → de er kandidater
-for relocate/swap. Speed-gevinst (færre probes) + cost-gevinst (LS finner
-suboptimale edges som ellers var "settled").
+Usage: in the Rust LS, identify brooom edges with low score -- those are
+candidates for relocate/swap. Speed gain (fewer probes) + cost gain (LS finds
+suboptimal edges that were otherwise "settled").
 """
 
 import os
@@ -28,7 +28,7 @@ LR = 1e-3
 
 
 def load_pair(name):
-    """Returnér (brooom_solution, vroom_solution, problem) for `name`."""
+    """Return (brooom_solution, vroom_solution, problem) for `name`."""
     with open(os.path.join(RES_DIR, f"{name}.brooom.json")) as f:
         b = json.load(f)
     with open(os.path.join(RES_DIR, f"{name}.vroom.json")) as f:
@@ -51,23 +51,23 @@ def edge_set(sol):
 
 
 def build_dataset(names):
-    """For hver brooom-edge, bygg features + label.
+    """For each brooom edge, build features + label.
     Features:
-      - edge-length (matrix-distanse, normalized per problem)
+      - edge-length (matrix distance, normalized per problem)
       - position-in-route (0..1)
       - degree of node a in matrix (sum of distances)
       - degree of node b
-      - tw-stramhet for a og b
-      - rute-lengde (antall stops)
-      - er-til-eller-fra-depot (binær)
-    Label: 1 hvis (a,b) ∈ Vroom-edges, else 0.
+      - tw-tightness for a and b
+      - route-length (number of stops)
+      - is-to-or-from-depot (binary)
+    Label: 1 if (a,b) is in Vroom edges, else 0.
     """
     feats_all = []
     labels_all = []
     for name in names:
         b, v, p = load_pair(name)
         e_v = edge_set(v)
-        # Hent matrise-distanser fra problem (første profil).
+        # Fetch matrix distances from problem (first profile).
         prof = list(p["matrices"].keys())[0]
         D = p["matrices"][prof]["durations"]
         n = len(D)
@@ -175,7 +175,7 @@ def main():
                    f"margin={margin:+.3f}")
             print(msg); log.write(msg + "\n"); log.flush()
 
-    print(f"Trent på {time.perf_counter()-t0:.1f}s")
+    print(f"Trained in {time.perf_counter()-t0:.1f}s")
 
     # Final eval.
     with torch.no_grad():

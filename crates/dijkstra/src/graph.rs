@@ -134,9 +134,9 @@ pub fn gen_random_sparse(n: usize, avg_deg: usize, seed: u64) -> CsrGraph {
     CsrGraph::from_edges(n, &edges)
 }
 
-/// Random sparse graf med eksponensielt fordelte kantvekter (skala = mean).
-/// Disse vektene har større variasjon enn uniform — utfordrer bucket-baserte
-/// algoritmer som er sensitive for tunge kanter.
+/// Random sparse graph with exponentially distributed edge weights (scale = mean).
+/// These weights have larger variance than uniform — stresses bucket-based
+/// algorithms that are sensitive to heavy edges.
 pub fn gen_random_exp_weights(n: usize, avg_deg: usize, mean: f32, seed: u64) -> CsrGraph {
     let mut rng = Rng(seed | 1);
     let m = n * avg_deg;
@@ -158,13 +158,13 @@ pub fn gen_random_exp_weights(n: usize, avg_deg: usize, mean: f32, seed: u64) ->
     CsrGraph::from_edges(n, &edges)
 }
 
-/// Power-law (preferential-attachment-stil) graf: noder med høyere ID har
-/// flere kanter; gir tunge "hubs". Modellerer realistiske nettverk (web,
-/// sosiale grafer) bedre enn uniform random.
+/// Power-law (preferential-attachment-style) graph: nodes with higher ID have
+/// more edges; produces heavy "hubs". Models realistic networks (web,
+/// social graphs) better than uniform random.
 pub fn gen_power_law(n: usize, m_edges_per_node: usize, seed: u64) -> CsrGraph {
     let mut rng = Rng(seed | 1);
     let mut edges = Vec::with_capacity(n * m_edges_per_node * 2);
-    // Start med en liten klikk.
+    // Start with a small clique.
     let init = (m_edges_per_node + 1).min(n);
     for u in 0..init {
         for v in 0..init {
@@ -174,13 +174,13 @@ pub fn gen_power_law(n: usize, m_edges_per_node: usize, seed: u64) -> CsrGraph {
             }
         }
     }
-    // Akkumulert grad-vektor for sannsynlighets-vekting.
+    // Cumulative degree vector for probability weighting.
     let mut deg_running: Vec<u32> = vec![(init - 1) as u32; init];
     for u in init..n {
-        // Velg `m_edges_per_node` mål med sannsynlighet proporsjonal med grad.
+        // Pick `m_edges_per_node` targets with probability proportional to degree.
         let total: u64 = deg_running.iter().map(|&d| d as u64).sum();
         for _ in 0..m_edges_per_node {
-            // Roulette-utvalg.
+            // Roulette selection.
             let r = (rng.next_u64() % total.max(1)) as u64;
             let mut acc = 0u64;
             let mut target = 0usize;
@@ -201,9 +201,9 @@ pub fn gen_power_law(n: usize, m_edges_per_node: usize, seed: u64) -> CsrGraph {
     CsrGraph::from_edges(n, &edges)
 }
 
-/// Sti-graf (path) 0 → 1 → 2 → ... → n-1 med uniform vekt. Verste tilfelle
-/// for bucket-baserte algoritmer: hver bucket har bare én vertex, så det er
-/// ingen batch-fordel og Bellman-Ford-passene gir ingen ekstra arbeid.
+/// Path graph 0 → 1 → 2 → ... → n-1 with uniform weight. Worst case
+/// for bucket-based algorithms: each bucket has only one vertex, so there is
+/// no batch advantage and Bellman-Ford passes do no extra work.
 pub fn gen_path(n: usize, seed: u64) -> CsrGraph {
     let mut rng = Rng(seed | 1);
     let mut edges = Vec::with_capacity(n);

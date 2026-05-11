@@ -1,6 +1,6 @@
-//! Benchmark av preprocessing-pipeline: BFS-reorder, light/heavy partition,
-//! transponering, og bidirectional Dijkstra. Cache-er hele pakken til én
-//! mmap-vennlig fil for instant cold start.
+//! Benchmark of the preprocessing pipeline: BFS reorder, light/heavy partition,
+//! transpose, and bidirectional Dijkstra. Caches the full bundle to a single
+//! mmap-friendly file for instant cold start.
 
 use std::time::Instant;
 
@@ -36,7 +36,7 @@ fn main() -> std::io::Result<()> {
     let profile = match Profile::from_name(&profile_name) {
         Some(p) => p,
         None => {
-            eprintln!("unknown profile '{profile_name}' — try car/motorcycle/bicycle/foot");
+            eprintln!("unknown profile '{profile_name}' - try car/motorcycle/bicycle/foot");
             std::process::exit(1);
         }
     };
@@ -58,15 +58,15 @@ fn main() -> std::io::Result<()> {
     let csr_cache = csr_cache_string.as_str();
     let pp_cache = pp_cache_string.as_str();
 
-    println!("=== {pbf} preprocessing-pipeline ===");
+    println!("=== {pbf} preprocessing pipeline ===");
 
-    // ---- Forsøk å loade ferdig-prosessert cache først ----
+    // ---- Try loading the preprocessed cache first ----
     let pp = if std::path::Path::new(pp_cache).exists() {
         let t = Instant::now();
         match cache_pp::load_mmap(pp_cache) {
             Ok(pp) => {
                 println!(
-                    "[pp-cache] mmap-truffet på {:.2} ms — n={}, m={}, δ={:.3}",
+                    "[pp-cache] mmap hit in {:.2} ms - n={}, m={}, delta={:.3}",
                     t.elapsed().as_secs_f64() * 1000.0,
                     pp.graph.n,
                     pp.graph.m(),
@@ -75,24 +75,24 @@ fn main() -> std::io::Result<()> {
                 Some(pp)
             }
             Err(e) => {
-                println!("[pp-cache] korrupt ({e}) — bygger på nytt");
+                println!("[pp-cache] corrupt ({e}) - rebuilding");
                 None
             }
         }
     } else {
-        println!("[pp-cache] finnes ikke — bygger fra scratch");
+        println!("[pp-cache] missing - building from scratch");
         None
     };
 
     let pp = match pp {
         Some(pp) => pp,
         None => {
-            // 1. Last råkart fra .csr-cache (eller parse pbf).
+            // 1. Load the raw map from .csr cache (or parse the pbf).
             let (g, coords, edge_dist) = load_with_cache(pbf, csr_cache, profile)?;
             let avg_deg = g.m() as f32 / g.n.max(1) as f32;
             let avg_w = estimate_avg_weight(&g);
             let delta = (avg_w / avg_deg).max(1e-4);
-            println!("  rå CSR: n = {}, m = {}, δ = {:.3}", g.n, g.m(), delta);
+            println!("  raw CSR: n = {}, m = {}, delta = {:.3}", g.n, g.m(), delta);
 
             let t = Instant::now();
             let preprocessed = preprocess(&g, Some(delta), edge_dist.as_slice());
@@ -130,7 +130,7 @@ fn main() -> std::io::Result<()> {
                 &rev_edge_dist,
             )?;
             println!(
-                "  pp-cache lagret:                    {:.0} ms",
+                "  pp-cache saved:                     {:.0} ms",
                 t.elapsed().as_secs_f64() * 1000.0
             );
 
@@ -160,13 +160,13 @@ fn main() -> std::io::Result<()> {
         pp.delta
     );
 
-    // ----- SSSP-bench på reordered graf -----
+    // ----- SSSP bench on the reordered graph -----
     let mut rng = Rng(20260509);
     let src_old = rng.range(n as u32);
     let src = remap_src_local(&pp.new_id[..], src_old);
 
     println!();
-    println!("=== SSSP fra src (reordered idx={src}) ===");
+    println!("=== SSSP from src (reordered idx={src}) ===");
 
     let t = Instant::now();
     let r = dijkstra_binary(g, src);
@@ -185,7 +185,7 @@ fn main() -> std::io::Result<()> {
     let t = Instant::now();
     let _ = delta_stepping(g, src, pp.delta);
     println!(
-        "  delta_stepping (vanlig):   {:>8.1} ms",
+        "  delta_stepping (plain):    {:>8.1} ms",
         t.elapsed().as_secs_f64() * 1000.0
     );
 
@@ -203,7 +203,7 @@ fn main() -> std::io::Result<()> {
         t.elapsed().as_secs_f64() * 1000.0
     );
 
-    // Verifiser pp-resultat mot ref
+    // Verify pp result against reference
     let mut bad = 0;
     for i in 0..n {
         let a = r[i];
@@ -218,7 +218,7 @@ fn main() -> std::io::Result<()> {
         }
     }
     println!(
-        "  korrekthet (delta_stepping_pp vs binary): {}",
+        "  correctness (delta_stepping_pp vs binary): {}",
         if bad == 0 {
             "OK".to_string()
         } else {
@@ -226,9 +226,9 @@ fn main() -> std::io::Result<()> {
         }
     );
 
-    // ----- Bidirectional Dijkstra: 1000 random (src, dst)-pair -----
+    // ----- Bidirectional Dijkstra: 1000 random (src, dst) pairs -----
     println!();
-    println!("=== Bidirectional Dijkstra: 1000 (src,dst)-pair ===");
+    println!("=== Bidirectional Dijkstra: 1000 (src,dst) pairs ===");
     let n_queries = 1000usize;
     let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(n_queries);
     for _ in 0..n_queries {
@@ -237,8 +237,8 @@ fn main() -> std::io::Result<()> {
         pairs.push((s, d));
     }
 
-    // Reference: full SSSP fra hver src og les av dst — kjør bare 100 av dem
-    // siden hver er ~50ms.
+    // Reference: full SSSP from each src and read off dst - only run 100 of them
+    // since each is ~50ms.
     let n_ref = 100usize;
     let mut ref_dists: Vec<f32> = Vec::with_capacity(n_ref);
     let t = Instant::now();
@@ -248,12 +248,12 @@ fn main() -> std::io::Result<()> {
     }
     let ref_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!(
-        "  reference (100 SSSP):      {:>8.1} ms ({:.2} ms/spørring)",
+        "  reference (100 SSSP):      {:>8.1} ms ({:.2} ms/query)",
         ref_ms,
         ref_ms / n_ref as f64
     );
 
-    // Bidir på samme 100, sammenlign korrekthet
+    // Bidir on the same 100, compare correctness
     let mut bidir_dists: Vec<Option<f32>> = Vec::with_capacity(n_queries);
     let t = Instant::now();
     for &(s, d) in &pairs {
@@ -262,7 +262,7 @@ fn main() -> std::io::Result<()> {
     }
     let bidir_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!(
-        "  bidir (1000 spørringer):   {:>8.1} ms ({:.3} ms/spørring)",
+        "  bidir (1000 queries):      {:>8.1} ms ({:.3} ms/query)",
         bidir_ms,
         bidir_ms / n_queries as f64
     );
@@ -286,12 +286,12 @@ fn main() -> std::io::Result<()> {
             }
         }
     }
-    println!("  korrekthet (100 første): {ok}/100 OK");
+    println!("  correctness (first 100): {ok}/100 OK");
 
     println!();
-    println!("=== Sammendrag ===");
+    println!("=== Summary ===");
     println!(
-        "  bidir-speedup vs full SSSP per (s,t): {:.0}× ({:.3} ms vs {:.1} ms)",
+        "  bidir speedup vs full SSSP per (s,t): {:.0}x ({:.3} ms vs {:.1} ms)",
         (ref_ms / n_ref as f64) / (bidir_ms / n_queries as f64),
         bidir_ms / n_queries as f64,
         ref_ms / n_ref as f64

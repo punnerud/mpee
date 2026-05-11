@@ -1,5 +1,5 @@
-//! Liten korrekthetstest for CH: bygg CH på tilfeldige sparse grafer og
-//! verifiser at ch::query matcher full Dijkstra på 100 random (s,d)-par.
+//! Small correctness test for CH: build CH on random sparse graphs and
+//! verify that ch::query matches full Dijkstra on 100 random (s,d) pairs.
 
 use sssp_bench::ch;
 use sssp_bench::dijkstra::dijkstra_binary;

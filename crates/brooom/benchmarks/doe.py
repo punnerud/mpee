@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""DoE-runner for brooom hyperparameter-eksperimenter.
+"""DoE runner for brooom hyperparameter experiments.
 
-Definer faktorer (CLI-flagg) med flere nivåer, kjør full eller fractional
-factorial design, og samle (kost, tid) per kombinasjon. Viser main effects og
-finner beste kombinasjon.
+Define factors (CLI flags) with multiple levels, run full or fractional
+factorial design, and collect (cost, time) per combination. Shows main effects
+and finds the best combination.
 
-Bruk:
+Usage:
     ./doe.py --instance r1_0250 --factors factors.json --design full
     ./doe.py --instance r1_1000 --factors factors.json --design plackett-burman
 
-factors.json-format:
+factors.json format:
     {
         "ils_iters":      [10, 30, 100],
         "granular_k":     [10, 20, 40],
         "ils_kick_size":  [0.2, 0.4, 0.6]
     }
 
-Output: csv på stdout med kolonnene faktor1,faktor2,...,cost,time_s.
-Etter alle kjøringene: main-effects-tabell og beste konfigurasjon.
+Output: csv on stdout with columns factor1,factor2,...,cost,time_s.
+After all runs: main-effects table and best configuration.
 
-Plackett-Burman: bare 2-nivå-faktorer (laveste og høyeste verdi). Brukes som
-screening for å identifisere viktigste faktorer før full factorial.
+Plackett-Burman: only 2-level factors (lowest and highest value). Used as
+screening to identify the most important factors before full factorial.
 """
 
 import argparse

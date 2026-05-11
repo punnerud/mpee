@@ -19,8 +19,8 @@
 use crate::dijkstra::INF;
 use crate::graph::CsrGraph;
 
-/// Debug-versjon — sporer pushes og avslører hvor en bestemt vertex
-/// "forsvinner" fra bucket-systemet.
+/// Debug version — tracks pushes and reveals where a specific vertex
+/// "disappears" from the bucket system.
 pub fn delta_stepping_debug(g: &CsrGraph, src: u32, delta: f32, watch: u32) -> Vec<f32> {
     let n = g.n;
     let mut dist = vec![INF; n];
@@ -141,9 +141,9 @@ pub fn delta_stepping_debug(g: &CsrGraph, src: u32, delta: f32, watch: u32) -> V
     dist
 }
 
-/// Δ-stepping på en pre-partisjonert CSR. `light_count[u]` angir hvor
-/// mange av u sine kanter som er light (w ≤ delta). Sparer en branch per
-/// kant ved å iterere bare over relevant range i hver phase.
+/// Δ-stepping on a pre-partitioned CSR. `light_count[u]` indicates how
+/// many of u's edges are light (w ≤ delta). Saves a branch per edge by
+/// iterating only over the relevant range in each phase.
 pub fn delta_stepping_partitioned(
     g: &CsrGraph,
     light_count: &[u32],
@@ -236,9 +236,9 @@ pub fn delta_stepping_partitioned(
     dist
 }
 
-/// Robust delta-stepping. **Fixed**: heavy-relaksering kan pga f32-presisjon
-/// ende opp i SAMME bucket som kilden (ikke forwarding). Vi sjekker det og
-/// gjenkjører Phase A på samme bucket i stedet for å hoppe forbi.
+/// Robust delta-stepping. **Fixed**: heavy relaxation can, due to f32
+/// precision, end up in the SAME bucket as the source (no forwarding). We
+/// detect that and rerun Phase A on the same bucket instead of skipping past.
 pub fn delta_stepping_v2(g: &CsrGraph, src: u32, delta: f32) -> Vec<f32> {
     let n = g.n;
     let mut dist = vec![INF; n];
@@ -301,11 +301,11 @@ pub fn delta_stepping_v2(g: &CsrGraph, src: u32, delta: f32) -> Vec<f32> {
         }
 
         // Phase B: relax heavy edges from settled vertices.
-        // FP-pitfall: en "heavy" kant (w > delta) gir nd = du + w. Vanligvis
-        // havner det i en SENERE bucket. Men når delta ikke er eksakt
-        // representerbar i f32 (f.eks. 0.3 = 0.30000001…), kan
-        // floor(nd / delta) bli SAMME som bucket-id-en til du. Da må vi
-        // re-prosessere bucket i før vi går videre.
+        // FP pitfall: a "heavy" edge (w > delta) gives nd = du + w. Normally
+        // that lands in a LATER bucket. But when delta is not exactly
+        // representable in f32 (e.g. 0.3 = 0.30000001…),
+        // floor(nd / delta) can be the SAME as u's bucket id. In that case we
+        // must re-process bucket i before moving on.
         let mut needs_redo = false;
         for &u in &settled {
             let du = dist[u as usize];
@@ -349,10 +349,10 @@ pub fn delta_stepping(g: &CsrGraph, src: u32, delta: f32) -> Vec<f32> {
     dist[src as usize] = 0.0;
 
     // Buckets: Vec<Vec<u32>> grown on demand.
-    // Vi gjør (lett/tung)-distinkjsonen inline ved relaksering — å forhåndspartisjonere
-    // CSR-arrayet i lett/tung ville spart en branch per kant, men det krever en
-    // omstokking av hele `edge_to`/`edge_w` ved konstruksjon. På workloads målt
-    // her dominerer cache-effekter, og branch-prediktoren håndterer w<=Δ fint.
+    // We do the (light/heavy) distinction inline at relaxation — pre-partitioning
+    // the CSR array into light/heavy would save a branch per edge, but requires
+    // reshuffling the whole `edge_to`/`edge_w` at construction. On the workloads
+    // measured here cache effects dominate, and the branch predictor handles w<=Δ fine.
     let mut buckets: Vec<Vec<u32>> = Vec::new();
     let bucket_of = |d: f32, delta: f32| -> usize { (d / delta) as usize };
 
@@ -424,9 +424,9 @@ pub fn delta_stepping(g: &CsrGraph, src: u32, delta: f32) -> Vec<f32> {
         }
 
         // Phase B: relax heavy edges of vertices that finalized in bucket i.
-        // FP-pitfall: w > delta garanterer ikke at floor((du+w)/delta) > i
-        // når delta ikke er eksakt representerbar i f32 (f.eks. 0.3).
-        // Hvis det skjer, må vi gjenkjøre Phase A på samme bucket.
+        // FP pitfall: w > delta does not guarantee floor((du+w)/delta) > i
+        // when delta is not exactly representable in f32 (e.g. 0.3).
+        // If that happens we must rerun Phase A on the same bucket.
         let mut needs_redo = false;
         for &u in &deferred_heavy {
             let du = dist[u as usize];

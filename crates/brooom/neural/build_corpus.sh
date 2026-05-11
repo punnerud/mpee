@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build training corpus: 30 syntetiske instanser × (Vroom + brooom-løsning).
+# Build training corpus: 30 synthetic instances x (Vroom + brooom solution).
 set -e
 DIR="$(cd "$(dirname "$0")"/.. && pwd)"
 INST_DIR="$DIR/benchmarks/instances"
@@ -27,7 +27,7 @@ for size in "${SIZES[@]}"; do
         "$BROOOM" -i "$INST_DIR/${name}.json" -o "$RES_DIR/${name}.brooom.json" >/dev/null 2>&1
 
         count=$((count + 1))
-        printf "[%2d/%d] %s — vroom=%s brooom=%s\n" \
+        printf "[%2d/%d] %s -- vroom=%s brooom=%s\n" \
             "$count" "$((${#SIZES[@]} * N_SEEDS))" "$name" \
             "$(python3 -c "import json;print(int(json.load(open('$RES_DIR/${name}.vroom.json'))['summary']['cost']))")" \
             "$(python3 -c "import json;print(int(json.load(open('$RES_DIR/${name}.brooom.json'))['summary']['cost']))")"
@@ -35,4 +35,4 @@ for size in "${SIZES[@]}"; do
 done
 
 echo ""
-echo "Korpus klar: $count par lagret i $RES_DIR/"
+echo "Corpus ready: $count pairs saved in $RES_DIR/"

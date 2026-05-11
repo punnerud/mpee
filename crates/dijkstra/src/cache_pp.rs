@@ -1,11 +1,11 @@
-//! Cache for **fullt preprocessert** graf:
+//! Cache for **fully preprocessed** graph:
 //!   * Reordered CSR (BFS-order for cache-locality)
 //!   * Edge partition (light/heavy split per vertex)
 //!   * Reverse-CSR (for bidirectional Dijkstra)
-//!   * Vertex koordinater (for visualisering / haversine)
-//!   * `new_id`-permutasjon (for å mappe gamle ID-er til nye)
+//!   * Vertex coordinates (for visualization / haversine)
+//!   * `new_id` permutation (to map old IDs to new ones)
 //!
-//! Alt mmap-lastet på én syscall. Cold start = ~1 ms.
+//! All mmap-loaded in one syscall. Cold start = ~1 ms.
 //!
 //! Format (little-endian, alle 4-byte-aligned):
 //! ```

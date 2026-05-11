@@ -1,7 +1,7 @@
-//! Sammenligning vs OSRM med Contraction Hierarchies.
+//! Comparison vs OSRM with Contraction Hierarchies.
 //!
-//! OSRM-serveren må kjøre på localhost:5002 med /data/london.osrm lastet.
-//! Start med:
+//! The OSRM server must be running on localhost:5002 with /data/london.osrm loaded.
+//! Start with:
 //!   docker run -p 5002:5000 -d --rm -v "$(pwd)/data:/data" \
 //!     --name osrm-london \
 //!     ghcr.io/project-osrm/osrm-backend osrm-routed --algorithm ch /data/london.osrm
@@ -19,16 +19,16 @@ fn main() -> std::io::Result<()> {
     let pp = match cache_pp::load_mmap(pp_cache) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("pp-cache mangler ({e}). Kjør først: cargo run --release --bin bench_pp");
+            eprintln!("pp-cache missing ({e}). Run first: cargo run --release --bin bench_pp");
             std::process::exit(1);
         }
     };
 
     let g = &pp.graph;
     let n = g.n;
-    println!("=== OSRM vs vår på Greater London (n={n}, m={}) ===", g.m());
+    println!("=== OSRM vs ours on Greater London (n={n}, m={}) ===", g.m());
 
-    // Generer 1000 random (vertex_idx, vertex_idx)-par.
+    // Generate 1000 random (vertex_idx, vertex_idx) pairs.
     let n_queries = 1000usize;
     let mut rng = Rng(20260509);
     let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(n_queries);
@@ -44,9 +44,9 @@ fn main() -> std::io::Result<()> {
         }
         pairs.push((s, d));
     }
-    println!("Genererte {} (s,d)-par.\n", n_queries);
+    println!("Generated {} (s,d) pairs.\n", n_queries);
 
-    // ---- Bidir Dijkstra (vår) ----
+    // ---- Bidir Dijkstra (ours) ----
     let t = Instant::now();
     let mut bidir_results: Vec<f32> = Vec::with_capacity(n_queries);
     for &(s, d) in &pairs {
@@ -55,12 +55,12 @@ fn main() -> std::io::Result<()> {
     }
     let bidir_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!(
-        "vår bidir Dijkstra:    {:>9.0} ms total ({:.3} ms/query)",
+        "our bidir Dijkstra:    {:>9.0} ms total ({:.3} ms/query)",
         bidir_ms,
         bidir_ms / n_queries as f64
     );
 
-    // ---- Reference: full SSSP fra hver src (kun 30 stk for å spare tid) ----
+    // ---- Reference: full SSSP from each src (only 30 to save time) ----
     let n_ref = 30usize;
     let mut ref_results: Vec<f32> = Vec::with_capacity(n_ref);
     let t = Instant::now();
@@ -75,7 +75,7 @@ fn main() -> std::io::Result<()> {
         ref_ms / n_ref as f64
     );
 
-    // ---- sssp_auto (vår) — for sammenligning av SSSP-stil pull ----
+    // ---- sssp_auto (ours) — for comparison of SSSP-style pull ----
     let t = Instant::now();
     for &(s, _) in &pairs[..n_ref] {
         let _ = sssp_auto(g, s);
@@ -88,9 +88,9 @@ fn main() -> std::io::Result<()> {
     );
 
     // ---- OSRM via HTTP ----
-    println!("\nKjører OSRM (CH) på localhost:5002...");
+    println!("\nRunning OSRM (CH) on localhost:5002...");
 
-    // Sjekk at serveren svarer.
+    // Check that the server responds.
     let test_url = format!(
         "http://localhost:5002/route/v1/driving/{},{};{},{}?overview=false",
         pp.coords[0].1, pp.coords[0].0,
@@ -100,10 +100,10 @@ fn main() -> std::io::Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build();
     match agent.get(&test_url).call() {
-        Ok(_) => println!("OSRM-server svarer."),
+        Ok(_) => println!("OSRM server responding."),
         Err(e) => {
-            eprintln!("OSRM-server svarer ikke: {e}");
-            eprintln!("Hopper over OSRM-bench.");
+            eprintln!("OSRM server not responding: {e}");
+            eprintln!("Skipping OSRM bench.");
             return Ok(());
         }
     }
@@ -121,7 +121,7 @@ fn main() -> std::io::Result<()> {
         match agent.get(&url).call() {
             Ok(resp) => {
                 let body = resp.into_string().unwrap_or_default();
-                // Parse JSON for "distance" — enkel string-søk:
+                // Parse JSON for "distance" — simple string search:
                 if let Some(idx) = body.find("\"distance\":") {
                     let rest = &body[idx + 11..];
                     let end = rest.find(['}', ',']).unwrap_or(rest.len());
@@ -140,17 +140,17 @@ fn main() -> std::io::Result<()> {
     }
     let osrm_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!(
-        "OSRM CH (HTTP):        {:>9.0} ms total ({:.3} ms/query)  [{osrm_failed} feil]",
+        "OSRM CH (HTTP):        {:>9.0} ms total ({:.3} ms/query)  [{osrm_failed} errors]",
         osrm_ms,
         osrm_ms / n_queries as f64
     );
 
-    // ---- Korrekthet sammenligning ----
-    // OSRM bruker bil-profil og veier; vår bruker haversine-vekter.
-    // Vi forventer at OSRM-distanser er litt LENGRE (følger veier) enn våre
-    // (haversine), men korrelasjonen skal være sterk.
-    println!("\n=== Distanse-sammenligning (vår bidir vs OSRM, 30 første queries) ===");
-    println!("{:>5}  {:>10}  {:>10}  {:>10}", "i", "vår (m)", "OSRM (m)", "ratio");
+    // ---- Correctness comparison ----
+    // OSRM uses a car profile and roads; ours uses haversine weights.
+    // We expect OSRM distances to be slightly LONGER (following roads) than
+    // ours (haversine), but the correlation should be strong.
+    println!("\n=== Distance comparison (our bidir vs OSRM, first 30 queries) ===");
+    println!("{:>5}  {:>10}  {:>10}  {:>10}", "i", "ours (m)", "OSRM (m)", "ratio");
     for i in 0..n_ref.min(30) {
         let our = bidir_results[i];
         let osrm = osrm_results[i];
@@ -165,24 +165,24 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    println!("\n=== Sammendrag ===");
+    println!("\n=== Summary ===");
     println!(
-        "OSRM CH p2p:    {:.3} ms/query (incl HTTP overhead, lokalt)",
+        "OSRM CH p2p:    {:.3} ms/query (incl HTTP overhead, local)",
         osrm_ms / n_queries as f64
     );
     println!(
-        "vår bidir:      {:.3} ms/query",
+        "our bidir:      {:.3} ms/query",
         bidir_ms / n_queries as f64
     );
     println!(
-        "ratio (OSRM/vår): {:.2}x",
+        "ratio (OSRM/ours): {:.2}x",
         (osrm_ms / n_queries as f64) / (bidir_ms / n_queries as f64)
     );
 
     println!();
-    println!("Preprocessing-tid:");
-    println!("  OSRM (extract + contract):  ~80 sekunder");
-    println!("  vår (parse + reorder + transpose + cache): ~1 sekund");
+    println!("Preprocessing time:");
+    println!("  OSRM (extract + contract):  ~80 seconds");
+    println!("  ours (parse + reorder + transpose + cache): ~1 second");
 
     Ok(())
 }

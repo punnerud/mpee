@@ -1,5 +1,5 @@
-//! Full sammenligning av VÅR Dijkstra-stack vs petgraph (Rust-økosystemet).
-//! Dekker alle benchmark-workloads brukt ellers i prosjektet.
+//! Full comparison of OUR Dijkstra stack vs petgraph (the Rust ecosystem).
+//! Covers all benchmark workloads used elsewhere in the project.
 
 use ordered_float::OrderedFloat;
 use petgraph::algo::dijkstra as pg_dijkstra;
@@ -110,46 +110,46 @@ fn run(label: &str, g: &CsrGraph, src: u32, skip_pg: bool) -> Row {
         "  n = {n}, m = {m}, avg_deg = {avg_deg:.2}, avg_w = {avg_w:.3}, src = {src}"
     );
 
-    // Reference (vår binary)
+    // Reference (our binary)
     let t = Instant::now();
     let r = dijkstra_binary(g, src);
     let t_bin = t.elapsed().as_secs_f64() * 1000.0;
     let reachable = r.iter().filter(|&&d| d.is_finite()).count();
-    println!("  vår dijkstra_binary:   {:>9.2} ms   ({reachable}/{n} reach)", t_bin);
+    println!("  our dijkstra_binary:   {:>9.2} ms   ({reachable}/{n} reach)", t_bin);
 
     let t = Instant::now();
     let r4 = dijkstra_4ary(g, src);
     let t_4 = t.elapsed().as_secs_f64() * 1000.0;
     let bad_4 = count_bad(&r, &r4);
-    println!("  vår dijkstra_4ary:     {:>9.2} ms   {}", t_4,
+    println!("  our dijkstra_4ary:     {:>9.2} ms   {}", t_4,
              if bad_4 == 0 { "OK" } else { "FAIL" });
 
     let t = Instant::now();
     let r8 = dijkstra_8ary(g, src);
     let t_8 = t.elapsed().as_secs_f64() * 1000.0;
     let bad_8 = count_bad(&r, &r8);
-    println!("  vår dijkstra_8ary:     {:>9.2} ms   {}", t_8,
+    println!("  our dijkstra_8ary:     {:>9.2} ms   {}", t_8,
              if bad_8 == 0 { "OK" } else { "FAIL" });
 
     let t = Instant::now();
     let rs = delta_stepping(g, src, delta);
     let t_ds = t.elapsed().as_secs_f64() * 1000.0;
     let bad_ds = count_bad(&r, &rs);
-    println!("  vår delta_stepping:    {:>9.2} ms   {}", t_ds,
+    println!("  our delta_stepping:    {:>9.2} ms   {}", t_ds,
              if bad_ds == 0 { "OK" } else { "FAIL" });
 
     let t = Instant::now();
     let rd = duan_inspired(g, src, bw);
     let t_du = t.elapsed().as_secs_f64() * 1000.0;
     let bad_du = count_bad(&r, &rd);
-    println!("  vår duan_inspired:     {:>9.2} ms   {}", t_du,
+    println!("  our duan_inspired:     {:>9.2} ms   {}", t_du,
              if bad_du == 0 { "OK".to_string() } else { format!("FAIL ({bad_du})") });
 
     let t = Instant::now();
     let ra = sssp_auto(g, src);
     let t_au = t.elapsed().as_secs_f64() * 1000.0;
     let bad_au = count_bad(&r, &ra);
-    println!("  vår sssp_auto:         {:>9.2} ms   {}", t_au,
+    println!("  our sssp_auto:         {:>9.2} ms   {}", t_au,
              if bad_au == 0 { "OK".to_string() } else { format!("FAIL ({bad_au})") });
 
     let mut t_pg = f64::NAN;
@@ -170,7 +170,7 @@ fn run(label: &str, g: &CsrGraph, src: u32, skip_pg: bool) -> Row {
             if bad_pg == 0 { "OK" } else { "FAIL" }
         );
     } else {
-        println!("  petgraph: hoppet over (for stort)");
+        println!("  petgraph: skipped (too large)");
     }
 
     Row {
@@ -249,7 +249,7 @@ fn main() -> std::io::Result<()> {
             Ok((g, _)) => {
                 rows.push(("Word ladder".to_string(), run("Word ladder", &g, 0, false)));
             }
-            Err(e) => println!("(Hopper word ladder: {e})"),
+            Err(e) => println!("(Skipping word ladder: {e})"),
         }
     }
     // ---------- Rubik ----------
@@ -261,10 +261,10 @@ fn main() -> std::io::Result<()> {
     if std::path::Path::new("data/soc-LiveJournal1.txt.gz").exists() {
         match load_snap_edge_list("data/soc-LiveJournal1.txt.gz") {
             Ok((g, _)) => {
-                // 137M edges → petgraph build ~1-2s, dijkstra ~3-5s. Vi tar det.
+                // 137M edges -> petgraph build ~1-2s, dijkstra ~3-5s. We accept it.
                 rows.push(("SNAP LiveJournal".to_string(), run("SNAP LiveJournal", &g, 0, false)));
             }
-            Err(e) => println!("(Hopper SNAP: {e})"),
+            Err(e) => println!("(Skipping SNAP: {e})"),
         }
     }
     // ---------- London OSM ----------
@@ -274,16 +274,16 @@ fn main() -> std::io::Result<()> {
         rows.push(("London OSM".to_string(), run("London OSM", &g, 0, false)));
     }
 
-    // ---------- Sammendrag ----------
+    // ---------- Summary ----------
     println!();
-    println!("=== SAMMENDRAG (alle tider i ms) ===");
+    println!("=== SUMMARY (all times in ms) ===");
     println!(
         "{:<26} {:>10} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "Workload", "petgraph", "vår_bin", "vår_4ar", "vår_8ar", "Δ-step", "duan", "auto"
+        "Workload", "petgraph", "our_bin", "our_4ar", "our_8ar", "d-step", "duan", "auto"
     );
     for (lbl, r) in &rows {
         let ms = |x: f64| if x.is_nan() { "  -- ".to_string() } else { format!("{:.1}", x) };
-        let mark = |b: usize| if b == 0 { "" } else { "✗" };
+        let mark = |b: usize| if b == 0 { "" } else { "x" };
         println!(
             "{:<26} {:>10} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
             lbl, ms(r.petgraph),
@@ -300,7 +300,7 @@ fn main() -> std::io::Result<()> {
     println!("=== SPEEDUP vs petgraph ===");
     println!(
         "{:<26} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "Workload", "vår_bin", "vår_4ar", "vår_8ar", "Δ-step", "duan", "auto"
+        "Workload", "our_bin", "our_4ar", "our_8ar", "d-step", "duan", "auto"
     );
     for (lbl, r) in &rows {
         let s = |x: f64| {

@@ -16,7 +16,7 @@ pub fn load_snap_edge_list<P: AsRef<Path>>(
     path: P,
 ) -> std::io::Result<(CsrGraph, Vec<u32>)> {
     let path = path.as_ref();
-    println!("[snap] åpner {}", path.display());
+    println!("[snap] opening {}", path.display());
     let f = File::open(path)?;
     let reader: Box<dyn Read> = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
         Box::new(GzDecoder::new(f))
@@ -82,10 +82,10 @@ pub fn load_snap_edge_list<P: AsRef<Path>>(
         max_id
     );
 
-    // SNAP-kanter er DIRECTED. For å gjøre algoritmer som forutsetter
-    // tilgjengelighet meningsfulle, gjør vi grafen *undirected* ved å legge
-    // til reverse-kanter. Det matcher hvordan disse datasettene typisk
-    // brukes for korteste-vei-eksperimenter (friend-of-friend osv).
+    // SNAP edges are DIRECTED. To make algorithms that assume reachability
+    // meaningful, we make the graph *undirected* by adding reverse edges.
+    // That matches how these datasets are typically used for shortest-path
+    // experiments (friend-of-friend etc.).
     let n = (max_id as usize) + 1;
     let m = edges_u.len();
     let mut all: Vec<(u32, u32, f32)> = Vec::with_capacity(2 * m);

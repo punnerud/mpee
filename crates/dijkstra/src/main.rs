@@ -129,14 +129,14 @@ fn main() {
         verify(&r, &d, "duan_inspired");
     }
 
-    // Skala-stige: samme graf-type, økende n, viser hvordan algoritmene
-    // skalerer.
+    // Scale ladder: same graph type, increasing n, shows how the algorithms
+    // scale.
     run_suite("Sparse random n=10k, avg_deg=8", gen_random_sparse(10_000, 8, 42), 0);
     run_suite("Sparse random n=100k, avg_deg=8", gen_random_sparse(100_000, 8, 42), 0);
     run_suite("Sparse random n=1M, avg_deg=8", gen_random_sparse(1_000_000, 8, 42), 0);
     run_suite("Sparse random n=4M, avg_deg=8", gen_random_sparse(4_000_000, 8, 42), 0);
 
-    // Tetthet-stige: hvordan endrer det seg når deg vokser?
+    // Density ladder: how does it change as deg grows?
     run_suite("Sparse random n=200k, avg_deg=4", gen_random_sparse(200_000, 4, 42), 0);
     run_suite("Sparse random n=200k, avg_deg=16", gen_random_sparse(200_000, 16, 42), 0);
     run_suite("Sparse random n=200k, avg_deg=64", gen_random_sparse(200_000, 64, 42), 0);

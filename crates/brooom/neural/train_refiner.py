@@ -1,15 +1,16 @@
-"""Tren en refiner-NN: gitt en eksisterende rute, prediker forbedring av
-2-opt swap (i, j) — dvs. reverse segment route[i..j].
+"""Train a refiner NN: given an existing route, predict improvement of
+2-opt swap (i, j) -- i.e. reverse segment route[i..j].
 
-Konsept: NN-en lærer ÀR PRIORITERE 2-opt moves slik at LS prøver de mest
-lovende først. Hvis NN-en kan rangere riktig i top-K, kan LS gjøre færre
-probes per pass — speed-gevinst.
+Concept: the NN learns to PRIORITIZE 2-opt moves so LS tries the most
+promising ones first. If the NN can rank correctly in top-K, LS can do fewer
+probes per pass -- speed gain.
 
-Treningsdata genereres syntetisk: random TSP-instanser, random ikke-optimale
-ruter (eks. nearest-neighbor med støy), og for hvert (rute, swap_pair)
-beregner vi gevinsten ved swap. NN-en lærer å predikere denne gevinsten.
+Training data is generated synthetically: random TSP instances, random
+non-optimal routes (e.g. nearest-neighbor with noise), and for each
+(route, swap_pair) we compute the gain of the swap. The NN learns to
+predict that gain.
 
-Output: ONNX-eksport av modell som kan kalles fra Rust.
+Output: ONNX export of the model that can be called from Rust.
 """
 
 import os
@@ -20,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
-N = 20  # nodes per TSP-instans
+N = 20  # nodes per TSP instance
 EMBED = 32
 EPOCHS = 300
 BATCH = 128
@@ -29,8 +30,8 @@ DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
 def gen_instance(batch=BATCH, n=N):
-    """Generer batch av (coords, suboptimal_route, distmatrix). Sub-optimal
-    rute lages ved nearest-neighbor + tilfeldig støy (swap 2 random tasks)."""
+    """Generate batch of (coords, suboptimal_route, distmatrix). Sub-optimal
+    route is built via nearest-neighbor + random noise (swap 2 random tasks)."""
     coords = torch.rand(batch, n, 2, device=DEVICE)
     diff = coords.unsqueeze(2) - coords.unsqueeze(1)
     dist = diff.norm(dim=-1)  # (B, N, N)

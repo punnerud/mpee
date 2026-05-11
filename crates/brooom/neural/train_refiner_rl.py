@@ -1,13 +1,13 @@
-"""Refiner v4: REINFORCE — NN policy styrer en mini-LS.
+"""Refiner v4: REINFORCE -- NN policy drives a mini-LS.
 
-Konsept:
-  - Episode: NN scorer alle brooom-edges → LS prioriterer top-K → final kost
-  - Reward = (baseline_cost − final_cost). Positiv hvis NN-styrt LS slår
+Concept:
+  - Episode: NN scores all brooom edges -> LS prioritizes top-K -> final cost
+  - Reward = (baseline_cost - final_cost). Positive if NN-guided LS beats
     random LS.
-  - REINFORCE-update: log_prob(picked edges) × advantage
+  - REINFORCE update: log_prob(picked edges) * advantage
 
-Loss-funksjonen ER nettopp solveren — vi måler kost EFTER hele LS-pipelinen
-har fått lov å konvergere. Sterkere signal enn cost-delta-per-swap.
+The loss function IS the solver itself -- we measure cost AFTER the full LS
+pipeline has been allowed to converge. Stronger signal than cost-delta-per-swap.
 """
 
 import os
@@ -78,7 +78,7 @@ def random_ls(route, dist, n_passes=LS_PASSES):
 
 
 def guided_ls(route, dist, edge_scores, n_passes=LS_PASSES):
-    """Score-prioritized 2-opt LS: prøver moves rangert på (s_i + s_j) først."""
+    """Score-prioritized 2-opt LS: tries moves ranked on (s_i + s_j) first."""
     cur = list(route)
     for _ in range(n_passes):
         n = len(cur)
@@ -86,10 +86,10 @@ def guided_ls(route, dist, edge_scores, n_passes=LS_PASSES):
         cands = []
         for i in range(n - 2):
             for j in range(i + 2, n):
-                # Score: lavere (mer "must-attempt") for edges med lavt edge_score
+                # Score: lower (more "must-attempt") for edges with low edge_score
                 s = edge_scores[cur[i]] + edge_scores[cur[i+1]] + edge_scores[cur[j]] + edge_scores[cur[(j+1) % n]]
                 cands.append((s, i, j))
-        cands.sort()  # lavest score først
+        cands.sort()  # lowest score first
         improved = False
         for _, i, j in cands:
             old = dist[cur[i], cur[i+1]].item() + dist[cur[j], cur[(j+1) % n]].item()
@@ -167,7 +167,7 @@ def main():
                 guided_total += route_cost(guided, inst["dist"])
                 random_total += route_cost(rand, inst["dist"])
 
-            advantage = random_total - guided_total  # positiv = NN slår baseline
+            advantage = random_total - guided_total  # positive = NN beats baseline
             rewards.append(advantage)
 
             # log_prob of the noise sample (approx via -0.5*((x-mu)/std)²).
@@ -191,7 +191,7 @@ def main():
             msg = f"epoch {epoch:4d}  train_reward={avg_reward:+.5f}  val_advantage={val_adv:+.5f}"
             print(msg); log.write(msg + "\n"); log.flush()
 
-    print(f"Trent på {time.perf_counter()-t0:.1f}s")
+    print(f"Trained in {time.perf_counter()-t0:.1f}s")
     log.close()
 
 

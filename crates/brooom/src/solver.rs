@@ -168,12 +168,12 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
             config.max_local_search_passes, granular.as_ref(),
         );
 
-        // Smart RouteSplit: aktivere bare for én utvalgt seed (seed=7).
-        // Best-of-K-mekanismen gjør at hvis split-varianten vinner, beholder
-        // vi den; hvis ikke vinner den, har vi ingen tap. Tidligere
-        // unconditional split ga +0.6% regresjon på N=1000 fordi noen
-        // variants ble verre. Med BARE én variant tar vi nå "best av med-vs-uten"
-        // gratis fra multi-start-poolen.
+        // Smart RouteSplit: enable only for one selected seed (seed=7).
+        // The best-of-K mechanism means that if the split variant wins, we
+        // keep it; if it doesn't win, we lose nothing. Earlier unconditional
+        // split caused +0.6% regression on N=1000 because some variants got
+        // worse. With ONLY one variant we now get "best of with-vs-without"
+        // for free from the multi-start pool.
         if seed == 7 {
             route_split_pass(problem, matrix, &mut sol, 10);
             local_search(

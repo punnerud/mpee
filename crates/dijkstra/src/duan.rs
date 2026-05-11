@@ -1,29 +1,29 @@
-//! Duan-inspirert SSSP — *forenklet* praktisk variant.
+//! Duan-inspired SSSP — *simplified* practical variant.
 //!
-//! ADVARSEL OM SCOPE
-//! -----------------
-//! Den faktiske algoritmen i Duan, Mao, Mao, Shu, Yin (STOC 2025) er svært
-//! kompleks: rekursiv BMSSP (Bounded Multi-Source Shortest Path) med pivot-
-//! plukking, batched Bellman-Ford, og en spesiell delvis-sortert datastruktur
-//! D som støtter Insert / BatchPrepend / Pull. Den oppnår O(m log^{2/3} n)
-//! deterministisk i comparison-addition-modellen.
+//! SCOPE WARNING
+//! -------------
+//! The actual algorithm in Duan, Mao, Mao, Shu, Yin (STOC 2025) is very
+//! complex: recursive BMSSP (Bounded Multi-Source Shortest Path) with pivot
+//! selection, batched Bellman-Ford, and a special partially-sorted data
+//! structure D that supports Insert / BatchPrepend / Pull. It achieves
+//! O(m log^{2/3} n) deterministically in the comparison-addition model.
 //!
-//! Denne filen implementerer en *praktisk forenkling* som tar med seg
-//! kjerneideene:
+//! This file implements a *practical simplification* that carries over the
+//! core ideas:
 //!
-//!   1. **Bucket / partial order**: vertices grupperes i bøtter med bredde B
-//!      og prosesseres en bøtte om gangen — uten sortering innad.
-//!   2. **Batched relaksering inne i en bøtte**: vi gjør Bellman-Ford-stil
-//!      multi-pass på vertices i nåværende bøtte til konvergens, i stedet
-//!      for én-og-én pop fra en heap.
-//!   3. **Pivot-redusering**: når en bøtte vokser stor, plukkes de k minste
-//!      tentative avstandene som pivoter og relakseres først (etterligner
-//!      FindPivots-trinnet).
+//!   1. **Bucket / partial order**: vertices are grouped into buckets of
+//!      width B and processed one bucket at a time — without sorting within.
+//!   2. **Batched relaxation inside a bucket**: we do Bellman-Ford-style
+//!      multi-pass on vertices in the current bucket until convergence,
+//!      instead of one-by-one pop from a heap.
+//!   3. **Pivot reduction**: when a bucket grows large, the k smallest
+//!      tentative distances are picked as pivots and relaxed first (mimics
+//!      the FindPivots step).
 //!
-//! Korrekthetsdesign: vi bruker samme "lazy stale filter"-strategi som
-//! Δ-stepping. Når vi forbedrer dist[v], pusher vi alltid v inn i sin nye
-//! bucket; gamle plasseringer ignoreres når vi senere ser at
-//! bucket_of(dist[v]) ikke matcher.
+//! Correctness design: we use the same "lazy stale filter" strategy as
+//! Δ-stepping. When we improve dist[v] we always push v into its new
+//! bucket; old placements are ignored when we later see that
+//! bucket_of(dist[v]) doesn't match.
 
 use crate::dijkstra::INF;
 use crate::graph::CsrGraph;
@@ -50,8 +50,8 @@ pub fn duan_inspired(g: &CsrGraph, src: u32, bucket_width: f32) -> Vec<f32> {
             break;
         }
 
-        // Plukk ut bøtte bi, filtrer stale entries (de hvis dist nå ligger
-        // i en helt annen bøtte) og dedupliser.
+        // Pick out bucket bi, filter stale entries (those whose dist now lies
+        // in an entirely different bucket) and deduplicate.
         frontier.clear();
         let raw = std::mem::take(&mut buckets[bi]);
         for v in raw {
@@ -65,13 +65,13 @@ pub fn duan_inspired(g: &CsrGraph, src: u32, bucket_width: f32) -> Vec<f32> {
             continue;
         }
 
-        // Dedup: vertices kan være pushet flere ganger inn i samme bucket.
-        // Sortér + dedup. Kostnaden er O(|frontier| log |frontier|) men
-        // sparer redundant arbeid i relaxation-loopen.
+        // Dedup: vertices can have been pushed multiple times into the same bucket.
+        // Sort + dedup. The cost is O(|frontier| log |frontier|) but saves
+        // redundant work in the relaxation loop.
         frontier.sort_unstable();
         frontier.dedup();
 
-        // Batched relaksering til konvergens innenfor bøtte bi.
+        // Batched relaxation to convergence within bucket bi.
         loop {
             next_frontier.clear();
             relax_pass(
@@ -86,7 +86,7 @@ pub fn duan_inspired(g: &CsrGraph, src: u32, bucket_width: f32) -> Vec<f32> {
             if next_frontier.is_empty() {
                 break;
             }
-            // Dedup neste runde, ellers vokser den med kvadratisk arbeid.
+            // Dedup the next round, otherwise it grows with quadratic work.
             next_frontier.sort_unstable();
             next_frontier.dedup();
             std::mem::swap(&mut frontier, &mut next_frontier);
@@ -124,10 +124,10 @@ fn relax_pass(
             if nd < dv {
                 dist[v as usize] = nd;
                 if nd < hi {
-                    // Forblir i samme bøtte — relakseres igjen i neste runde.
+                    // Stays in the same bucket — relaxed again in the next round.
                     next_round.push(v);
                 } else {
-                    // Hopper til en senere bøtte.
+                    // Jumps to a later bucket.
                     let nb = (nd / bucket_width) as usize;
                     if nb >= buckets.len() {
                         buckets.resize_with(nb + 1, Vec::new);

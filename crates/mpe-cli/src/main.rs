@@ -1,7 +1,7 @@
 //! mpe — unified driver for the mpe-engine workspace.
 //!
 //! This binary is the single user-facing entry point. It is intentionally
-//! thin: each subcommand wires together public APIs from `dikstra`
+//! thin: each subcommand wires together public APIs from `dijkstra`
 //! (Contraction-Hierarchies routing — an OSRM-alternative) and `brooom`
 //! (VRP solver — a Vroom-alternative). Both engines live as workspace
 //! members and are designed to share memory in-process: a CH cache loaded
@@ -11,10 +11,10 @@
 //! Workflow this CLI is being built to drive:
 //!
 //!   1. `mpe download <region>`  — fetch an OSM PBF from Geofabrik.
-//!   2. `mpe build <pbf>`        — preprocess → CH cache (dikstra side).
+//!   2. `mpe build <pbf>`        — preprocess → CH cache (dijkstra side).
 //!   3. `mpe solve <problem>`    — load CH, build K-NN on the fly, solve
 //!                                  VRP (brooom side). No N×N matrix is
-//!                                  ever materialised; brooom asks dikstra
+//!                                  ever materialised; brooom asks dijkstra
 //!                                  for distances on demand via the K-NN
 //!                                  hot path and CH single-pair queries
 //!                                  for cold-path route evaluation.
@@ -22,10 +22,10 @@
 //!
 //! The integration design is documented in:
 //!   - crates/brooom/integration.txt   (brooom side of the contract)
-//!   - crates/dikstra/integration.txt  (dikstra side of the contract)
+//!   - crates/dijkstra/integration.txt  (dijkstra side of the contract)
 //!   - INTEGRATION.md at the workspace root (the bird's-eye view).
 //!
-//! At the time of this commit the subcommands are scaffolds. The dikstra
+//! At the time of this commit the subcommands are scaffolds. The dijkstra
 //! and brooom crates can already be used directly via their own binaries
 //! (`cargo run -p brooom`, `cargo run -p sssp_bench`); this CLI is the
 //! seam where the next agent will plug them together.
@@ -58,7 +58,7 @@ enum Cmd {
         out_dir: PathBuf,
     },
 
-    /// Build dikstra's CSR + PP + CH caches from an OSM PBF.
+    /// Build dijkstra's CSR + PP + CH caches from an OSM PBF.
     ///
     /// On first run this takes ~3-4 minutes for a city-sized graph
     /// (Greater London, n=1.16M). Subsequent loads are mmap and take ~0.02 ms.
@@ -74,14 +74,14 @@ enum Cmd {
     /// Solve a Vroom-compatible VRP problem.
     ///
     /// When `--ch` is supplied, the CH cache is loaded in this process and
-    /// distances are computed on the fly via dikstra's K-NN and single-pair
+    /// distances are computed on the fly via dijkstra's K-NN and single-pair
     /// query — no full N×N matrix is materialised. Without `--ch`, brooom
     /// falls back to Haversine or its OSRM HTTP client (see `brooom --help`).
     Solve {
         /// Vroom-compatible JSON problem.
         problem: PathBuf,
 
-        /// Path to a prebuilt dikstra .ch cache. When set, dikstra acts as
+        /// Path to a prebuilt dijkstra .ch cache. When set, dijkstra acts as
         /// the in-process routing engine (zero-copy K-NN feed into brooom).
         #[arg(long)]
         ch: Option<PathBuf>,
@@ -148,7 +148,7 @@ fn build(_pbf: &std::path::Path, _profile: &str) -> Result<()> {
     //   cargo run --release -p sssp_bench --bin bench_pp -- <pbf> <profile>
     //   cargo run --release -p sssp_bench --bin bench_ch -- <pbf> <profile>
     bail!(
-        "not yet wired up. Use the dikstra binaries directly:\n  \
+        "not yet wired up. Use the dijkstra binaries directly:\n  \
          cargo run --release -p sssp_bench --bin bench_pp -- <pbf> <profile>\n  \
          cargo run --release -p sssp_bench --bin bench_ch -- <pbf> <profile>"
     );

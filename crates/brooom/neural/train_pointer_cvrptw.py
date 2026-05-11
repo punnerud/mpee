@@ -1,14 +1,14 @@
-"""Tren Pointer Network på N=20 CVRPTW (random Solomon-lignende).
+"""Train Pointer Network on N=20 CVRPTW (random Solomon-like).
 
-Utvider TSP-versjonen med:
-  - 6-d node-features: (x, y, demand, tw_start, tw_end, service)
-  - Depot-node (index 0) som åpner og lukker hver rute
-  - Multi-vehicle output via depot-retur (modellen kan velge depot
-    hvilket som helst tidspunkt → starter ny rute)
+Extends the TSP version with:
+  - 6-d node features: (x, y, demand, tw_start, tw_end, service)
+  - Depot node (index 0) that opens and closes each route
+  - Multi-vehicle output via depot return (model can pick depot
+    at any time step -> starts a new route)
   - State per step: (current_node, current_load, current_time)
-  - REINFORCE-loss inkluderer travel-cost + TW-violation-penalty
+  - REINFORCE loss includes travel-cost + TW-violation penalty
 
-Bruk:
+Usage:
     /Users/punnerud/Downloads/ainmt/venv/bin/python3 neural/train_pointer_cvrptw.py
 """
 
