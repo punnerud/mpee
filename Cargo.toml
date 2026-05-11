@@ -5,6 +5,7 @@ members = [
     "crates/dijkstra",
     "crates/mpe-cli",
     "crates/mpe-serve",
+    "crates/mpe-py",
 ]
 
 # Each subcrate also declares its own `[profile.release]`; cargo prefers
