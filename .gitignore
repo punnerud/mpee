@@ -27,6 +27,9 @@ data/
 .idea/
 *.swp
 
+# Claude Code metadata
+.claude/
+
 # Python (for benchmark scripts in brooom)
 __pycache__/
 *.pyc

@@ -10,21 +10,17 @@ name = "mpe"
 path = "src/main.rs"
 
 [dependencies]
-# Both engines as path dependencies. This is the seam where in-process,
-# zero-copy data sharing happens: the CLI loads a CH cache via dijkstra
-# and passes &Vec / Arc references straight into brooom — no IPC, no
-# serialization round-trip.
-#
-# NOTE: the two crates are NOT wired up yet inside this binary. The CLI
-# exists as scaffolding so the integration can be added incrementally
-# without further restructuring of the workspace. The path dependencies
-# are commented out for now because the brooom crate needs `ort` which
-# downloads ~200 MB of ONNX Runtime binaries on first build, and the
-# user wanted a fast, clean first commit. Uncomment as needed.
-#
-# brooom     = { path = "../brooom" }
-# sssp_bench = { path = "../dijkstra" }
+# Path deps on both engines — the whole point is that the CLI loads a CH
+# cache via sssp_bench, builds a routing matrix, and hands a `&Matrix` to
+# brooom. No IPC, no disk on the hot path. The two Vec<i32> buffers that
+# brooom consumes are owned by this process, in the same address space.
+brooom     = { path = "../brooom" }
+sssp_bench = { path = "../dijkstra" }
 
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 ureq = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+rand_chacha = "0.3"
