@@ -205,6 +205,7 @@
   let selectedStopIdx = 0;
   let pageIdx = 0;
   let highlightMarker = null;
+  let depotLegLayer = null;   // dashed depot legs for the selected vehicle
   let pollTimer = null;
 
   function setStatusPill(state, text) {
@@ -237,6 +238,9 @@
     `;
     lastCost = data.cost;
 
+    // Stash depot coords for drawHighlight (used to render depot legs
+    // for the currently-selected vehicle).
+    window._mpe_depot = { lat: data.depot.lat, lon: data.depot.lon };
     if (!depotMarker) {
       depotMarker = L.circleMarker([data.depot.lat, data.depot.lon], {
         radius: 8, color: '#fff', weight: 2, fillColor: '#ffd43b', fillOpacity: 1
@@ -355,10 +359,28 @@
 
   function drawHighlight(fly) {
     if (highlightMarker) { map.removeLayer(highlightMarker); highlightMarker = null; }
+    if (depotLegLayer)   { map.removeLayer(depotLegLayer);   depotLegLayer = null; }
     if (selectedVehicleIdx == null) return;
     const vl = vehicleLayers[selectedVehicleIdx];
     const s = vl.v.stops[selectedStopIdx];
     if (!s) return;
+    // Dashed depot legs for the selected vehicle only — keeps the
+    // overall map clean while explaining why an outlier route is
+    // "long": the vehicle still has to start and end at the depot.
+    const first = vl.v.stops[0];
+    const last = vl.v.stops[vl.v.stops.length - 1];
+    if (window._mpe_depot && first && last) {
+      const d = window._mpe_depot;
+      depotLegLayer = L.layerGroup([
+        L.polyline([[d.lat, d.lon], [first.lat, first.lon]], {
+          color: vl.v.color, weight: 2, opacity: 0.65, dashArray: '6,6'
+        }),
+        L.polyline([[last.lat, last.lon], [d.lat, d.lon]], {
+          color: vl.v.color, weight: 2, opacity: 0.65, dashArray: '6,6'
+        }),
+      ]).addTo(map);
+      depotLegLayer._mpe_managed = false;
+    }
     highlightMarker = L.circleMarker([s.lat, s.lon], {
       radius: 12, color: '#fff', weight: 3, fillColor: vl.v.color, fillOpacity: 0.0
     }).addTo(map);
@@ -374,6 +396,7 @@
     selectedStopIdx = 0;
     pageIdx = 0;
     if (highlightMarker) { map.removeLayer(highlightMarker); highlightMarker = null; }
+    if (depotLegLayer)   { map.removeLayer(depotLegLayer);   depotLegLayer = null; }
     document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('focus'));
     $('stops-panel').classList.remove('show');
     $('btn-close-veh').style.display = 'none';
