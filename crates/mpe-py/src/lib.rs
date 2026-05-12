@@ -393,6 +393,13 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
     };
     let total_budget_ms = (args.time_limit_s * 1000.0) as u64;
     let solve_start = std::time::Instant::now();
+
+    // (Sweep-based warm-start was tried and reverted: brooom's local-search
+    // does not recompute Solution.summary or Route.metrics from a manually
+    // constructed warm_start — it consumes them as-is, which made the LS
+    // think the warm-start was already at cost 0 and refuse to budge. Left
+    // `build_sweep_warm_start` in the file for reference; re-enable once
+    // brooom exposes a `recompute_metrics(&mut Solution, &Matrix)` hook.)
     let mut warm: Option<brooom::solution::Solution> = None;
     let mut iter: u32 = 0;
 
@@ -407,18 +414,25 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
         // for iter 1 to keep the wait short — subsequent iters use the
         // default 50 since warm-start lands near a local optimum and
         // each pass terminates fast.
+        // With sweep warm-start, iter 1 doesn't need 50 LS passes — sweep
+        // is already a strong local optimum. Bumping granular_k from
+        // 20 → 40 lets brooom's LS consider twice as many candidate
+        // swap partners per customer, which is what unsticks the
+        // "long cross-route segments" that visually screamed at us
+        // when granular was too small for N≥1000.
         let max_passes = if iter == 1 { 10 } else { 50 };
         let cfg = brooom::solver::SolverConfig {
             multi_start: if iter == 1 { args.multi_start.max(1) } else { 1 },
             time_limit_ms: Some(chunk_ms),
             warm_start: warm.clone(),
             max_local_search_passes: max_passes,
+            granular_k: Some(40),
             verbose: false,
             ..Default::default()
         };
         let msg = if iter == 1 {
             format!(
-                "iter 1 · initial insertion + LS (N={}, slow first solve)",
+                "iter 1 · initial insertion + LS (N={}, granular K=40)",
                 args.n_jobs
             )
         } else {
@@ -463,6 +477,76 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
         if is_final { break; }
     }
     Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Sweep heuristic: every customer is mapped to a polar angle around the
+// depot, then the customers are walked in angle order and packed into
+// each vehicle until its capacity is reached. The result is N_routes
+// disjoint angular sectors, which is provably near-optimal for radial
+// VRP instances and a much better starting point for LS than greedy
+// cheapest-insertion (which produces tangled cross-route segments).
+// -------------------------------------------------------------------------
+fn build_sweep_warm_start(
+    problem: &brooom::Problem,
+    depot_latlon: (f64, f64),
+    kept_jobs_latlon: &[(f32, f32)],
+) -> brooom::solution::Solution {
+    use brooom::solution::{Route, RouteMetrics, Solution, Summary, TaskRef};
+
+    let n_jobs = problem.jobs.len();
+    let n_vehicles = problem.vehicles.len();
+    if n_jobs == 0 || n_vehicles == 0 {
+        return Solution::default();
+    }
+
+    let lat0 = depot_latlon.0;
+    let cos_lat = lat0.to_radians().cos().max(1e-6);
+    let mut angled: Vec<(f64, usize)> = (0..n_jobs)
+        .map(|j| {
+            let (lat, lon) = kept_jobs_latlon[j];
+            let dy = lat as f64 - lat0;
+            let dx = (lon as f64 - depot_latlon.1) * cos_lat;
+            (dy.atan2(dx), j)
+        })
+        .collect();
+    angled.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Use the first vehicle's capacity as a representative — the generator
+    // in this CLI gives every vehicle the same capacity. For mixed fleets
+    // brooom's LS will rebalance during the first iteration anyway.
+    let cap: i64 = problem.vehicles[0].capacity.iter().sum::<i64>().max(1);
+
+    let mut routes: Vec<Route> = Vec::with_capacity(n_vehicles);
+    let mut current_steps: Vec<TaskRef> = Vec::new();
+    let mut current_load: i64 = 0;
+    let mut veh_idx: usize = 0;
+
+    for (_, j) in angled {
+        if veh_idx >= n_vehicles { break; }
+        let delivery: i64 = problem.jobs[j].delivery.iter().sum();
+        if current_load + delivery > cap && !current_steps.is_empty() {
+            routes.push(Route {
+                vehicle_idx: veh_idx,
+                steps: std::mem::take(&mut current_steps),
+                metrics: RouteMetrics::default(),
+            });
+            current_load = 0;
+            veh_idx += 1;
+            if veh_idx >= n_vehicles { break; }
+        }
+        current_steps.push(TaskRef::Job(j));
+        current_load += delivery;
+    }
+    if !current_steps.is_empty() && veh_idx < n_vehicles {
+        routes.push(Route {
+            vehicle_idx: veh_idx,
+            steps: current_steps,
+            metrics: RouteMetrics::default(),
+        });
+    }
+
+    Solution { routes, unassigned: Vec::new(), summary: Summary::default() }
 }
 
 fn collect_coords(
