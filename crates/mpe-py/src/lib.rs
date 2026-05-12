@@ -944,6 +944,11 @@ struct VehicleOut {
 struct StopOut {
     job_id: u64, lat: f32, lon: f32,
     order: usize, load_after: i64,
+    /// Matrix distance (metres) from the previous stop in this route.
+    /// For order=0 this is the depot leg. The frontend uses these to
+    /// surface the top-K longest customer-to-customer segments —
+    /// those are the visually suspicious "long across" lines.
+    dist_from_prev_m: i32,
 }
 #[derive(Serialize)]
 struct JobPoint { job_id: u64, lat: f32, lon: f32 }
@@ -990,16 +995,21 @@ fn build_dataset(
         for step in &r.steps {
             let job_idx = match step { TaskRef::Job(j) => *j, _ => continue };
             let here_idx = problem.jobs[job_idx].location.index;
-            if let (Some(p), Some(h)) = (prev, here_idx) {
+            let seg_dist: i32 = if let (Some(p), Some(h)) = (prev, here_idx) {
+                let d = matrix.distance(p, h);
                 route_dur += matrix.duration(p, h);
-                route_dist += matrix.distance(p, h);
-            }
+                route_dist += d;
+                d as i32
+            } else { 0 };
             prev = here_idx;
             let job = &problem.jobs[job_idx];
             let delivered: i64 = job.delivery.iter().sum();
             load += delivered;
             let (lat, lon) = kept_jobs_latlon[job_idx];
-            stops.push(StopOut { job_id: job.id, lat, lon, order, load_after: load });
+            stops.push(StopOut {
+                job_id: job.id, lat, lon, order, load_after: load,
+                dist_from_prev_m: seg_dist,
+            });
             order += 1;
         }
         if let (Some(p), Some(e)) = (prev, end_idx) {

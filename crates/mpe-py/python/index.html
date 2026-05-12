@@ -157,6 +157,7 @@
     <button class="btn on" id="btn-stops">Stops</button>
     <button class="btn on" id="btn-routes">Routes</button>
     <button class="btn" id="btn-unassigned">Unassigned</button>
+    <button class="btn" id="btn-long">Long segs</button>
     <button class="btn" id="btn-fit">Fit</button>
     <button class="btn" id="btn-all">All on</button>
     <button class="btn" id="btn-none">All off</button>
@@ -197,7 +198,9 @@
   let depotMarker = null;
   let vehicleLayers = [];                 // [{ v, stops:LayerGroup, polylines:LayerGroup, visible:bool }]
   let unassignedGroup = L.layerGroup();
-  let showStops = true, showRoutes = true, showUnassigned = false;
+  let showStops = true, showRoutes = true, showUnassigned = false, showLong = false;
+  let longSegLayer = L.layerGroup();
+  const LONG_SEG_TOP_N = 50;
   let lastIter = -1, lastCost = Infinity;
   let bbox = null;
   let firstRender = true;
@@ -279,6 +282,34 @@
       }).bindPopup(`<b>Unassigned job #${u.job_id}</b>`))
     );
 
+    // Compute the top-N longest customer→customer segments across all
+    // routes. order=0 is the depot leg which we skip — depot legs are
+    // structurally necessary and not visually fixable.
+    longSegLayer.remove();
+    const segs = [];
+    data.vehicles.forEach(v => {
+      for (let i = 1; i < v.stops.length; i++) {
+        const prev = v.stops[i - 1], cur = v.stops[i];
+        segs.push({
+          dist: cur.dist_from_prev_m | 0,
+          from: [prev.lat, prev.lon],
+          to:   [cur.lat,  cur.lon],
+          veh_id: v.id,
+          ord: i,
+        });
+      }
+    });
+    segs.sort((a, b) => b.dist - a.dist);
+    const top = segs.slice(0, LONG_SEG_TOP_N);
+    longSegLayer = L.layerGroup(top.map(s =>
+      L.polyline([s.from, s.to], {
+        color: '#ff3b3b', weight: 4, opacity: 0.75,
+      }).bindPopup(
+        `<b>${(s.dist/1000).toFixed(2)} km segment</b><br>` +
+        `Vehicle ${s.veh_id}, between stops ${s.ord} and ${s.ord + 1}`
+      )
+    ));
+
     const list = $('vehicle-list');
     list.innerHTML = '';
     vehicleLayers.forEach((vl, i) => {
@@ -332,6 +363,7 @@
       if (showRoutes) { vl.polylines.addTo(map); vl.polylines._mpe_managed = true; }
     });
     if (showUnassigned) { unassignedGroup.addTo(map); unassignedGroup._mpe_managed = true; }
+    if (showLong)       { longSegLayer.addTo(map); longSegLayer._mpe_managed = true; longSegLayer.bringToFront?.(); }
     if (highlightMarker) highlightMarker.bringToFront?.();
   }
 
@@ -443,6 +475,7 @@
   $('btn-stops').onclick = () => { showStops = !showStops; toggle('btn-stops', showStops); refreshLayers(); };
   $('btn-routes').onclick = () => { showRoutes = !showRoutes; toggle('btn-routes', showRoutes); refreshLayers(); };
   $('btn-unassigned').onclick = () => { showUnassigned = !showUnassigned; toggle('btn-unassigned', showUnassigned); refreshLayers(); };
+  $('btn-long').onclick = () => { showLong = !showLong; toggle('btn-long', showLong); refreshLayers(); };
   $('btn-fit').onclick = () => { if (bbox) map.fitBounds(L.latLngBounds([[bbox.lat_min, bbox.lon_min], [bbox.lat_max, bbox.lon_max]]).pad(0.05)); };
   $('btn-all').onclick = () => { vehicleLayers.forEach(vl => vl.visible = true); refreshLayers(); document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('hidden')); };
   $('btn-none').onclick = () => { vehicleLayers.forEach(vl => vl.visible = false); refreshLayers(); document.querySelectorAll('.veh-row').forEach(r => r.classList.add('hidden')); };
