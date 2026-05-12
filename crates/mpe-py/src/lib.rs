@@ -463,9 +463,10 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
         let mut pub_sol = sol.clone();
         let n_swaps = uncross_pass(&mut pub_sol, &problem, &matrix, &kept_jobs_latlon);
         let n_relocs = relocate_pass(&mut pub_sol, &problem, &matrix);
-        if n_swaps + n_relocs > 0 {
+        let n_2opts = intra_route_2opt_pass(&mut pub_sol, &problem, &matrix);
+        if n_swaps + n_relocs + n_2opts > 0 {
             eprintln!(
-                "[mpe_py     fixup] iter {iter}: {n_swaps} 2-opt* swap(s) + {n_relocs} cross-route relocate(s)"
+                "[mpe_py     fixup] iter {iter}: {n_swaps} 2-opt* swap(s) + {n_relocs} cross-route relocate(s) + {n_2opts} intra-route 2-opt(s)"
             );
         }
 
@@ -651,6 +652,75 @@ fn cumulative_loads(steps: &[brooom::solution::TaskRef], problem: &brooom::Probl
         out.push(acc);
     }
     out
+}
+
+// -------------------------------------------------------------------------
+// Intra-route 2-opt, NO granular restriction.
+//
+// brooom does intra-route 2-opt but its candidate set is filtered by
+// the K=40 granular neighbourhood, so long zigzag-style segments in
+// the visiting order whose fix would require swapping with a stop
+// outside the K-nearest list survive. This pass enumerates every
+// (i, j) edge pair within a route (including the two depot legs as
+// boundary edges) and applies the best reversal.
+//
+// Reversing path[i+1..=j] turns edges (path[i], path[i+1]) and
+// (path[j], path[j+1]) into (path[i], path[j]) and (path[i+1], path[j+1]).
+// path = [depot_start, s_0, s_1, ..., s_{n-1}, depot_end].
+// In `steps` terms: reversing steps[i..j] (exclusive on the right).
+//
+// O(R · n²) per sweep; for R=54, n=37 that's <80k ops, <1 ms total.
+// -------------------------------------------------------------------------
+
+fn intra_route_2opt_pass(
+    solution: &mut brooom::solution::Solution,
+    problem: &brooom::Problem,
+    matrix: &brooom::Matrix,
+) -> usize {
+    let mut applied = 0usize;
+    for r in 0..solution.routes.len() {
+        let vh = &problem.vehicles[solution.routes[r].vehicle_idx];
+        let dep_s = vh.start.as_ref().and_then(|l| l.index).unwrap_or(0);
+        let dep_e = vh.end.as_ref().and_then(|l| l.index).unwrap_or(dep_s);
+        let mut sweep_local = 0usize;
+        let mut improved = true;
+        while improved && sweep_local < 10 {
+            sweep_local += 1;
+            improved = false;
+            let n = solution.routes[r].steps.len();
+            if n < 2 { break; }
+            // Build node-id path including depot at both ends.
+            let path: Vec<usize> = std::iter::once(dep_s)
+                .chain(solution.routes[r].steps.iter()
+                    .map(|s| problem.jobs[job_idx_of(*s)].location.index.unwrap_or(0)))
+                .chain(std::iter::once(dep_e))
+                .collect();
+            let plen = path.len();  // = n + 2
+
+            let mut best_delta: i64 = 0;
+            let mut best: Option<(usize, usize)> = None;
+            for i in 0..(plen - 2) {
+                for j in (i + 2)..(plen - 1) {
+                    let old = matrix.distance(path[i], path[i + 1])
+                            + matrix.distance(path[j], path[j + 1]);
+                    let new_d = matrix.distance(path[i], path[j])
+                              + matrix.distance(path[i + 1], path[j + 1]);
+                    let delta = new_d - old;
+                    if delta < best_delta {
+                        best_delta = delta;
+                        best = Some((i, j));
+                    }
+                }
+            }
+            if let Some((i, j)) = best {
+                // path[i+1..=j] reverses → in `steps` indices that is steps[i..j].
+                solution.routes[r].steps[i..j].reverse();
+                applied += 1;
+                improved = true;
+            }
+        }
+    }
+    applied
 }
 
 // -------------------------------------------------------------------------

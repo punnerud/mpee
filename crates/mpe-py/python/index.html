@@ -287,7 +287,7 @@
     // structurally necessary and not visually fixable.
     longSegLayer.remove();
     const segs = [];
-    data.vehicles.forEach(v => {
+    data.vehicles.forEach((v, vIdx) => {
       for (let i = 1; i < v.stops.length; i++) {
         const prev = v.stops[i - 1], cur = v.stops[i];
         segs.push({
@@ -295,20 +295,32 @@
           from: [prev.lat, prev.lon],
           to:   [cur.lat,  cur.lon],
           veh_id: v.id,
-          ord: i,
+          veh_idx: vIdx,
+          from_stop_idx: i - 1,
+          to_stop_idx: i,
         });
       }
     });
     segs.sort((a, b) => b.dist - a.dist);
     const top = segs.slice(0, LONG_SEG_TOP_N);
-    longSegLayer = L.layerGroup(top.map(s =>
-      L.polyline([s.from, s.to], {
+    longSegLayer = L.layerGroup(top.map(s => {
+      const line = L.polyline([s.from, s.to], {
         color: '#ff3b3b', weight: 4, opacity: 0.75,
       }).bindPopup(
         `<b>${(s.dist/1000).toFixed(2)} km segment</b><br>` +
-        `Vehicle ${s.veh_id}, between stops ${s.ord} and ${s.ord + 1}`
-      )
-    ));
+        `Vehicle ${s.veh_id}, stops ${s.from_stop_idx + 1} → ${s.to_stop_idx + 1}<br>` +
+        `<small>Tap to open route, tap again to walk through stops</small>`
+      );
+      line.on('click', (e) => {
+        // Open the route's detail drawer at the "from" stop so the user
+        // can immediately use prev/next to step into the long-segment
+        // context and verify it's a single route, not two routes
+        // visually overlapping.
+        selectVehicle(s.veh_idx, s.from_stop_idx);
+        L.DomEvent.stopPropagation(e);
+      });
+      return line;
+    }));
 
     const list = $('vehicle-list');
     list.innerHTML = '';
