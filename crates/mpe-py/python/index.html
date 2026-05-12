@@ -248,10 +248,14 @@
     data.vehicles.forEach((v, i) => {
       const stops = L.layerGroup();
       const polylines = L.layerGroup();
-      const path = [[data.depot.lat, data.depot.lon]];
-      v.stops.forEach(s => path.push([s.lat, s.lon]));
-      path.push([data.depot.lat, data.depot.lon]);
-      L.polyline(path, { color: v.color, weight: 2, opacity: 0.7 }).addTo(polylines);
+      // Polyline through the customer stops only — drawing the depot
+      // legs would have 50+ routes converging on the depot and turn
+      // the centre into a star. The depot is still rendered as a
+      // separate yellow dot above.
+      if (v.stops.length >= 2) {
+        const path = v.stops.map(s => [s.lat, s.lon]);
+        L.polyline(path, { color: v.color, weight: 2, opacity: 0.7 }).addTo(polylines);
+      }
 
       v.stops.forEach((s, idx) => {
         const m = L.circleMarker([s.lat, s.lon], {
