@@ -46,7 +46,7 @@ See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
 
 > **Heads-up: there are two CLIs, both named `mpee`.** The commands above are
 > the **pip package** (`pip install mpee` → verbs `route` / `optimize` /
-> `download` / `build` / `serve`). The Rust workspace binary
+> `download` / `build`). The Rust workspace binary
 > (`cargo run -p mpee-cli`, i.e. `./target/release/mpee`) is a *different* tool
 > with VRP-focused verbs (`gen` / `download` / `build` / `solve` / `pipeline`)
 > — it has **no** point-to-point `route`. Use the pip package for the examples
@@ -59,7 +59,7 @@ See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
 | Road-network router (CH)    | [`crates/dijeng/`](crates/dijeng/)   | OSRM               |
 | VRP solver (GPU + CPU LS)   | [`crates/brooom/`](crates/brooom/)       | VROOM              |
 | Shared CLI / orchestration  | [`crates/mpee-cli/`](crates/mpee-cli/)     | (new)              |
-| Live HTTP + map UI          | [`crates/mpee-serve/`](crates/mpee-serve/) | (new)              |
+| Live HTTP + map UI          | [`crates/mpee-viz/`](crates/mpee-viz/) | (new)              |
 
 Both engines **are** standalone Rust projects (each with its own
 `Cargo.toml`, its own binaries, its own tests) and can be run completely
@@ -114,8 +114,8 @@ mpee/
     │   ├── Cargo.toml              # Path-deps on both engines
     │   └── src/main.rs             # Verbs: gen / download / build / solve / pipeline
     ├── mpee-py/                     # PyO3 bindings + the `pip install mpee` CLI
-    │   └── ...                      # Verbs: route / optimize / download / build / serve
-    └── mpee-serve/                  # Live HTTP server + embedded Leaflet map UI
+    │   └── ...                      # Verbs: route / optimize / download / build
+    └── mpee-viz/                    # Live VRP-on-a-map demo server (Leaflet UI)
 ```
 
 Each engine has its own `integration.txt` describing exactly which types
@@ -192,13 +192,13 @@ cargo run --release -p mpee-cli -- build data/greater-london-latest.osm.pbf
   duration+distance matrix with sssp_bench's bucket-MMM, and hand the
   matrix straight to brooom's solver — all in the same address space,
   no IPC, no disk on the hot path.
-- **mpee-serve**: live HTTP server (port 8032 by default) that runs the
+- **mpee-viz**: live HTTP server (port 8032 by default) that runs the
   same pipeline and then serves the result over an embedded
   Leaflet-based mobile UI. Designed so a phone on the same network can
   load `http://<laptop-ip>:8032/`, see every route colour-coded on a
   map, tap a stop for `job_id` / `vehicle_id` / `stop_order`, and zoom
   to any vehicle's bounding box. See
-  [`crates/mpee-serve/README.md`](crates/mpee-serve/README.md) for build
+  [`crates/mpee-viz/README.md`](crates/mpee-viz/README.md) for build
   instructions and the measured 2 000 / 5 000-job runs over Greater
   London.
 
@@ -219,7 +219,7 @@ this issue.
 ## License
 
 MIT — every crate: `brooom`, `dijeng` (Cargo name `sssp_bench`), `mpee-cli`,
-`mpee-py`, and `mpee-serve`. See each crate's `Cargo.toml` for details.
+`mpee-py`, and `mpee-viz`. See each crate's `Cargo.toml` for details.
 
 ---
 

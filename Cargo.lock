@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "mpee-py"
-version = "0.3.5"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "brooom",
@@ -1183,7 +1183,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpee-serve"
+name = "mpee-viz"
 version = "0.1.0"
 dependencies = [
  "anyhow",

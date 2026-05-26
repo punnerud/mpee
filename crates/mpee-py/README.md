@@ -208,21 +208,6 @@ scheduled day, and each route stays inside the 8-hour shift. Drop a job's
 
 ---
 
-## Optional: serve caches on your LAN
-
-A side feature for sharing prebuilt caches with another device (e.g. a
-phone) so it can route without rebuilding:
-
-```bash
-mpee serve --data-dir data
-```
-
-This is the recommended server — it ships with the package. (The repo's
-`python/cache_server.py` is the older standalone equivalent; prefer
-`mpee serve`.)
-
----
-
 ## Build from source (development)
 
 `pip install mpee` needs no toolchain. To build the extension from a checkout,

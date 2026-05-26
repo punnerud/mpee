@@ -1,4 +1,4 @@
-//! mpee-serve — live HTTP server that solves a VRP and shows it on a map.
+//! mpee-viz — live HTTP server that solves a VRP and shows it on a map.
 //!
 //! The HTTP server binds immediately on startup. The solver runs in a
 //! background thread and publishes its progress to a small shared
@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock};
 use tiny_http::{Header, Method, Response, Server};
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "mpee-serve", version, about = "mpee live map server")]
+#[command(name = "mpee-viz", version, about = "mpee live map server")]
 struct Args {
     #[arg(long, default_value = "london")] region: String,
     #[arg(long, default_value_t = 5000)] n_jobs: usize,
@@ -162,7 +162,7 @@ fn main() -> Result<()> {
     // progress page while the solver runs.
     let addr = format!("{}:{}", args.host, args.port);
     let server = Server::http(&addr).map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))?;
-    eprintln!("mpee-serve listening on http://{}/", addr);
+    eprintln!("mpee-viz listening on http://{}/", addr);
     if args.host == "0.0.0.0" {
         eprintln!("on a phone, point at  http://<laptop-ip>:{}/", args.port);
     }

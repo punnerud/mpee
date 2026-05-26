@@ -31,7 +31,7 @@ use std::sync::{Arc, RwLock};
 const SENTINEL_I32: i32 = 7 * 24 * 60 * 60;
 
 // -------------------------------------------------------------------------
-// Shared state — exactly the same shape as mpee-serve's AppState.
+// Shared state — exactly the same shape as mpee-viz's AppState.
 // -------------------------------------------------------------------------
 
 struct AppState {
@@ -709,7 +709,7 @@ fn _mpee(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 // -------------------------------------------------------------------------
-// solver — mirrors mpee-serve's solve_in_process. The boundary between
+// solver — mirrors mpee-viz's solve_in_process. The boundary between
 // Python and Rust does NOT cross here; the solver thread is pure Rust
 // and only the published `Arc<String>` is read by Python on demand.
 // -------------------------------------------------------------------------
@@ -1453,7 +1453,7 @@ fn narrow_pos_i32(v: &f32) -> i32 {
 
 // -------------------------------------------------------------------------
 // Dataset = the JSON-ready bundle the frontend renders.
-// Same shape as mpee-serve's bundle.
+// Same shape as mpee-viz's bundle.
 // -------------------------------------------------------------------------
 
 #[derive(Serialize)]

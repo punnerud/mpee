@@ -4,7 +4,7 @@ members = [
     "crates/brooom",
     "crates/dijeng",
     "crates/mpee-cli",
-    "crates/mpee-serve",
+    "crates/mpee-viz",
     "crates/mpee-py",
     # NB: the iOS FFI crate (mpee-ios) and the SwiftUI demo app live in a
     # separate sibling repo (../mpee-ios) so the engine stays platform-neutral.

@@ -5,7 +5,6 @@ Subcommands:
     optimize   multi-vehicle delivery optimization (VRP) over your own stops
     download   fetch an OSM extract from Geofabrik
     build      preprocess a .osm.pbf into a routable .pp + .ch cache
-    serve      (optional) serve prebuilt caches over the local network
 
 Everything runs offline against a local cache — no API keys, no network
 except the one-time `download`.
@@ -151,11 +150,6 @@ def cmd_build(args) -> int:
     return 0
 
 
-def cmd_serve(args) -> int:
-    from . import server
-    return server.serve(data_dir=args.data_dir, port=args.port)
-
-
 # --------------------------------------------------------------------------
 # argument parser
 # --------------------------------------------------------------------------
@@ -199,11 +193,6 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--quiet", "-q", action="store_true", help="suppress build progress output")
     pb.add_argument("--force", action="store_true", help="rebuild even if a cache already exists")
     pb.set_defaults(func=cmd_build)
-
-    ps = sub.add_parser("serve", help="serve prebuilt caches over the local network")
-    ps.add_argument("--data-dir", default="data")
-    ps.add_argument("--port", type=int, default=8033)
-    ps.set_defaults(func=cmd_serve)
 
     return p
 

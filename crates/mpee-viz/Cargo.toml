@@ -1,12 +1,12 @@
 [package]
-name = "mpee-serve"
+name = "mpee-viz"
 version = "0.1.0"
 edition = "2021"
 description = "Live HTTP server for mpee — solves a VRP in-process (sharing memory with the solver) and serves the result as JSON + an embedded mobile-friendly Leaflet UI."
 license = "MIT"
 
 [[bin]]
-name = "mpee-serve"
+name = "mpee-viz"
 path = "src/main.rs"
 
 [dependencies]

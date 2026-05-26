@@ -1,4 +1,4 @@
-# mpee-serve
+# mpee-viz
 
 > Part of the **[mpee](../../README.md)** workspace.
 
@@ -16,7 +16,7 @@ the engine and watching how many thousand routes lay out on the map.
 ## Architecture
 
 ```
-                ┌──────── mpee-serve (single Rust process) ──────────────┐
+                ┌──────── mpee-viz (single Rust process) ──────────────┐
                 │                                                       │
                 │  sssp_bench::cache_pp/ch::load_mmap   (mmap ~20 µs)   │
                 │  sssp_bench::routing::matrix_with_distance            │
@@ -52,10 +52,10 @@ RAM, same address space.
 
 ```bash
 # Once: build the release binary (~1 min, ort already cached after first brooom build).
-cargo build --release -p mpee-serve
+cargo build --release -p mpee-viz
 
 # Then: solve + serve in one command.
-./target/release/mpee-serve \
+./target/release/mpee-viz \
   --region london \
   --n-jobs 5000 --n-vehicles 100 --capacity 350 --seed 1 \
   --ch data/greater-london.osm.pbf.ch \

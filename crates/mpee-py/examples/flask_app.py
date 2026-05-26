@@ -3,7 +3,7 @@
 Why this exists: macOS Application Firewall asks per-binary permission
 for non-loopback listeners. Python (Apple-signed) is already allowed,
 so Flask can bind 0.0.0.0:8032 freely without prompting for every
-mpee-serve rebuild. The Rust solver runs inside this same Python
+mpee-viz rebuild. The Rust solver runs inside this same Python
 process via `import mpee`, so the dataset lives in the same RAM
 that brooom's solve_with_matrix just finished writing.
 
@@ -96,7 +96,7 @@ def main() -> int:
 
     app = Flask(__name__)
 
-    # CORS open — same as mpee-serve, so a separate UI host can hit us too.
+    # CORS open — same as mpee-viz, so a separate UI host can hit us too.
     @app.after_request
     def cors(resp: Response) -> Response:
         resp.headers["Access-Control-Allow-Origin"] = "*"
