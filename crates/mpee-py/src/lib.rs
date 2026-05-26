@@ -9,7 +9,7 @@
 //!   python3 -m venv venv && source venv/bin/activate
 //!   pip install maturin flask
 //!   maturin develop --release
-//!   python3 python/app.py
+//!   python3 examples/flask_app.py
 //!
 //! API:
 //!   import mpee

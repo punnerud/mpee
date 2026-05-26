@@ -221,6 +221,8 @@ maturin develop --release                            # builds + installs `mpee`
 ```
 
 Cross-platform wheels are built in CI with maturin (see the repo).
+`examples/flask_app.py` shows serving the solver over a Flask HTTP API
+(`pip install flask && python3 examples/flask_app.py`).
 
 ---
 

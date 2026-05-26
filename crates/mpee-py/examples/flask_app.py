@@ -13,7 +13,7 @@ Run:
     source venv/bin/activate
     pip install maturin flask
     maturin develop --release
-    python3 python/app.py
+    python3 examples/flask_app.py
 
 Then point a phone at http://<laptop-ip>:8032/.
 """
