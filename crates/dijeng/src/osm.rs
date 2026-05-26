@@ -62,7 +62,8 @@ pub fn load_with_cache<P: AsRef<Path>>(
 
     // The .csr cache stores routing data only; street names are reconstructed
     // by `build::build_cache`, which calls `load_osm_routing_par` directly.
-    let (g, coords, edge_dist, _names, _name_pool) = load_osm_routing_par(pbf, profile)?;
+    let (g, coords, edge_dist, _names, _name_pool, _street_nodes) =
+        load_osm_routing_par(pbf, profile)?;
     let t = std::time::Instant::now();
     if let Err(e) = cache::save(cache_p, &g, &coords, &edge_dist) {
         eprintln!("[osm/{}] failed to save cache: {e}", profile.name());
@@ -87,7 +88,7 @@ pub fn load_with_cache<P: AsRef<Path>>(
 pub fn load_osm_routing_par<P: AsRef<Path>>(
     path: P,
     profile: Profile,
-) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>)> {
+) -> std::io::Result<ParseResult> {
     let path = path.as_ref();
     println!("[osm] opening {} (parallel)", path.display());
 
@@ -195,7 +196,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
 pub fn load_osm_routing<P: AsRef<Path>>(
     path: P,
     profile: Profile,
-) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>)> {
+) -> std::io::Result<ParseResult> {
     let path = path.as_ref();
     println!("[osm] opening {}", path.display());
 
@@ -276,10 +277,12 @@ pub fn load_osm_routing<P: AsRef<Path>>(
     finalize_csr(ways, node_coords)
 }
 
+type ParseResult = (CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>, Vec<Vec<u32>>);
+
 fn finalize_csr(
     ways: Vec<WayRec>,
     node_coords: HashMap<i64, (f32, f32)>,
-) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>)> {
+) -> std::io::Result<ParseResult> {
     use crate::names::NO_NAME;
     let t = std::time::Instant::now();
     let mut id_map: HashMap<i64, u32> = HashMap::with_capacity(1_500_000);
@@ -291,6 +294,10 @@ fn finalize_csr(
     let mut node_name: Vec<u32> = Vec::with_capacity(1_500_000);
     let mut name_pool: Vec<String> = Vec::new();
     let mut name_map: HashMap<String, u32> = HashMap::new();
+    // `street_nodes[street_id]` = the road nodes that street touches (CSR ids,
+    // with duplicates — deduped at write time). Used for intersection search:
+    // the node where two streets meet is in both their node sets.
+    let mut street_nodes: Vec<Vec<u32>> = Vec::new();
     // (u, v, duration_s, distance_m). The graph's `edge_w` will be duration;
     // the parallel `edge_dist` array is the metres returned alongside.
     let mut edges: Vec<(u32, u32, f32, f32)> = Vec::with_capacity(2 * ways.len() * 4);
@@ -306,6 +313,7 @@ fn finalize_csr(
                         let id = name_pool.len() as u32;
                         name_pool.push(key.to_string());
                         name_map.insert(key.to_string(), id);
+                        street_nodes.push(Vec::new());
                         id
                     }
                 }
@@ -345,7 +353,8 @@ fn finalize_csr(
                     }
                 },
             };
-            // Stamp the street name on both endpoints (first named way wins).
+            // Stamp the street name on both endpoints (first named way wins),
+            // and record both as members of this street (for intersections).
             if wname_id != NO_NAME {
                 if node_name[a_idx as usize] == NO_NAME {
                     node_name[a_idx as usize] = wname_id;
@@ -353,6 +362,9 @@ fn finalize_csr(
                 if node_name[b_idx as usize] == NO_NAME {
                     node_name[b_idx as usize] = wname_id;
                 }
+                let members = &mut street_nodes[wname_id as usize];
+                members.push(a_idx);
+                members.push(b_idx);
             }
             if a_idx == b_idx {
                 continue;
@@ -392,7 +404,7 @@ fn finalize_csr(
         named,
         g.n,
     );
-    Ok((g, coords, edge_dist, node_name, name_pool))
+    Ok((g, coords, edge_dist, node_name, name_pool, street_nodes))
 }
 
 #[derive(Clone, Copy)]

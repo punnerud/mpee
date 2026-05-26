@@ -10,7 +10,7 @@ data leaving your machine:
 
 - 🧭 **Point-to-point routes** — driving distance + time between two coordinates.
 - 🚚 **Multi-vehicle optimization (VRP)** — best routes for *N* vehicles over your own stops, with capacities.
-- 🔎 **Offline geocoding** — street name ⇄ coordinate, reusing the same cache (no extra index; street-level).
+- 🔎 **Offline geocoding** — street name ⇄ coordinate, plus street-crossing lookup, reusing the same cache (no extra index; street-level).
 - 🗺️ **Bring your own area** — any OpenStreetMap extract sized to where you operate (a city, a region). Not a route-anywhere-on-Earth offline map: one downloaded area, one cache.
 - ⚡ **Fast & small** — a Rust engine (CH routing + `brooom` VRP solver) using CPU **and** GPU; the engine itself is under ~50 MB (the map cache scales with the area).
 
@@ -104,11 +104,19 @@ mpee reverse 51.5080,-0.1281 --cache data/greater-london.osm.pbf
 mpee geocode "Baker Street" --cache data/greater-london.osm.pbf
 #  → Baker Street
 #  → 51.522072,-0.157497
+
+# where two streets cross → one LAT,LON per shared node (may be several)
+mpee crossing "Oxford Street" "Regent Street" --cache data/greater-london.osm.pbf
+#  → Oxford Street × Regent Street: 4 match(es)   (Oxford Circus)
+#  → 51.515244,-0.141946
+#  → ...
 ```
 
-Street-level only: the name lives on the OSM road, so you get the street and
-its coordinate, not a house number. The sidecar is independently deletable if
-you only need routing.
+A crossing is the road node two streets *share* (no polyline maths), so a
+junction modelled with several nodes returns several points — pick the one you
+want. Street-level only: the name lives on the OSM road, so you get the street
+and its coordinate, not a house number. The sidecar is independently deletable
+if you only need routing.
 
 ---
 
@@ -152,9 +160,10 @@ r.table(stops)                # full N×N duration + distance table
 r.bbox()                      # coverage of the loaded map
 
 # Geocoding (offline, if a .names sidecar was built — see CLI section 4):
-r.reverse(51.5080, -0.1281)   # → "Trafalgar Square" (or None)
-r.geocode("Baker Street")     # → {"name": ..., "lat": ..., "lon": ...} (or None)
-r.has_names()                 # → True if geocoding is available
+r.reverse(51.5080, -0.1281)                  # → "Trafalgar Square" (or None)
+r.geocode("Baker Street")                    # → {"name": ..., "lat": ..., "lon": ...} (or None)
+r.intersection("Oxford Street", "Regent Street")  # → [{"lat": ..., "lon": ...}, ...] crossings
+r.has_names()                                # → True if geocoding is available
 ```
 
 `Router.build("map.osm.pbf", profile="car")` builds a cache from Python too

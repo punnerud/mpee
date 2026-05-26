@@ -13,14 +13,14 @@ fn main() -> std::io::Result<()> {
 
     println!("=== sekvensiell ===");
     let t = Instant::now();
-    let (g_seq, c_seq, _ed_seq, _nm_seq, _np_seq) = load_osm_routing(&path, Profile::Car)?;
+    let (g_seq, c_seq, _ed_seq, _nm_seq, _np_seq, _sn_seq) = load_osm_routing(&path, Profile::Car)?;
     let dt_seq = t.elapsed().as_secs_f64();
     println!("[seq] total: {:.2} s", dt_seq);
     println!();
 
     println!("=== parallell ===");
     let t = Instant::now();
-    let (g_par, c_par, _ed_par, _nm_par, _np_par) = load_osm_routing_par(&path, Profile::Car)?;
+    let (g_par, c_par, _ed_par, _nm_par, _np_par, _sn_par) = load_osm_routing_par(&path, Profile::Car)?;
     let dt_par = t.elapsed().as_secs_f64();
     println!("[par] total: {:.2} s", dt_par);
     println!();

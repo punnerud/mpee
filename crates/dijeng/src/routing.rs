@@ -98,6 +98,22 @@ impl RoutingService {
         Some((lat, lon, name))
     }
 
+    /// Intersection search: every coordinate where streets `a` and `b` meet
+    /// (set intersection of their road-node lists). Names are resolved like
+    /// `geocode` (case-insensitive, substring). Empty if no sidecar is loaded,
+    /// a name doesn't resolve, or the streets share no node. Several results
+    /// are possible (streets that cross more than once or run together).
+    pub fn intersection(&self, a: &str, b: &str) -> Vec<(f32, f32)> {
+        match self.names.as_ref() {
+            Some(names) => names
+                .intersections(a, b)
+                .into_iter()
+                .map(|node| self.coords[node as usize])
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
     /// Nearest road node by squared planar distance (longitude scaled by
     /// `cos(lat)` for correct ordering). Backed by a uniform grid index;
     /// typically ~50 µs on city/country-scale graphs.

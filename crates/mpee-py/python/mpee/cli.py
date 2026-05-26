@@ -5,6 +5,7 @@ Subcommands:
     optimize   multi-vehicle delivery optimization (VRP) over your own stops
     reverse    reverse-geocode: nearest street name to a LAT,LON point
     geocode    forward-geocode: look up a street by name -> its LAT,LON
+    crossing   intersection search: where two named streets cross
     download   fetch an OSM extract from Geofabrik
     build      preprocess a .osm.pbf into a routable .pp + .ch cache
 
@@ -151,6 +152,28 @@ def cmd_geocode(args) -> int:
     return 0
 
 
+def cmd_crossing(args) -> int:
+    from . import Router
+    pp, ch = _resolve_cache(args)
+    r = Router(pp, ch)
+    if not r.has_names():
+        raise SystemExit(
+            f"error: no .names sidecar next to {pp} — rebuild the cache "
+            "(`mpee build`) with this version to enable geocoding")
+    hits = r.intersection(args.a, args.b)
+    if not hits:
+        raise SystemExit(
+            f"no intersection of {args.a!r} and {args.b!r} found "
+            "(unknown street, or they share no node)")
+    if args.json:
+        print(json.dumps(hits))
+        return 0
+    print(f"{args.a} × {args.b}: {len(hits)} match(es)")
+    for h in hits:
+        print(f"{h['lat']:.6f},{h['lon']:.6f}")
+    return 0
+
+
 def cmd_download(args) -> int:
     import urllib.request
 
@@ -227,6 +250,13 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--json", action="store_true", help="emit JSON")
     _add_cache_args(pg)
     pg.set_defaults(func=cmd_geocode)
+
+    pc = sub.add_parser("crossing", help="intersection search: where two streets cross")
+    pc.add_argument("a", help="first street name")
+    pc.add_argument("b", help="second street name")
+    pc.add_argument("--json", action="store_true", help="emit JSON")
+    _add_cache_args(pc)
+    pc.set_defaults(func=cmd_crossing)
 
     pd = sub.add_parser("download", help="fetch an OSM extract from Geofabrik")
     pd.add_argument("slug", help="Geofabrik path, e.g. europe/great-britain/england/greater-london")

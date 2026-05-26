@@ -171,6 +171,22 @@ enum Cmd {
         pp: Option<PathBuf>,
     },
 
+    /// Intersection search: where two named streets cross. Offline; prints one
+    /// LAT,LON per shared road node (may be several).
+    Crossing {
+        /// First street name.
+        a: String,
+        /// Second street name.
+        b: String,
+        /// Cache prefix — uses <prefix>.pp + <prefix>.names. Or pass --ch/--pp.
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        #[arg(long)]
+        ch: Option<PathBuf>,
+        #[arg(long)]
+        pp: Option<PathBuf>,
+    },
+
     /// End-to-end: gen + solve.
     Pipeline {
         #[arg(long, default_value = "london")]
@@ -226,6 +242,10 @@ fn main() -> Result<()> {
         Cmd::Geocode { query, cache, ch, pp } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             cmd_geocode(&query, &ch, &pp)
+        }
+        Cmd::Crossing { a, b, cache, ch, pp } => {
+            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
+            cmd_crossing(&a, &b, &ch, &pp)
         }
         Cmd::Pipeline {
             region, n_jobs, n_vehicles, seed, capacity, cache, ch, pp,
@@ -560,6 +580,26 @@ fn cmd_geocode(query: &str, ch_path: &Path, pp_path: &Path) -> Result<()> {
             println!("{lat:.6},{lon:.6}");
         }
         None => bail!("no street matching {query:?} found in this area"),
+    }
+    Ok(())
+}
+
+fn cmd_crossing(a: &str, b: &str, ch_path: &Path, pp_path: &Path) -> Result<()> {
+    let svc = load_service_with_names(ch_path, pp_path)?;
+    if !svc.has_names() {
+        bail!(
+            "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \
+             version to enable geocoding",
+            pp_path.display()
+        );
+    }
+    let hits = svc.intersection(a, b);
+    if hits.is_empty() {
+        bail!("no intersection of {a:?} and {b:?} found (unknown street, or they share no node)");
+    }
+    println!("{a} × {b}: {} match(es)", hits.len());
+    for (lat, lon) in hits {
+        println!("{lat:.6},{lon:.6}");
     }
     Ok(())
 }

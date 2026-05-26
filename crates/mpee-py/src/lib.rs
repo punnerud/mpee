@@ -387,6 +387,23 @@ impl Router {
         }
     }
 
+    /// Intersection search: every coordinate where two streets meet. Returns a
+    /// list of `{"lat", "lon"}` dicts (often one; several when the streets
+    /// cross more than once or share a stretch). Empty if no sidecar is loaded,
+    /// a name doesn't resolve, or the streets share no node. Names are matched
+    /// case-insensitively (substring), e.g. `("Karl Johans gate", "Kongens gate")`.
+    fn intersection<'py>(&self, py: Python<'py>, a: &str, b: &str) -> PyResult<Bound<'py, PyList>> {
+        let hits = self.routing.intersection(a, b);
+        let out = PyList::empty_bound(py);
+        for (lat, lon) in hits {
+            let d = PyDict::new_bound(py);
+            d.set_item("lat", lat)?;
+            d.set_item("lon", lon)?;
+            out.append(d)?;
+        }
+        Ok(out)
+    }
+
     /// Whether a street-name sidecar is loaded (i.e. geocoding is available).
     fn has_names(&self) -> bool {
         self.routing.has_names()

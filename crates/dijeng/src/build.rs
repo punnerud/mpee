@@ -128,7 +128,7 @@ pub fn build_cache(
     // in the same pass. A fresh build therefore always re-parses rather than
     // reading an existing `.csr`; the `.csr` is only re-written when keep_csr
     // is set, as a parse accelerator for other tools.
-    let (graph, coords, edge_dist, node_name, name_pool) =
+    let (graph, coords, edge_dist, node_name, name_pool, street_nodes) =
         osm::load_osm_routing_par(pbf, profile).map_err(|e| format!("osm load: {e}"))?;
     if keep_csr {
         if let Err(e) = cache::save(&csr_path, &graph, &coords, edge_dist.as_slice()) {
@@ -163,6 +163,22 @@ pub fn build_cache(
         new_coords[pre.new_id[old] as usize] = coords[old];
         new_name_id[pre.new_id[old] as usize] = node_name[old];
     }
+
+    // Per-street node lists for intersection search → a CSR keyed by street id.
+    // Remap each node to the new order, sort + dedup so two streets' lists can
+    // be merge-intersected at query time. Built in the same pass; no re-parse.
+    let k = name_pool.len();
+    let mut street_offsets = vec![0u32; k + 1];
+    let mut street_node_flat: Vec<u32> = Vec::new();
+    for (sid, nodes) in street_nodes.iter().enumerate() {
+        street_offsets[sid] = street_node_flat.len() as u32;
+        let mut remapped: Vec<u32> = nodes.iter().map(|&old| pre.new_id[old as usize]).collect();
+        remapped.sort_unstable();
+        remapped.dedup();
+        street_node_flat.extend_from_slice(&remapped);
+    }
+    street_offsets[k] = street_node_flat.len() as u32;
+
     cache_pp::save(
         pp_path.as_path(),
         &pre.graph,
@@ -181,9 +197,9 @@ pub fn build_cache(
     let build_secs = t.elapsed().as_secs_f64();
     cache_ch::save(ch_path.as_path(), &h).map_err(|e| format!("ch save: {e}"))?;
 
-    // Street-name sidecar for offline geocoding (deletable when only routing
-    // is needed — it never affects route/solve).
-    if let Err(e) = names::save(&names_path, &new_name_id, &name_pool) {
+    // Street-name + intersection sidecar for offline geocoding (deletable when
+    // only routing is needed — it never affects route/solve).
+    if let Err(e) = names::save(&names_path, &new_name_id, &name_pool, &street_offsets, &street_node_flat) {
         eprintln!("[build] failed to write names sidecar: {e}");
     }
 
