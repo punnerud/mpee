@@ -79,7 +79,8 @@
     border-bottom:1px solid var(--line);
     background:radial-gradient(1200px 400px at 70% -10%, var(--accent-weak), transparent);
   }
-  .hero-inner{padding:64px 0 48px}
+  /* Only top/bottom here — keep .wrap's 20px side padding (shorthand would zero it). */
+  .hero-inner{padding-top:64px; padding-bottom:48px}
   .eyebrow{color:var(--accent); font-weight:700; letter-spacing:.08em; text-transform:uppercase; font-size:.78rem}
   h1{font-size:clamp(2rem,5vw,3rem); line-height:1.1; margin:.3em 0 .25em; letter-spacing:-.02em}
   .lede{font-size:1.18rem; color:var(--muted); max-width:62ch; margin:0 0 1.4em}
