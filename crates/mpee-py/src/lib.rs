@@ -281,59 +281,23 @@ impl Router {
     #[staticmethod]
     #[pyo3(signature = (pbf, profile = "car"))]
     fn build<'py>(py: Python<'py>, pbf: &str, profile: &str) -> PyResult<Bound<'py, PyDict>> {
-        use sssp_bench::{cache_ch, cache_pp, ch, osm, osm_profile::Profile, preprocess::preprocess};
-        use std::path::Path;
-
-        let prof = Profile::from_name(profile)
-            .ok_or_else(|| PyRuntimeError::new_err(format!("unknown profile {profile:?} (use car|bicycle|foot)")))?;
-        let suffix = if prof == Profile::Car { String::new() } else { format!(".{}", prof.name()) };
-        let pbf_path = Path::new(pbf);
-        // Cache names APPEND to the full PBF path (keeping `.pbf`), matching
-        // bench_pp/bench_ch and the `--cache <pbf>` CLI convention — e.g.
-        // data/oslo.osm.pbf → data/oslo.osm.pbf.pp / .ch. (Using
-        // `with_extension` here would drop `.pbf` and break that convention.)
-        let base = format!("{pbf}{suffix}");
-        let csr_cache = std::path::PathBuf::from(format!("{base}.csr"));
-        let pp_cache = std::path::PathBuf::from(format!("{base}.pp"));
-        let ch_cache = std::path::PathBuf::from(format!("{base}.ch"));
-
-        // Release the GIL for the heavy CPU work so other Python threads run.
-        let result = py.allow_threads(|| -> Result<(usize, usize, f64), String> {
-            let (graph, coords, edge_dist) =
-                osm::load_with_cache(pbf_path, csr_cache.as_path(), prof).map_err(|e| format!("osm load: {e}"))?;
-            // delta = avg edge weight / avg degree (matches the iOS build path).
-            let avg_w = {
-                if graph.edge_w.is_empty() { 1.0 } else {
-                    let stride = (graph.edge_w.len() / 4096).max(1);
-                    let (mut s, mut c, mut i) = (0.0f64, 0u64, 0usize);
-                    while i < graph.edge_w.len() { s += graph.edge_w[i] as f64; c += 1; i += stride; }
-                    (s / c.max(1) as f64) as f32
-                }
-            };
-            let avg_deg = graph.m() as f32 / graph.n.max(1) as f32;
-            let delta = (avg_w / avg_deg).max(1e-4);
-            let pre = preprocess(&graph, Some(delta), edge_dist.as_slice());
-            let (reverse, rev_edge_dist) =
-                sssp_bench::bidir::transpose_with_dist(&pre.graph, pre.edge_dist.as_slice());
-            let mut new_coords = vec![(0.0f32, 0.0f32); graph.n];
-            for old in 0..graph.n { new_coords[pre.new_id[old] as usize] = coords[old]; }
-            cache_pp::save(
-                pp_cache.as_path(), &pre.graph, &reverse, &pre.light_count, &pre.new_id,
-                &new_coords, delta, pre.edge_dist.as_slice(), &rev_edge_dist,
-            ).map_err(|e| format!("pp save: {e}"))?;
-            let t = std::time::Instant::now();
-            let h = ch::build_with_dist(&pre.graph, pre.edge_dist.as_slice());
-            let build_secs = t.elapsed().as_secs_f64();
-            cache_ch::save(ch_cache.as_path(), &h).map_err(|e| format!("ch save: {e}"))?;
-            Ok((pre.graph.n, pre.graph.m(), build_secs))
-        }).map_err(PyRuntimeError::new_err)?;
+        use sssp_bench::osm_profile::Profile;
+        let prof = Profile::from_name(profile).ok_or_else(|| {
+            PyRuntimeError::new_err(format!("unknown profile {profile:?} (use car|bicycle|foot)"))
+        })?;
+        let pbf_owned = pbf.to_string();
+        // The whole pipeline (parse → preprocess → CH) runs in-process in the
+        // shared `sssp_bench::build` helper; release the GIL for it.
+        let res = py
+            .allow_threads(move || sssp_bench::build::build_cache(std::path::Path::new(&pbf_owned), prof))
+            .map_err(PyRuntimeError::new_err)?;
 
         let d = PyDict::new_bound(py);
-        d.set_item("pp_path", pp_cache.to_string_lossy().to_string())?;
-        d.set_item("ch_path", ch_cache.to_string_lossy().to_string())?;
-        d.set_item("nodes", result.0)?;
-        d.set_item("edges", result.1)?;
-        d.set_item("build_secs", result.2)?;
+        d.set_item("pp_path", res.pp_path.to_string_lossy().to_string())?;
+        d.set_item("ch_path", res.ch_path.to_string_lossy().to_string())?;
+        d.set_item("nodes", res.nodes)?;
+        d.set_item("edges", res.edges)?;
+        d.set_item("build_secs", res.build_secs)?;
         Ok(d)
     }
 

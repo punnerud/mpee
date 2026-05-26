@@ -271,27 +271,23 @@ fn cmd_download(region: &str, out_dir: &Path) -> Result<()> {
 // -------------------------------------------------------------------------
 
 fn cmd_build(pbf: &Path, profile: &str) -> Result<()> {
-    use std::process::Command;
-    // Pass the FULL pbf path (e.g. data/norway.osm.pbf), not file_stem —
-    // bench_pp/bench_ch treat a non-shortcut value as a literal PBF base path
-    // and append .csr/.pp/.ch to it. Stripping to a stem broke the lookup.
-    let pbf_arg = pbf.to_str().unwrap_or("unknown");
-    eprintln!("(1/2) bench_pp {pbf_arg} {profile}");
-    let s1 = Command::new("cargo")
-        .args(["run", "--release", "-p", "sssp_bench", "--bin", "bench_pp", "--", pbf_arg, profile])
-        .status()
-        .context("run bench_pp")?;
-    if !s1.success() {
-        bail!("bench_pp failed");
-    }
-    eprintln!("(2/2) bench_ch {pbf_arg} {profile}");
-    let s2 = Command::new("cargo")
-        .args(["run", "--release", "-p", "sssp_bench", "--bin", "bench_ch", "--", pbf_arg, profile])
-        .status()
-        .context("run bench_ch")?;
-    if !s2.success() {
-        bail!("bench_ch failed");
-    }
+    // Build the cache IN-PROCESS via the shared sssp_bench helper — no
+    // `cargo run` subprocess, no recompilation, and works as a distributed
+    // binary (cargo/source not required). Same pipeline as Python's
+    // Router.build, so the outputs (and their names) are identical.
+    let prof = sssp_bench::osm_profile::Profile::from_name(profile)
+        .ok_or_else(|| anyhow::anyhow!("unknown profile {profile:?} — use car/bicycle/foot"))?;
+    eprintln!(
+        "building cache from {} (profile={profile}) — seconds for a city, minutes for a country…",
+        pbf.display()
+    );
+    let res = sssp_bench::build::build_cache(pbf, prof).map_err(|e| anyhow::anyhow!(e))?;
+    eprintln!(
+        "done: CH built in {:.1}s ({} nodes, {} edges)",
+        res.build_secs, res.nodes, res.edges
+    );
+    eprintln!("  pp: {}", res.pp_path.display());
+    eprintln!("  ch: {}", res.ch_path.display());
     Ok(())
 }
 

@@ -3,6 +3,7 @@ pub mod bidir;
 pub mod binary_table;
 pub mod budget;
 pub mod buffer;
+pub mod build;
 pub mod cache;
 pub mod cache_ch;
 pub mod cache_pp;
