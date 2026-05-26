@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MPEE — Offline route calculations &amp; optimization</title>
+<meta name="description" content="MPEE is a self-contained Rust routing + delivery-optimization engine you drive from Python or a CLI. Download one operating area once, then compute routes, multi-vehicle VRP, and street geocoding fully offline — no API keys, no per-request billing, no data leaving your machine.">
+<link rel="canonical" href="https://punnerud.github.io/mpee/">
+
+<!-- Open Graph / social -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="MPEE — Offline route calculations & optimization">
+<meta property="og:description" content="Offline routing, multi-vehicle VRP, and street geocoding for one downloaded area. Rust engine, Python + CLI, MIT.">
+<meta property="og:url" content="https://punnerud.github.io/mpee/">
+<meta name="twitter:card" content="summary">
+
+<!-- Inline SVG favicon (a route pin) — no extra file needed -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%230d9488' d='M16 2a10 10 0 0 0-10 10c0 7 10 18 10 18s10-11 10-18A10 10 0 0 0 16 2zm0 14a4 4 0 1 1 0-8 4 4 0 0 1 0 8z'/%3E%3C/svg%3E">
+
+<!-- Machine-readable metadata for agents / search -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "MPEE",
+  "alternateName": "Morten Punnerud-Engelstad Engine",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS, Linux, Windows",
+  "description": "A self-contained Rust routing and delivery-optimization engine driven from Python or a CLI. Offline point-to-point routing, multi-vehicle VRP, and street geocoding over one downloaded OpenStreetMap area.",
+  "softwareVersion": "0.4.5",
+  "license": "https://opensource.org/licenses/MIT",
+  "url": "https://punnerud.github.io/mpee/",
+  "codeRepository": "https://github.com/punnerud/mpee",
+  "downloadUrl": "https://pypi.org/project/mpee/",
+  "installUrl": "https://pypi.org/project/mpee/",
+  "programmingLanguage": ["Rust", "Python"],
+  "author": { "@type": "Person", "name": "Morten Punnerud-Engelstad" },
+  "keywords": "routing, VRP, vehicle routing problem, geocoding, OpenStreetMap, offline, contraction hierarchies, Rust, Python, delivery optimization"
+}
+</script>
+
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1c2530; --muted:#5a6b7b; --line:#e4e9ee;
+    --accent:#0d9488; --accent-weak:#e6f4f2; --card:#f7f9fb; --code-bg:#0f1b22; --code-fg:#dbe7ec;
+    --max:960px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0e1419; --fg:#dce4ea; --muted:#92a4b1; --line:#243038;
+      --accent:#2dd4bf; --accent-weak:#10302d; --card:#141d24; --code-bg:#0a1116; --code-fg:#cfe0e7;
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:var(--max); margin:0 auto; padding:0 20px}
+  code,pre,kbd{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+  code{background:var(--accent-weak); color:inherit; padding:.12em .4em; border-radius:5px; font-size:.9em}
+  pre{
+    background:var(--code-bg); color:var(--code-fg); padding:18px 18px; border-radius:10px;
+    overflow:auto; font-size:.875rem; line-height:1.55; position:relative; margin:0 0 1rem;
+  }
+  pre code{background:none; padding:0; color:inherit; font-size:inherit}
+  .copy{
+    position:absolute; top:8px; right:8px; background:#ffffff1a; color:var(--code-fg);
+    border:1px solid #ffffff2e; border-radius:6px; padding:3px 9px; font-size:.72rem; cursor:pointer;
+  }
+  .copy:hover{background:#ffffff33}
+
+  /* Hero */
+  header.hero{
+    border-bottom:1px solid var(--line);
+    background:radial-gradient(1200px 400px at 70% -10%, var(--accent-weak), transparent);
+  }
+  .hero-inner{padding:64px 0 48px}
+  .eyebrow{color:var(--accent); font-weight:700; letter-spacing:.08em; text-transform:uppercase; font-size:.78rem}
+  h1{font-size:clamp(2rem,5vw,3rem); line-height:1.1; margin:.3em 0 .25em; letter-spacing:-.02em}
+  .lede{font-size:1.18rem; color:var(--muted); max-width:62ch; margin:0 0 1.4em}
+  .badges{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:1.5em}
+  .badges img{height:22px}
+  .cta{display:flex; flex-wrap:wrap; gap:12px; align-items:center}
+  .btn{
+    display:inline-block; background:var(--accent); color:#fff; padding:11px 20px; border-radius:9px;
+    font-weight:600;
+  }
+  .btn:hover{text-decoration:none; filter:brightness(1.06)}
+  .btn.ghost{background:transparent; color:var(--accent); border:1px solid var(--accent)}
+  .install-pill{
+    display:inline-flex; align-items:center; gap:10px; background:var(--code-bg); color:var(--code-fg);
+    padding:10px 14px; border-radius:9px; font-family:ui-monospace,monospace; font-size:.95rem;
+  }
+
+  nav.toc{
+    position:sticky; top:0; z-index:5; background:color-mix(in srgb,var(--bg) 88%,transparent);
+    backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
+  }
+  nav.toc .wrap{display:flex; gap:18px; overflow:auto; padding:11px 20px; font-size:.9rem}
+  nav.toc a{color:var(--muted); white-space:nowrap}
+  nav.toc a:hover{color:var(--accent); text-decoration:none}
+
+  main section{padding:40px 0; border-bottom:1px solid var(--line)}
+  h2{font-size:1.6rem; letter-spacing:-.01em; margin:.2em 0 .6em}
+  h3{font-size:1.1rem; margin:1.4em 0 .4em}
+  p{margin:0 0 1rem}
+  .muted{color:var(--muted)}
+
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:16px; margin:1rem 0}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px}
+  .card h3{margin:.1em 0 .35em; font-size:1.05rem}
+  .card p{margin:0; color:var(--muted); font-size:.95rem}
+  .card .ico{font-size:1.4rem}
+
+  table{border-collapse:collapse; width:100%; font-size:.92rem; margin:.4rem 0 1rem}
+  th,td{border:1px solid var(--line); padding:8px 11px; text-align:left; vertical-align:top}
+  th{background:var(--card)}
+  blockquote{
+    margin:1rem 0; padding:12px 16px; border-left:4px solid var(--accent);
+    background:var(--accent-weak); border-radius:0 8px 8px 0; color:var(--fg);
+  }
+  blockquote p:last-child{margin:0}
+
+  details{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:6px 18px; margin:1rem 0}
+  details summary{cursor:pointer; font-weight:600; padding:10px 0}
+  footer{padding:36px 0 60px; color:var(--muted); font-size:.92rem}
+  .pillrow{display:flex; flex-wrap:wrap; gap:8px; margin:.5rem 0}
+  .pill{background:var(--card); border:1px solid var(--line); border-radius:999px; padding:4px 12px; font-size:.85rem}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap hero-inner">
+    <div class="eyebrow">MPEE · Rust routing engine</div>
+    <h1>Offline route calculations &amp; optimization</h1>
+    <p class="lede">
+      A self-contained engine you drive from Python or a command line. Download
+      <strong>one operating area</strong> once — a city, a county, a delivery
+      district — then compute routes, multi-vehicle delivery plans, and street
+      geocoding fully <strong>offline</strong>: no API keys, no per-request
+      billing, no data leaving your machine.
+    </p>
+    <div class="badges">
+      <a href="https://pypi.org/project/mpee/"><img src="https://img.shields.io/pypi/v/mpee.svg" alt="PyPI version of mpee"></a>
+      <a href="https://pypi.org/project/mpee/"><img src="https://img.shields.io/pypi/pyversions/mpee.svg" alt="Supported Python versions"></a>
+      <a href="https://github.com/punnerud/mpee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+      <a href="https://github.com/punnerud/mpee"><img src="https://img.shields.io/badge/source-github-181717.svg?logo=github" alt="Source on GitHub"></a>
+    </div>
+    <div class="cta">
+      <span class="install-pill">$ pip install mpee</span>
+      <a class="btn" href="#quickstart">Quick start</a>
+      <a class="btn ghost" href="https://github.com/punnerud/mpee">GitHub</a>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#what">What it is</a>
+    <a href="#install">Install</a>
+    <a href="#quickstart">CLI</a>
+    <a href="#python">Python</a>
+    <a href="#geocoding">Geocoding</a>
+    <a href="#vrp">Constraints</a>
+    <a href="#how">How it works</a>
+    <a href="#agents">For agents</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+  <section id="what">
+    <h2>What it is</h2>
+    <p>
+      MPEE is built from two Rust crates — <strong>dijeng</strong>
+      (contraction-hierarchy routing) and <strong>brooom</strong> (the VRP
+      solver). Together they solve a 50,000-customer vehicle-routing problem on
+      a laptop <strong>without ever materialising a full distance matrix</strong>,
+      and in head-to-head tests on a Mac they produced shorter routes than
+      <a href="https://github.com/VROOM-Project">VROOM</a> at equal runtime,
+      using less memory. The engine binary is under ~50&nbsp;MB; the map cache
+      scales with the area you download.
+    </p>
+    <div class="grid">
+      <div class="card"><div class="ico">🧭</div><h3>Point-to-point routes</h3><p>Driving distance + time between two coordinates, with optional geometry.</p></div>
+      <div class="card"><div class="ico">🚚</div><h3>Multi-vehicle VRP</h3><p>Best routes for <em>N</em> vehicles over your own stops — capacities, skills, time windows, mixed fleets.</p></div>
+      <div class="card"><div class="ico">🔎</div><h3>Offline geocoding</h3><p>Street&nbsp;⇄&nbsp;coordinate and street-crossing lookup, reusing the same cache. No separate index.</p></div>
+      <div class="card"><div class="ico">🗺️</div><h3>Bring your own area</h3><p>Any OpenStreetMap extract sized to where you operate. One downloaded area, one cache.</p></div>
+    </div>
+    <blockquote>
+      <p><strong>Scope:</strong> MPEE covers a single downloaded area — it is not
+      a route-anywhere-on-Earth offline map. There is no global tiling, by
+      design: within your area, one cache is simpler and faster.</p>
+    </blockquote>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <pre><code>pip install mpee</code></pre>
+    <p class="muted">
+      Prebuilt wheel for macOS (arm64); Linux/Windows install from the source
+      distribution (needs a Rust toolchain) until multi-platform wheels are
+      published. Python 3.8+. No Rust toolchain needed for the macOS wheel.
+    </p>
+  </section>
+
+  <section id="quickstart">
+    <h2>Quick start (CLI)</h2>
+    <h3>1. Get a map once</h3>
+    <pre><code># Download an OpenStreetMap extract (Geofabrik) …
+mpee download europe/great-britain/england/greater-london
+
+# … and preprocess it into a routable cache (.pp + .ch + .names).
+mpee build data/greater-london-latest.osm.pbf            # car (default)
+# mpee build data/greater-london-latest.osm.pbf bicycle  # or: car | bicycle | foot</code></pre>
+    <p class="muted">After this you are fully offline. The cache is reusable; a re-run reuses it instantly (<code>--force</code> rebuilds, <code>--quiet</code> hushes progress).</p>
+
+    <h3>2. Route from A to B</h3>
+    <pre><code>mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london-latest.osm.pbf
+#   distance: 2.38 km
+#   duration: 4.4 min</code></pre>
+
+    <h3>3. Optimize a delivery run over many stops</h3>
+    <pre><code># stops.txt: one "lat,lon" per line (or a JSON [[lat,lon], …])
+mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
+    --cache data/greater-london-latest.osm.pbf
+#   stops: 50  vehicles used: 3/5  unassigned: 0
+#   total: 60.0 km, 115 min  (solved in 4.6s)</code></pre>
+
+    <h3>4. Geocode within the area (offline)</h3>
+    <pre><code>mpee reverse  51.5080,-0.1281 --cache data/greater-london-latest.osm.pbf  # → Trafalgar Square
+mpee geocode  "Baker Street"  --cache data/greater-london-latest.osm.pbf  # → 51.522072,-0.157497
+mpee crossing "Oxford Street" "Regent Street" --cache ...                 # → Oxford Circus (LAT,LON)</code></pre>
+  </section>
+
+  <section id="python">
+    <h2>Use it from Python</h2>
+    <blockquote>
+      <p><strong>Coordinate order.</strong> The simple helpers take
+      <code>(lat, lon)</code>. The VROOM-style <code>solve(problem)</code>
+      accepts a coordinate as <code>{"lat": …, "lon": …}</code> (recommended),
+      <code>[lon, lat]</code>, or <code>{"coord": [lon, lat]}</code>.</p>
+    </blockquote>
+    <pre><code>import mpee
+
+# Open a prebuilt cache (built once via `mpee build`).
+r = mpee.Router("data/greater-london-latest.osm.pbf.pp",
+                "data/greater-london-latest.osm.pbf.ch")
+
+# Distance + time between two points.
+leg = r.route(51.5080, -0.1281, 51.5138, -0.0984)
+print(leg["distance_km"], "km,", leg["duration_min"], "min")
+
+# Optimize 50 deliveries across 5 vehicles.
+stops = [(51.51, -0.12), (51.49, -0.10)]          # your (lat, lon) list
+plan = r.optimize(stops, vehicles=5, capacity=20, time_limit_s=5.0)
+
+# Geocoding (needs the .names sidecar built by `mpee build`).
+r.reverse(51.5080, -0.1281)                        # → "Trafalgar Square"
+r.geocode("Baker Street")                          # → {"name", "lat", "lon"}
+r.intersection("Oxford Street", "Regent Street")   # → [{"lat", "lon"}, …]
+
+# Other helpers: r.snap(lat, lon), r.table(stops), r.bbox(),
+#                r.has_names(), r.has_routing()</code></pre>
+    <p class="muted">
+      Build a cache straight from Python with
+      <code>mpee.Router.build("area.osm.pbf", profile="car")</code> — it reuses
+      an existing cache and returns instantly unless you pass <code>force=True</code>.
+    </p>
+  </section>
+
+  <section id="geocoding">
+    <h2>Geocoding without a separate index</h2>
+    <p>
+      Street names live on the OpenStreetMap road, so MPEE attaches them to the
+      road nodes during the build and writes a small, deletable
+      <code>.names</code> sidecar. <strong>Reverse</strong> reuses the routing
+      snap grid; <strong>forward</strong> scans the area's distinct street names;
+      <strong>crossing</strong> is the set intersection of two streets' node
+      lists. Street-level (street + coordinate), not house numbers.
+    </p>
+
+    <h3>Lightweight: geocoding needs no <code>.ch</code></h3>
+    <p>Open with the <code>.pp</code> alone to skip loading the largest cache file:</p>
+    <pre><code>r = mpee.Router("area.osm.pbf.pp")     # geocoding-only (no ch_path)
+r.geocode("Baker Street")              # works
+r.has_routing()                        # → False  (route/optimize need a .ch)
+
+# CLI equivalent:
+mpee geocode "Baker Street" --pp area.osm.pbf.pp</code></pre>
+
+    <h3>Multi-city caches: disambiguate with <code>--near</code></h3>
+    <p>
+      Street names are unique only within a downloaded area. On a country cache
+      the same name exists in several towns, so add a reference point:
+    </p>
+    <pre><code># nearest "Munkegata" to a point (Trondheim, not an arbitrary first hit)
+mpee geocode "Munkegata" --near 63.43,10.40 --cache norway.osm.pbf
+
+# crossings near a point, within a radius
+mpee crossing "Prinsens gate" "Kongens gate" --near 63.43,10.40 --radius-km 5 --cache norway.osm.pbf
+
+# Python: r.geocode("Munkegata", near=(63.43, 10.40))
+#         r.intersection("Prinsens gate", "Kongens gate", near=(63.43, 10.40), radius_km=5)</code></pre>
+  </section>
+
+  <section id="vrp">
+    <h2>Real fleets: per-vehicle &amp; per-stop constraints</h2>
+    <p>
+      For mixed fleets and constrained jobs, use <code>Router.solve(problem)</code>
+      with a <a href="https://github.com/VROOM-Project">VROOM</a>-style JSON
+      problem. It exposes the engine's full model:
+    </p>
+    <table>
+      <thead><tr><th>Per vehicle</th><th>Per stop</th></tr></thead>
+      <tbody>
+        <tr><td><code>capacity</code> (multi-dimensional)</td><td><code>delivery</code> / <code>pickup</code> (package sizes / weights)</td></tr>
+        <tr><td><code>skills</code> — which jobs it may serve</td><td><code>skills</code> — required vehicle capability</td></tr>
+        <tr><td><code>speed_factor</code> — e.g. a motorcycle at 1.6</td><td><code>time_windows</code> — allowed arrival times</td></tr>
+        <tr><td><code>time_window</code> — the driver's shift</td><td><code>service</code> — time spent at the stop</td></tr>
+        <tr><td><code>max_travel_time</code> / <code>max_distance</code></td><td><code>priority</code> — which jobs to keep when demand &gt; capacity</td></tr>
+        <tr><td>distinct <code>start</code> / <code>end</code> locations</td><td></td></tr>
+      </tbody>
+    </table>
+    <p class="muted">
+      <code>solve()</code> serves every job it feasibly can and returns the rest
+      in <code>unassigned</code> (over capacity, outside all time windows, or no
+      road to them) — it never invents an impossible route. Model a multi-day
+      work week by giving each driver one vehicle per day bound to that day's
+      shift window.
+    </p>
+  </section>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <p>
+      <code>pip install mpee</code> ships a compiled Rust extension plus a thin
+      Python CLI. All routing and optimization run <strong>in-process</strong>;
+      the map cache is memory-mapped, so opening it is near-instant and peak RAM
+      stays low. Nothing is sent to a server.
+    </p>
+    <h3>Cache files (built next to your <code>.osm.pbf</code>)</h3>
+    <table>
+      <thead><tr><th>File</th><th>Purpose</th><th>Needed by</th></tr></thead>
+      <tbody>
+        <tr><td><code>.pp</code></td><td>Preprocessed graph + coordinates</td><td>everything (snap, geocode, route)</td></tr>
+        <tr><td><code>.ch</code></td><td>Contraction-hierarchy shortcuts</td><td><code>route</code> / <code>optimize</code> / <code>solve</code> / <code>table</code></td></tr>
+        <tr><td><code>.names</code></td><td>Street names + per-street nodes</td><td><code>reverse</code> / <code>geocode</code> / <code>crossing</code> (deletable)</td></tr>
+      </tbody>
+    </table>
+    <p class="muted">
+      Cache size scales with map area: a city ≈ tens of MB, a whole country ≈
+      gigabytes. Download the area you operate in — not the whole world.
+    </p>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- Dense, plain-text quick reference for LLM agents reading the page -->
+  <!-- ============================================================= -->
+  <section id="agents">
+    <h2>Quick reference (for agents &amp; LLMs)</h2>
+    <p class="muted">A compact, copy-friendly summary of the whole API surface.</p>
+
+    <h3>Install &amp; build</h3>
+    <pre><code>pip install mpee                              # Python 3.8+, macOS wheel / sdist elsewhere
+mpee download &lt;geofabrik/slug&gt;                # fetch an OSM .osm.pbf extract
+mpee build &lt;area.osm.pbf&gt; [car|bicycle|foot]  # → area.osm.pbf.pp + .ch + .names
+#   flags: --force (rebuild), --quiet (hush), --keep-csr (keep parse cache)</code></pre>
+
+    <h3>CLI verbs (the `mpee` command; --cache PREFIX = the .osm.pbf path)</h3>
+    <pre><code>mpee route   LAT,LON LAT,LON      --cache &lt;pbf&gt;   # distance + time
+mpee optimize --stops F --vehicles N --capacity C --cache &lt;pbf&gt;   # VRP
+mpee reverse LAT,LON              --cache &lt;pbf&gt;   # coord → nearest street
+mpee geocode "Street"            --cache &lt;pbf&gt;   # street → LAT,LON  (+ --near LAT,LON)
+mpee crossing "A" "B"            --cache &lt;pbf&gt;   # where two streets cross (+ --near, --radius-km)
+#   geocoding verbs accept --pp &lt;file&gt; alone (no .ch needed)
+#   add --json to route/optimize/reverse/geocode/crossing for scriptable output</code></pre>
+
+    <h3>Python API</h3>
+    <pre><code>import mpee
+r = mpee.Router(pp_path, ch_path=None)   # ch_path=None → geocoding-only (skips .ch)
+mpee.Router.build(pbf, profile="car", progress=True, force=False) -> dict
+
+# routing (need a .ch):
+r.route(from_lat, from_lon, to_lat, to_lon, geometry=False) -> dict
+r.optimize(stops, vehicles=1, capacity=1_000_000, depot=None, time_limit_s=5.0) -> dict
+r.solve(problem_json, time_limit_s=5.0) -> dict     # VROOM-style JSON
+r.table(points) -> dict                              # N×N durations + distances
+r.snap(lat, lon) -> (lat, lon)
+r.bbox() -> dict
+# geocoding (need a .names sidecar):
+r.reverse(lat, lon) -> str | None
+r.geocode(query, near=None) -> {"name","lat","lon"} | None
+r.intersection(a, b, near=None, radius_km=None) -> [{"lat","lon"}, …]
+r.has_names() -> bool        # geocoding available
+r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
+
+    <h3>Facts</h3>
+    <ul>
+      <li>Coordinates: simple helpers use <strong>(lat, lon)</strong>; <code>solve()</code> accepts <code>{"lat","lon"}</code> / <code>[lon,lat]</code> / <code>{"coord":[lon,lat]}</code>.</li>
+      <li>Profiles: <code>car</code> (default), <code>bicycle</code>, <code>foot</code>.</li>
+      <li>Area-based &amp; offline: download one OSM area; engine binary &lt; ~50 MB; cache scales with area. No global tiling by design.</li>
+      <li>Geocoding is street-level (street + coordinate), <strong>not</strong> house numbers; no separate index — it reuses the routing snap grid + a <code>.names</code> sidecar.</li>
+      <li>Multi-city caches: same street name repeats across towns — pass <code>near=(lat,lon)</code> / <code>--near LAT,LON</code> to disambiguate.</li>
+      <li>License: MIT. Source: <a href="https://github.com/punnerud/mpee">github.com/punnerud/mpee</a>. Package: <a href="https://pypi.org/project/mpee/">pypi.org/project/mpee</a>.</li>
+    </ul>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="pillrow">
+      <span class="pill">Rust + Python</span>
+      <span class="pill">MIT licensed</span>
+      <span class="pill">Offline</span>
+      <span class="pill">CPU + GPU</span>
+    </div>
+    <p>
+      <strong>MPEE</strong> stands for <strong>Morten Punnerud-Engelstad Engine</strong>.
+      <code>dijeng</code> is the routing sub-engine (short for <em>Dijkstra engine</em>);
+      <code>brooom</code> is the VRP solver.
+    </p>
+    <p>
+      <a href="https://github.com/punnerud/mpee">Source</a> ·
+      <a href="https://pypi.org/project/mpee/">PyPI</a> ·
+      <a href="https://github.com/punnerud/mpee/blob/main/README.md">README</a>
+    </p>
+  </div>
+</footer>
+
+<script>
+  // Progressive enhancement only — all content above is in static HTML.
+  // Adds a "Copy" button to every code block.
+  document.querySelectorAll('pre').forEach(function (pre) {
+    var btn = document.createElement('button');
+    btn.className = 'copy';
+    btn.type = 'button';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', function () {
+      var code = pre.querySelector('code');
+      navigator.clipboard.writeText((code ? code.innerText : pre.innerText).trim()).then(function () {
+        btn.textContent = 'Copied';
+        setTimeout(function () { btn.textContent = 'Copy'; }, 1400);
+      });
+    });
+    pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>
