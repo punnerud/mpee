@@ -3,14 +3,15 @@
 `pip install mpee`
 
 A self-contained routing + delivery-optimization engine you drive from
-Python or a command line. Download a map **once**, then compute everything
-**offline** — no API keys, no per-request billing, no data leaving your
-machine:
+Python or a command line. It's built for **one operating area**: download that
+area's map **once** (a city, a county, your delivery district), then compute
+everything **offline** within it — no API keys, no per-request billing, no
+data leaving your machine:
 
 - 🧭 **Point-to-point routes** — driving distance + time between two coordinates.
 - 🚚 **Multi-vehicle optimization (VRP)** — best routes for *N* vehicles over your own stops, with capacities.
-- 🗺️ **Bring your own map** — any OpenStreetMap extract (a city, a country).
-- ⚡ **Fast & small** — a Rust engine (CH routing + `brooom` VRP solver) using CPU **and** GPU, with a footprint under ~50 MB.
+- 🗺️ **Bring your own area** — any OpenStreetMap extract sized to where you operate (a city, a region). Not a route-anywhere-on-Earth offline map: one downloaded area, one cache.
+- ⚡ **Fast & small** — a Rust engine (CH routing + `brooom` VRP solver) using CPU **and** GPU; the engine itself is under ~50 MB (the map cache scales with the area).
 
 The engine is built from two Rust crates — `dijeng` (contraction-hierarchy
 routing) and `brooom` (the VRP solver). Together they solve a
@@ -48,11 +49,12 @@ After this you are fully offline. The cache is reusable forever — a re-run of
 `mpee build` reuses it instantly (pass `--force` to rebuild, `--quiet` to
 hush progress).
 
-> **Cache size scales with map area.** A city is tens of MB; a whole country
-> is gigabytes (e.g. Norway ≈ 3 GB of `.pp`+`.ch`). For a phone or other tight
-> target, build a **city or bbox extract** (e.g. a small region from
-> [BBBike](https://download.bbbike.org/osm/)), not a country. `build` deletes
-> the intermediate `.csr` by default (`--keep-csr` to keep it for fast rebuilds).
+> **Download the area you operate in — not the whole world.** The cache scales
+> with map area: a city ≈ tens of MB, a whole country ≈ gigabytes (Norway ≈ 3
+> GB). Pick the OSM extract that matches your operating area — a Geofabrik
+> region, a [BBBike](https://download.bbbike.org/osm/) city box, or
+> `osmium extract --bbox …`. `build` deletes the intermediate `.csr` by default
+> (`--keep-csr` keeps it for fast rebuilds).
 
 ## 2. Route from A to B
 
