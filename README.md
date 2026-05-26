@@ -202,17 +202,18 @@ cargo run --release -p mpee-cli -- solve examples/problem.json \
 #   → jobs 6 (assigned 6 / unassigned 0), 1 vehicle, ≈ 15.2 km
 ```
 
-Schema (VROOM-native — note coordinates are **`[lon, lat]`** arrays here, unlike
-the Python `solve()` which uses `{"coord": [lon, lat]}`):
+Coordinates accept any of three spellings, so you don't have to remember the
+order — use **`{"lat": …, "lon": …}`** if in doubt:
 
 ```jsonc
 {
   "vehicles": [
-    { "id": 1, "start": [-0.1278, 51.5074], "end": [-0.1278, 51.5074],
+    { "id": 1, "start": {"lat": 51.5074, "lon": -0.1278},   // explicit keys (recommended)
+      "end": [-0.1278, 51.5074],                            // or VROOM [lon, lat]
       "capacity": [100], "profile": "car" }
   ],
   "jobs": [
-    { "id": 101, "location": [-0.0984, 51.5138], "delivery": [10] }
+    { "id": 101, "location": {"coord": [-0.0984, 51.5138]}, "delivery": [10] }
   ]
 }
 ```

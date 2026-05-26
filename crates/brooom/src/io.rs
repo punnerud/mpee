@@ -18,6 +18,47 @@ use crate::solution::{evaluate_route, Route, Solution, Step, StepKind, TaskRef};
 // INPUT
 // =========================================================================
 
+/// A coordinate that deserializes from any of the common spellings, so
+/// hand-written JSON is forgiving:
+///   * `[lon, lat]`              — VROOM's native bare array
+///   * `{"lon": .., "lat": ..}`  — explicit keys (unambiguous; recommended)
+///   * `{"coord": [lon, lat]}`   — our internal struct form
+/// Always serializes back to the VROOM `[lon, lat]` array.
+#[derive(Debug, Clone, Copy)]
+pub struct Coord {
+    pub lon: f64,
+    pub lat: f64,
+}
+
+impl<'de> Deserialize<'de> for Coord {
+    fn deserialize<D>(d: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Arr([f64; 2]),
+            Keys { lon: f64, lat: f64 },
+            Wrapped { coord: [f64; 2] },
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Arr([lon, lat]) => Coord { lon, lat },
+            Raw::Keys { lon, lat } => Coord { lon, lat },
+            Raw::Wrapped { coord: [lon, lat] } => Coord { lon, lat },
+        })
+    }
+}
+
+impl Serialize for Coord {
+    fn serialize<S>(&self, s: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        [self.lon, self.lat].serialize(s)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VroomInput {
     #[serde(default)]
@@ -35,7 +76,7 @@ pub struct VroomInput {
 pub struct JobIn {
     pub id: u64,
     #[serde(default)]
-    pub location: Option<[f64; 2]>,
+    pub location: Option<Coord>,
     #[serde(default)]
     pub location_index: Option<usize>,
     #[serde(default)]
@@ -74,11 +115,11 @@ pub struct VehicleIn {
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
-    pub start: Option<[f64; 2]>,
+    pub start: Option<Coord>,
     #[serde(default)]
     pub start_index: Option<usize>,
     #[serde(default)]
-    pub end: Option<[f64; 2]>,
+    pub end: Option<Coord>,
     #[serde(default)]
     pub end_index: Option<usize>,
     #[serde(default)]
@@ -103,11 +144,11 @@ pub struct VehicleIn {
     pub description: Option<String>,
 }
 
-fn loc_from(coord: Option<[f64; 2]>, index: Option<usize>) -> Option<Location> {
+fn loc_from(coord: Option<Coord>, index: Option<usize>) -> Option<Location> {
     if coord.is_none() && index.is_none() {
         None
     } else {
-        Some(Location { coord, index })
+        Some(Location { coord: coord.map(|c| [c.lon, c.lat]), index })
     }
 }
 
