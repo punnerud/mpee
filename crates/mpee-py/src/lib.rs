@@ -533,6 +533,113 @@ impl Router {
         out.set_item("solve_s", solve_s)?;
         Ok(out)
     }
+
+    /// Solve a full VROOM-compatible problem given as a JSON string. Unlike
+    /// `optimize()`, this exposes the engine's whole constraint model:
+    /// per-vehicle capacities (multi-dimensional), skills, time windows,
+    /// `speed_factor` (mixed fleets), `max_travel_time` / `max_distance`,
+    /// and distinct start/end locations; per-job multi-dimensional
+    /// `delivery` / `pickup` (package sizes), `skills`, `time_windows`,
+    /// `service`, and `priority`. Locations carry `[lon, lat]` coords and
+    /// are snapped + turned into a routing matrix here. Returns a dict with
+    /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
+    /// plus any unassigned job ids.
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false))]
+    fn solve<'py>(
+        &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let mut problem: brooom::Problem = serde_json::from_str(problem_json)
+            .map_err(|e| PyRuntimeError::new_err(format!("problem JSON: {e}")))?;
+        problem.validate().map_err(|e| PyRuntimeError::new_err(format!("invalid problem: {e}")))?;
+
+        // Snap every vehicle start/end + job coord, build the matrix, and
+        // rewrite the problem's Locations to matrix indices (off the GIL).
+        let (sol, ji, vs, ve, snapped, n, dur_i, dist_i, solve_s) =
+            py.allow_threads(|| -> Result<_, String> {
+                let (coords, vs, ve, ji) = collect_coords(&problem).map_err(|e| e.to_string())?;
+                let n = coords.len();
+                let (durs_f, dists_f, snapped, _) = self.routing.matrix_with_distance(&coords, &coords);
+                let to_i = |v: &[f32]| -> Vec<i32> {
+                    v.iter().map(|&d| if d.is_finite() { d.round().max(0.0) as i32 } else { i32::MAX / 2 }).collect()
+                };
+                let dur_i = to_i(&durs_f);
+                let dist_i = to_i(&dists_f);
+                let matrix = brooom::Matrix { n, durations: dur_i.clone(), distances: Some(dist_i.clone()) };
+                rebind_to_indices(&mut problem, &vs, &ve, &ji);
+                let cfg = brooom::solver::SolverConfig {
+                    multi_start: 4,
+                    granular_k: Some(40),
+                    max_local_search_passes: 50,
+                    time_limit_ms: Some((time_limit_s * 1000.0) as u64),
+                    verbose: false,
+                    use_gpu,
+                    ..Default::default()
+                };
+                let t = std::time::Instant::now();
+                let sol = brooom::solver::solve_with_matrix(&problem, &matrix, &cfg);
+                Ok((sol, ji, vs, ve, snapped, n, dur_i, dist_i, t.elapsed().as_secs_f64()))
+            }).map_err(PyRuntimeError::new_err)?;
+
+        // Assemble the Python result, keyed by the caller's job ids.
+        let routes_list = PyList::empty_bound(py);
+        let (mut grand_d, mut grand_t, mut grand_stops) = (0i64, 0i64, 0usize);
+        for r in &sol.routes {
+            if r.steps.is_empty() { continue; }
+            let v = r.vehicle_idx;
+            let vid = problem.vehicles[v].id;
+            let start_mi = vs.get(v).copied().flatten();
+            let end_mi = ve.get(v).copied().flatten();
+            let rd = PyDict::new_bound(py);
+            let stops_list = PyList::empty_bound(py);
+            let (mut td, mut tt) = (0i64, 0i64);
+            let mut prev = start_mi;
+            for (order, step) in r.steps.iter().enumerate() {
+                let jidx = match step { brooom::solution::TaskRef::Job(j) => *j, _ => continue };
+                let mi = ji[jidx];
+                if let Some(p) = prev {
+                    td += dist_i[p * n + mi] as i64;
+                    tt += dur_i[p * n + mi] as i64;
+                }
+                prev = Some(mi);
+                let (la, lo) = snapped[mi];
+                let sd = PyDict::new_bound(py);
+                sd.set_item("order", order)?;
+                sd.set_item("job_id", problem.jobs[jidx].id)?;
+                sd.set_item("lat", la)?;
+                sd.set_item("lon", lo)?;
+                stops_list.append(sd)?;
+            }
+            if let (Some(p), Some(e)) = (prev, end_mi) {
+                td += dist_i[p * n + e] as i64;
+                tt += dur_i[p * n + e] as i64;
+            }
+            rd.set_item("vehicle_id", vid)?;
+            rd.set_item("n_stops", r.steps.len())?;
+            rd.set_item("distance_m", td)?;
+            rd.set_item("distance_km", td as f64 / 1000.0)?;
+            rd.set_item("duration_s", tt)?;
+            rd.set_item("duration_min", tt as f64 / 60.0)?;
+            rd.set_item("stops", stops_list)?;
+            routes_list.append(rd)?;
+            grand_d += td; grand_t += tt; grand_stops += r.steps.len();
+        }
+        let unassigned: Vec<u64> = sol.unassigned.iter().filter_map(|t| match t {
+            brooom::solution::TaskRef::Job(j) => Some(problem.jobs[*j].id), _ => None,
+        }).collect();
+
+        let out = PyDict::new_bound(py);
+        let vehicles_used = routes_list.len();
+        out.set_item("routes", routes_list)?;
+        out.set_item("vehicles_used", vehicles_used)?;
+        out.set_item("total_stops", grand_stops)?;
+        out.set_item("total_distance_m", grand_d)?;
+        out.set_item("total_distance_km", grand_d as f64 / 1000.0)?;
+        out.set_item("total_duration_s", grand_t)?;
+        out.set_item("total_duration_min", grand_t as f64 / 60.0)?;
+        out.set_item("unassigned", unassigned)?;
+        out.set_item("solve_s", solve_s)?;
+        Ok(out)
+    }
 }
 
 #[pymodule]

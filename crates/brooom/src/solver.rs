@@ -265,6 +265,21 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
         );
     }
 
+    // Final guaranteed-assignment pass. The ILS `kick` drops empty routes and
+    // only reinserts into surviving ones, so when vehicles outnumber demand a
+    // feasible job can get stranded in `unassigned` instead of opening a spare
+    // vehicle. Repair that here: place each remaining job in its cheapest
+    // feasible slot (existing route or an unused vehicle).
+    let pre_repair_unassigned = best.unassigned.len();
+    repair_unassigned(&mut best, problem, matrix);
+    if config.verbose && best.unassigned.len() < pre_repair_unassigned {
+        eprintln!(
+            "brooom: repair pass: assigned {} stranded job(s) → unassigned={}",
+            pre_repair_unassigned - best.unassigned.len(),
+            best.unassigned.len()
+        );
+    }
+
     if config.verbose {
         eprintln!(
             "brooom: multi_start={} best — routes={} unassigned={} cost={:.2}",
@@ -275,6 +290,115 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
         );
     }
     best
+}
+
+/// Final guaranteed-assignment pass: greedily place any still-unassigned
+/// single jobs into the cheapest *feasible* slot — across existing routes
+/// AND any unused vehicle — using `evaluate_route`, so capacity, skills,
+/// time windows and max-distance/-time are all still honoured. It only ever
+/// ADDS assignments, so it cannot make a feasible plan worse; it just stops
+/// the ILS from stranding jobs in spare vehicles. A placement that would
+/// need an unreachable (sentinel-distance) leg is rejected, so a job with no
+/// real path stays unassigned rather than getting an absurd 100 000-km route.
+fn repair_unassigned(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
+    use crate::solution::{eval_cache_invalidate, evaluate_route, Route, RouteMetrics};
+    // 100 000 km — far beyond any real road leg; flags the sentinel value
+    // mpee uses for "no path" without rejecting legitimately long routes.
+    const UNREACHABLE_M: i64 = 100_000_000;
+
+    if sol.unassigned.is_empty() {
+        return;
+    }
+    // The solve just filled the per-thread evaluate_route cache; bump the
+    // epoch so this pass recomputes feasibility from scratch (avoids any
+    // stale/collided cache entry stranding a placeable job).
+    eval_cache_invalidate();
+    enum Slot {
+        Existing(usize, usize),
+        NewVehicle(usize),
+    }
+
+    // Multi-pass: a job whose *solo* round-trip is infeasible (e.g. a one-way
+    // snap makes depot→job→depot unreachable) can still be inserted mid-route
+    // once another job has opened a vehicle — so retry the leftovers until a
+    // full pass places nothing new.
+    loop {
+    let pending = std::mem::take(&mut sol.unassigned);
+    let mut leftovers: Vec<TaskRef> = Vec::new();
+    let mut placed_any = false;
+
+    for task in pending {
+        // Shipment halves must be inserted as a pickup→delivery pair; leave
+        // those to the main solver. This repair only handles standalone jobs.
+        if matches!(task, TaskRef::Pickup(_) | TaskRef::Delivery(_)) {
+            leftovers.push(task);
+            continue;
+        }
+        let req = task.skills(problem);
+        let mut best: Option<(Slot, f64, RouteMetrics)> = None;
+
+        // (a) every position in every existing route.
+        for ri in 0..sol.routes.len() {
+            let veh = &problem.vehicles[sol.routes[ri].vehicle_idx];
+            if !veh.has_skills(req) {
+                continue;
+            }
+            let old = sol.routes[ri].metrics.cost;
+            for pos in 0..=sol.routes[ri].steps.len() {
+                let mut cand = sol.routes[ri].steps.clone();
+                cand.insert(pos, task);
+                if let Ok(m) = evaluate_route(problem, matrix, veh, &cand) {
+                    if m.distance >= UNREACHABLE_M {
+                        continue;
+                    }
+                    let delta = m.cost - old;
+                    if best.as_ref().map_or(true, |b| delta < b.1) {
+                        best = Some((Slot::Existing(ri, pos), delta, m));
+                    }
+                }
+            }
+        }
+        // (b) one fresh route per currently-unused vehicle.
+        let used: std::collections::HashSet<usize> =
+            sol.routes.iter().map(|r| r.vehicle_idx).collect();
+        for vi in 0..problem.vehicles.len() {
+            if used.contains(&vi) {
+                continue;
+            }
+            let veh = &problem.vehicles[vi];
+            if !veh.has_skills(req) {
+                continue;
+            }
+            if let Ok(m) = evaluate_route(problem, matrix, veh, &[task]) {
+                if m.distance >= UNREACHABLE_M {
+                    continue;
+                }
+                if best.as_ref().map_or(true, |b| m.cost < b.1) {
+                    best = Some((Slot::NewVehicle(vi), m.cost, m));
+                }
+            }
+        }
+
+        match best {
+            Some((Slot::Existing(ri, pos), _, m)) => {
+                sol.routes[ri].steps.insert(pos, task);
+                sol.routes[ri].metrics = m;
+                placed_any = true;
+            }
+            Some((Slot::NewVehicle(vi), _, m)) => {
+                sol.routes.push(Route { vehicle_idx: vi, steps: vec![task], metrics: m });
+                placed_any = true;
+            }
+            None => leftovers.push(task),
+        }
+    }
+
+    sol.unassigned = leftovers;
+    if !placed_any || sol.unassigned.is_empty() {
+        break;
+    }
+    }
+    sol.recompute_summary();
 }
 
 /// Build a matrix from whatever the problem provides.

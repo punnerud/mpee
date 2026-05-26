@@ -84,6 +84,9 @@ centroid of the stops).
 ```python
 import mpee
 
+# The .pp/.ch cache comes from a one-time `mpee download` + `mpee build`
+# (see "Get a map" above) — or build it straight from Python:
+#   mpee.Router.build("data/greater-london-latest.osm.pbf")   # → .pp + .ch
 r = mpee.Router("data/greater-london.osm.pbf.pp",
                 "data/greater-london.osm.pbf.ch")
 
@@ -107,6 +110,82 @@ r.bbox()                      # coverage of the loaded map
 
 `Router.build("map.osm.pbf", profile="car")` builds a cache from Python too
 (`profile` is `car` | `bicycle` | `foot`).
+
+## Real fleets: per-vehicle & per-stop constraints
+
+For mixed fleets and constrained jobs, use `Router.solve(problem)` with a
+[VROOM](https://github.com/VROOM-Project)-style problem (JSON). It exposes the
+engine's full model — vehicle types, capacities, skills, time windows and
+distinct start/end depots:
+
+```python
+import json, mpee
+r = mpee.Router("data/greater-london.osm.pbf.pp", "data/greater-london.osm.pbf.ch")
+
+problem = {
+  "vehicles": [
+    # A big van and a faster motorcycle from the same depot ([lon, lat]):
+    {"id": 1, "start": {"coord": [-0.1278, 51.5074]}, "end": {"coord": [-0.1278, 51.5074]},
+     "capacity": [200], "speed_factor": 1.0},
+    {"id": 2, "start": {"coord": [-0.1278, 51.5074]}, "end": {"coord": [-0.0984, 51.5138]},  # ends elsewhere
+     "capacity": [40], "speed_factor": 1.6, "skills": [7]},          # only this vehicle has skill 7
+  ],
+  "jobs": [
+    {"id": 101, "location": {"coord": [-0.0837, 51.4954]}, "delivery": [5], "skills": [7]},  # → must use the skilled vehicle
+    {"id": 102, "location": {"coord": [-0.1196, 51.5098]}, "delivery": [30],                 # a heavy package (weight 30)
+     "time_windows": [{"start": 0, "end": 3600}]},                                           # deliver within the first hour
+    {"id": 103, "location": {"coord": [-0.0890, 51.5161]}, "delivery": [12], "priority": 100},# keep this one if capacity is tight
+    # ... up to tens of thousands of stops ...
+  ],
+}
+
+plan = r.solve(json.dumps(problem), time_limit_s=5.0)
+for route in plan["routes"]:
+    print("vehicle", route["vehicle_id"], "→",
+          [s["job_id"] for s in route["stops"]], f"{route['distance_km']:.1f} km")
+print("unassigned:", plan["unassigned"])   # over-capacity / outside every window / unreachable
+```
+
+| Per **vehicle** | Per **stop** |
+|---|---|
+| `capacity` (multi-dimensional) | `delivery` / `pickup` (multi-dim package sizes / weights) |
+| `skills` — which jobs it may serve | `skills` — required vehicle capability |
+| `speed_factor` — e.g. a motorcycle at `1.6` | `time_windows` — allowed arrival times |
+| `time_window` — the driver's shift | `service` — time spent at the stop |
+| `max_travel_time` / `max_distance` | `priority` — which jobs to keep when demand > capacity |
+| distinct `start` / `end` locations | |
+
+`solve()` serves every job it feasibly can and returns the rest in
+`unassigned` (over capacity, outside all time windows, or no road to them) —
+it never invents an impossible route.
+
+## Plan a work week (multi-day, multiple depots)
+
+Model a week by giving each driver **one vehicle per day**, each bound to that
+day's shift window; pin a delivery to a weekday with a matching time window.
+
+```python
+DAY = lambda k: {"start": k*86400 + 8*3600, "end": k*86400 + 18*3600}   # 08:00–18:00 on day k (Mon=0 … Fri=4)
+depots = [[-0.1278, 51.5074], [-0.1300, 51.5230]]                       # two start/end points ([lon, lat])
+
+vehicles = []
+for depot in depots:
+    for _driver in range(5):       # 5 drivers per depot → 10 drivers
+        for k in range(5):         # Mon–Fri → one vehicle per driver per day
+            vehicles.append({"id": len(vehicles) + 1,
+                             "start": {"coord": depot}, "end": {"coord": depot},
+                             "capacity": [1000], "time_window": DAY(k)})
+
+# Each order is scheduled on a weekday by giving it that day's time window.
+jobs = [{"id": o["id"], "location": {"coord": o["coord"]}, "delivery": [o["weight"]],
+         "time_windows": [DAY(o["day"])]} for o in my_orders]
+
+plan = r.solve(json.dumps({"vehicles": vehicles, "jobs": jobs}), time_limit_s=5.0)
+```
+
+Every driver starts and ends at their own depot, deliveries land on their
+scheduled day, and each route stays inside the 8-hour shift. Drop a job's
+`time_windows` to let the optimizer place it on whatever day is cheapest.
 
 ---
 
