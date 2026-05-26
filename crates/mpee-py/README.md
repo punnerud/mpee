@@ -83,6 +83,12 @@ centroid of the stops).
 
 ## Use it from Python
 
+> ⚠️ **Coordinate order.** The simple helpers take **`(lat, lon)`**:
+> `route(lat, lon, …)`, `optimize([(lat, lon), …])`, `snap(lat, lon)`,
+> `table([(lat, lon), …])`. The VROOM-style `solve(problem)` uses the GeoJSON
+> convention **`[lon, lat]`** inside each `"coord"`. Mixing them up doesn't
+> error — it just snaps to the wrong place — so keep this straight.
+
 ```python
 import mpee
 
@@ -210,6 +216,26 @@ phone) so it can route without rebuilding:
 ```bash
 mpee serve --data-dir data
 ```
+
+This is the recommended server — it ships with the package. (The repo's
+`python/cache_server.py` is the older standalone equivalent; prefer
+`mpee serve`.)
+
+---
+
+## Build from source (development)
+
+`pip install mpee` needs no toolchain. To build the extension from a checkout,
+**activate a venv first** — `maturin develop` fails without an active one:
+
+```bash
+cd crates/mpee-py
+python3 -m venv venv && source venv/bin/activate    # ← activate BEFORE maturin
+pip install maturin
+maturin develop --release                            # builds + installs `mpee`
+```
+
+Cross-platform wheels are built in CI with maturin (see the repo).
 
 ---
 

@@ -164,7 +164,7 @@ pub fn build_with_dist(g: &CsrGraph, edge_dist: &[f32]) -> ContractionHierarchy 
     }
     let preprocess_secs = t_total.elapsed().as_secs_f64();
     println!(
-        "[ch] preprocessing ferdig: {:.1} s, {} shortcuts ({:.2}× original m)",
+        "[ch] preprocessing done: {:.1} s, {} shortcuts ({:.2}× original m)",
         preprocess_secs,
         total_shortcuts,
         (total_shortcuts as f64 + g.m() as f64) / g.m() as f64

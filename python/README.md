@@ -1,5 +1,11 @@
 # mpee cache server
 
+> **This is not the `mpee` Python library.** The pip package (`pip install
+> mpee`, source in [`crates/mpee-py/`](../crates/mpee-py/)) is the routing/VRP
+> library + CLI. This `python/` folder is a small stdlib-only HTTP server that
+> shares prebuilt caches over the LAN. The packaged `mpee serve` does the same
+> thing and is the recommended way — this standalone script predates it.
+
 Serves prebuilt CH (Contraction Hierarchy) caches over local Wi-Fi to the
 iPhone app, skipping the 5–30 minute on-device CH build.
 

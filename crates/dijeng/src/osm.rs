@@ -166,7 +166,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
         );
 
     println!(
-        "[osm] parallel parse: {:.2} s — {} noder, {} drivable ways",
+        "[osm] parallel parse: {:.2} s — {} nodes, {} drivable ways",
         t.elapsed().as_secs_f64(),
         nodes_data.len(),
         ways.len()
@@ -260,7 +260,7 @@ pub fn load_osm_routing<P: AsRef<Path>>(
         })
         .map_err(io_err)?;
     println!(
-        "[osm] én-pass parse: {:.2} s — {} noder lagret, {} ways totalt, {} drivable",
+        "[osm] single-pass parse: {:.2} s — {} nodes stored, {} ways total, {} drivable",
         t.elapsed().as_secs_f64(),
         total_nodes,
         total_ways,
@@ -331,7 +331,7 @@ fn finalize_csr(
         }
     }
     println!(
-        "[osm] kantkonstruksjon: {:.2} s — {} kanter ({} dropped) (vekt = duration_s, parallel edge_dist_m)",
+        "[osm] edge construction: {:.2} s — {} edges ({} dropped) (weight = duration_s, parallel edge_dist_m)",
         t.elapsed().as_secs_f64(),
         edges.len(),
         dropped
