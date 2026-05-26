@@ -40,7 +40,7 @@ enum Cmd {
 
         /// Generate around an ARBITRARY point instead of a named region, e.g.
         /// `--center 61.115,10.466` (Lillehammer). Overrides --region.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         center: Option<String>,
 
         /// Disk radius in km when --center is given (default 5).
@@ -92,18 +92,21 @@ enum Cmd {
     },
 
     /// Solve a Vroom-compatible problem in-process against a CH cache.
+    /// Problem JSON coords are [lon, lat] arrays (VROOM-style); see examples/problem.json.
     Solve {
-        /// Vroom-style problem JSON (jobs + vehicles + lat/lon coordinates).
+        /// Vroom-style problem JSON (jobs + vehicles + [lon,lat] coordinates).
         problem: PathBuf,
 
-        /// CH cache file (e.g. data/greater-london.osm.pbf.ch).
+        /// Cache prefix — uses <prefix>.ch + <prefix>.pp, e.g.
+        /// `--cache data/greater-london-latest.osm.pbf`. Or pass --ch/--pp.
         #[arg(long)]
-        ch: PathBuf,
-
-        /// PP cache file (e.g. data/greater-london.osm.pbf.pp).
-        /// Required for the coords used to snap lat/lon to graph vertices.
+        cache: Option<PathBuf>,
+        /// Explicit CH cache file (overrides --cache).
         #[arg(long)]
-        pp: PathBuf,
+        ch: Option<PathBuf>,
+        /// Explicit PP cache file (overrides --cache).
+        #[arg(long)]
+        pp: Option<PathBuf>,
 
         /// Wall-time budget in seconds for the solver. None = no limit.
         #[arg(long)]
@@ -118,6 +121,24 @@ enum Cmd {
         output: Option<PathBuf>,
     },
 
+    /// Point-to-point driving route between two LAT,LON points — a quick
+    /// sanity-check that the cache routes (no JSON needed).
+    Route {
+        /// Origin as "LAT,LON" (e.g. 61.115,10.466). Negative values OK.
+        #[arg(allow_hyphen_values = true)]
+        from: String,
+        /// Destination as "LAT,LON".
+        #[arg(allow_hyphen_values = true)]
+        to: String,
+        /// Cache prefix — uses <prefix>.ch + <prefix>.pp. Or pass --ch/--pp.
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        #[arg(long)]
+        ch: Option<PathBuf>,
+        #[arg(long)]
+        pp: Option<PathBuf>,
+    },
+
     /// End-to-end: gen + solve.
     Pipeline {
         #[arg(long, default_value = "london")]
@@ -130,10 +151,13 @@ enum Cmd {
         seed: u64,
         #[arg(long, default_value_t = 100)]
         capacity: i64,
+        /// Cache prefix — uses <prefix>.ch + <prefix>.pp. Or pass --ch/--pp.
         #[arg(long)]
-        ch: PathBuf,
+        cache: Option<PathBuf>,
         #[arg(long)]
-        pp: PathBuf,
+        ch: Option<PathBuf>,
+        #[arg(long)]
+        pp: Option<PathBuf>,
         #[arg(long)]
         time_limit_s: Option<f64>,
         #[arg(long, default_value_t = 8)]
@@ -155,13 +179,19 @@ fn main() -> Result<()> {
         }
         Cmd::Download { region, out_dir } => cmd_download(&region, &out_dir),
         Cmd::Build { pbf, profile, quiet, force } => cmd_build(&pbf, &profile, !quiet, force),
-        Cmd::Solve { problem, ch, pp, time_limit_s, multi_start, output } => {
+        Cmd::Solve { problem, cache, ch, pp, time_limit_s, multi_start, output } => {
+            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             cmd_solve(&problem, &ch, &pp, time_limit_s, multi_start, output.as_deref())
         }
+        Cmd::Route { from, to, cache, ch, pp } => {
+            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
+            cmd_route(parse_lat_lon(&from)?, parse_lat_lon(&to)?, &ch, &pp)
+        }
         Cmd::Pipeline {
-            region, n_jobs, n_vehicles, seed, capacity, ch, pp,
+            region, n_jobs, n_vehicles, seed, capacity, cache, ch, pp,
             time_limit_s, multi_start, output,
         } => {
+            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             let tmp = std::env::temp_dir().join(format!("mpee-pipeline-{}.json", seed));
             cmd_gen(&region, None, 0.0, n_jobs, n_vehicles, capacity, seed, &tmp)?;
             cmd_solve(&tmp, &ch, &pp, time_limit_s, multi_start, output.as_deref())
@@ -210,13 +240,42 @@ fn region_depot(region: &str) -> (f64, f64) {
 // gen: random problem inside a region's bbox.
 // -------------------------------------------------------------------------
 
-/// Parse a "lat,lon" string into (lat, lon).
+/// Parse a "lat,lon" string into (lat, lon), with a sanity check that catches
+/// obviously-swapped input.
 fn parse_lat_lon(s: &str) -> Result<(f64, f64)> {
     let parts: Vec<&str> = s.split(',').map(str::trim).collect();
     if parts.len() != 2 {
         bail!("expected LAT,LON, got {s:?}");
     }
-    Ok((parts[0].parse().context("bad lat")?, parts[1].parse().context("bad lon")?))
+    let lat: f64 = parts[0].parse().context("bad lat")?;
+    let lon: f64 = parts[1].parse().context("bad lon")?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        bail!("{s:?} is not a valid LAT,LON (lat∈[-90,90], lon∈[-180,180]) — did you swap them?");
+    }
+    Ok((lat, lon))
+}
+
+/// Great-circle distance in metres between two (lat, lon) points.
+fn haversine_m(a: (f64, f64), b: (f64, f64)) -> f64 {
+    const R: f64 = 6_371_000.0;
+    let (la1, la2) = (a.0.to_radians(), b.0.to_radians());
+    let dlat = (b.0 - a.0).to_radians();
+    let dlon = (b.1 - a.1).to_radians();
+    let h = (dlat / 2.0).sin().powi(2) + la1.cos() * la2.cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * R * h.sqrt().clamp(0.0, 1.0).asin()
+}
+
+/// Resolve a CH+PP cache pair from `--cache <prefix>` (→ prefix.ch + prefix.pp)
+/// or explicit `--ch`/`--pp`. Mirrors the pip CLI's single `--cache`.
+fn resolve_cache(cache: Option<&Path>, ch: Option<&Path>, pp: Option<&Path>) -> Result<(PathBuf, PathBuf)> {
+    if let (Some(c), Some(p)) = (ch, pp) {
+        return Ok((c.to_path_buf(), p.to_path_buf()));
+    }
+    if let Some(base) = cache {
+        let b = base.to_string_lossy();
+        return Ok((PathBuf::from(format!("{b}.ch")), PathBuf::from(format!("{b}.pp"))));
+    }
+    bail!("give --cache <prefix> (uses <prefix>.ch + <prefix>.pp), or both --ch and --pp");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -357,6 +416,40 @@ fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool) -> Result<(
 }
 
 // -------------------------------------------------------------------------
+// route: point-to-point sanity check against a cache (no JSON needed).
+// Input is LAT,LON (matching the pip `mpee route`).
+// -------------------------------------------------------------------------
+
+fn cmd_route(from: (f64, f64), to: (f64, f64), ch_path: &Path, pp_path: &Path) -> Result<()> {
+    let pp = dijeng::cache_pp::load_mmap(pp_path)
+        .with_context(|| format!("load PP cache {}", pp_path.display()))?;
+    let ch = dijeng::cache_ch::load_mmap(ch_path)
+        .with_context(|| format!("load CH cache {}", ch_path.display()))?;
+    let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
+
+    let resp = svc
+        .route(from.0 as f32, from.1 as f32, to.0 as f32, to.1 as f32)
+        .ok_or_else(|| anyhow::anyhow!("no route found — are the points reachable in this cache?"))?;
+
+    let snap_from = haversine_m(from, (resp.source_snapped.0 as f64, resp.source_snapped.1 as f64));
+    let snap_to = haversine_m(to, (resp.destination_snapped.0 as f64, resp.destination_snapped.1 as f64));
+
+    println!("distance: {:.2} km", resp.distance_m / 1000.0);
+    println!("duration: {:.1} min", resp.duration_s / 60.0);
+    println!(
+        "snap:     from {:.0} m, to {:.0} m  ({} geometry points)",
+        snap_from, snap_to, resp.geometry.len()
+    );
+    if snap_from > 500.0 || snap_to > 500.0 {
+        eprintln!(
+            "WARN: a point snapped >500 m to the road network — check you passed LAT,LON \
+             (not lon,lat) and that the cache covers this area"
+        );
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
 // solve: the actual shared-memory integration.
 // -------------------------------------------------------------------------
 
@@ -410,9 +503,27 @@ fn cmd_solve(
     eprintln!("[4/5] dijeng::matrix_with_distance ({n_points}×{n_points})");
     let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
     let t = std::time::Instant::now();
-    let (durs_f32, dists_f32, _snap_src, _snap_dst) =
+    let (durs_f32, dists_f32, snap_src, _snap_dst) =
         svc.matrix_with_distance(&coords_latlon, &coords_latlon);
     let mmm_secs = t.elapsed().as_secs_f64();
+
+    // Snap feedback: how far did each input point move to reach the road
+    // network? A large max usually means swapped lon/lat or a point off-map.
+    let (mut max_snap, mut far) = (0.0_f64, 0usize);
+    for (orig, snapped) in coords_latlon.iter().zip(snap_src.iter()) {
+        let d = haversine_m((orig.0 as f64, orig.1 as f64), (snapped.0 as f64, snapped.1 as f64));
+        max_snap = max_snap.max(d);
+        if d > 500.0 { far += 1; }
+    }
+    eprintln!(
+        "      max snap distance {:.0} m{}",
+        max_snap,
+        if far > 0 {
+            format!("  (WARN: {far} point(s) > 500 m — check [lon,lat] order / map coverage)")
+        } else {
+            String::new()
+        }
+    );
     let cells = (n_points as u64).pow(2);
     eprintln!(
         "      matrix built in {:.2} s ({:.1} M cells/s)",

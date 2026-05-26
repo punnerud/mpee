@@ -48,9 +48,10 @@ See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
 > the **pip package** (`pip install mpee` → verbs `route` / `optimize` /
 > `download` / `build`). The Rust workspace binary
 > (`cargo run -p mpee-cli`, i.e. `./target/release/mpee-cli`) is a *different* tool
-> with VRP-focused verbs (`gen` / `download` / `build` / `solve` / `pipeline`)
-> — it has **no** point-to-point `route`. Use the pip package for the examples
-> on this page.
+> with VRP-focused verbs (`gen` / `route` / `download` / `build` / `solve` /
+> `pipeline`). They take different inputs (e.g. `mpee-cli solve` reads VROOM
+> JSON; the pip CLI takes `--stops`). Use the pip package for the examples on
+> this page.
 
 ## The Rust workbench
 
@@ -112,7 +113,7 @@ mpee/
     │   └── src/
     ├── mpee-cli/                    # Rust CLI binary `mpee` (VRP driver)
     │   ├── Cargo.toml              # Path-deps on both engines
-    │   └── src/main.rs             # Verbs: gen / download / build / solve / pipeline
+    │   └── src/main.rs             # Verbs: gen / route / download / build / solve / pipeline
     ├── mpee-py/                     # PyO3 bindings + the `pip install mpee` CLI
     │   └── ...                      # Verbs: route / optimize / download / build
     └── mpee-viz/                    # Live VRP-on-a-map demo server (Leaflet UI)
@@ -174,17 +175,30 @@ cargo run --release -p mpee-cli -- build data/greater-london-latest.osm.pbf
 > then run a long SSSP/Dijkstra benchmark suite (100 s+) that has nothing to do
 > with building it. `mpee build` runs the build-only pipeline in-process.
 
+### Quick check: does the cache route? (`route`)
+
+A one-shot point-to-point sanity check (no JSON needed) — input is `LAT,LON`:
+
+```bash
+cargo run --release -p mpee-cli -- route 51.5080,-0.1281 51.5138,-0.0984 \
+    --cache data/greater-london-latest.osm.pbf
+#   → distance: 2.38 km   duration: 4.4 min   snap: from 52 m, to 58 m
+```
+
+A big "snap" distance (it warns past 500 m) means the point is off the map or
+you swapped `lat,lon` — a fast way to catch input mistakes.
+
 ### Solve your own VRP from JSON
 
 `mpee-cli solve` runs a VROOM-style problem against a CH cache. A minimal one
 ships at [`examples/problem.json`](examples/problem.json):
 
 ```bash
-# Build a cache first (above), then solve:
+# Build a cache first (above), then solve. `--cache <prefix>` derives the
+# .ch + .pp paths (or pass --ch/--pp explicitly):
 cargo run --release -p mpee-cli -- solve examples/problem.json \
-    --ch data/greater-london-latest.osm.pbf.ch \
-    --pp data/greater-london-latest.osm.pbf.pp \
-    --time-limit-s 5 -o solution.json
+    --cache data/greater-london-latest.osm.pbf --time-limit-s 5 -o solution.json
+#   → 10 coords to snap, max snap distance 58 m
 #   → jobs 6 (assigned 6 / unassigned 0), 1 vehicle, ≈ 15.2 km
 ```
 
