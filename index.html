@@ -218,8 +218,12 @@
 
   <section id="quickstart">
     <h2>Quick start (CLI)</h2>
-    <h3>1. Get a map once</h3>
-    <pre><code># Download an OpenStreetMap extract (Geofabrik) …
+    <h3>1. Install &amp; get a map once</h3>
+    <pre><code># MPEE — offline routing, VRP &amp; street geocoding for one downloaded area.
+# Docs: https://punnerud.github.io/mpee/   Source: https://github.com/punnerud/mpee
+pip install mpee
+
+# Download an OpenStreetMap extract (Geofabrik) …
 mpee download europe/great-britain/england/greater-london
 
 # … and preprocess it into a routable cache (.pp + .ch + .names).
