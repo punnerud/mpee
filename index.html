@@ -64,12 +64,17 @@
   code,pre,kbd{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
   code{background:var(--accent-weak); color:inherit; padding:.12em .4em; border-radius:5px; font-size:.9em}
   pre{
-    background:var(--code-bg); color:var(--code-fg); padding:18px 18px; border-radius:10px;
-    overflow:auto; font-size:.875rem; line-height:1.55; position:relative; margin:0 0 1rem;
+    background:var(--code-bg); color:var(--code-fg); border-radius:10px;
+    overflow:auto; font-size:.875rem; line-height:1.55; margin:0;
+    /* top gutter leaves room for the copy button so it never covers code */
+    padding:38px 18px 16px;
   }
   pre code{background:none; padding:0; color:inherit; font-size:inherit}
+  /* non-scrolling wrapper (added by JS) so the button stays pinned even when
+     the code scrolls horizontally */
+  .codeblock{position:relative; margin:0 0 1rem}
   .copy{
-    position:absolute; top:8px; right:8px; background:#ffffff1a; color:var(--code-fg);
+    position:absolute; top:7px; right:8px; z-index:2; background:#ffffff1a; color:var(--code-fg);
     border:1px solid #ffffff2e; border-radius:6px; padding:3px 9px; font-size:.72rem; cursor:pointer;
   }
   .copy:hover{background:#ffffff33}
@@ -438,8 +443,16 @@ r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
 
 <script>
   // Progressive enhancement only — all content above is in static HTML.
-  // Adds a "Copy" button to every code block.
+  // Wrap each code block and add a "Copy" button. The button lives in the
+  // (non-scrolling) wrapper, not inside <pre>, so it stays pinned top-right
+  // even when the code scrolls horizontally, and the <pre> top gutter keeps
+  // it clear of the first line.
   document.querySelectorAll('pre').forEach(function (pre) {
+    var wrap = document.createElement('div');
+    wrap.className = 'codeblock';
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+
     var btn = document.createElement('button');
     btn.className = 'copy';
     btn.type = 'button';
@@ -451,7 +464,7 @@ r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
         setTimeout(function () { btn.textContent = 'Copy'; }, 1400);
       });
     });
-    pre.appendChild(btn);
+    wrap.appendChild(btn);
   });
 </script>
 </body>
