@@ -66,11 +66,17 @@ enum Cmd {
         out_dir: PathBuf,
     },
 
-    /// Preprocess a PBF into CSR + PP + CH caches. Delegates to bench_pp/bench_ch.
+    /// Preprocess a PBF into CSR + PP + CH caches (in-process).
     Build {
         pbf: PathBuf,
         #[arg(long, default_value = "car")]
         profile: String,
+        /// Suppress the engine's parse/CH progress output.
+        #[arg(long, short = 'q')]
+        quiet: bool,
+        /// Rebuild even if a cache already exists (default: reuse it).
+        #[arg(long)]
+        force: bool,
     },
 
     /// Solve a Vroom-compatible problem in-process against a CH cache.
@@ -132,7 +138,7 @@ fn main() -> Result<()> {
             cmd_gen(&region, n_jobs, n_vehicles, capacity, seed, &output)
         }
         Cmd::Download { region, out_dir } => cmd_download(&region, &out_dir),
-        Cmd::Build { pbf, profile } => cmd_build(&pbf, &profile),
+        Cmd::Build { pbf, profile, quiet, force } => cmd_build(&pbf, &profile, !quiet, force),
         Cmd::Solve { problem, ch, pp, time_limit_s, multi_start, output } => {
             cmd_solve(&problem, &ch, &pp, time_limit_s, multi_start, output.as_deref())
         }
@@ -270,7 +276,7 @@ fn cmd_download(region: &str, out_dir: &Path) -> Result<()> {
 // and parallelised. The unified CLI keeps them visible as one command.
 // -------------------------------------------------------------------------
 
-fn cmd_build(pbf: &Path, profile: &str) -> Result<()> {
+fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool) -> Result<()> {
     // Build the cache IN-PROCESS via the shared sssp_bench helper — no
     // `cargo run` subprocess, no recompilation, and works as a distributed
     // binary (cargo/source not required). Same pipeline as Python's
@@ -281,11 +287,17 @@ fn cmd_build(pbf: &Path, profile: &str) -> Result<()> {
         "building cache from {} (profile={profile}) — seconds for a city, minutes for a country…",
         pbf.display()
     );
-    let res = sssp_bench::build::build_cache(pbf, prof).map_err(|e| anyhow::anyhow!(e))?;
-    eprintln!(
-        "done: CH built in {:.1}s ({} nodes, {} edges)",
-        res.build_secs, res.nodes, res.edges
-    );
+    // cmd_build's own status lines go to stderr, so they survive `--quiet`
+    // (which only silences the engine's stdout progress chatter).
+    let res = sssp_bench::build::build_cache(pbf, prof, progress, force).map_err(|e| anyhow::anyhow!(e))?;
+    if res.cached {
+        eprintln!("reused existing cache (pass --force to rebuild)");
+    } else {
+        eprintln!(
+            "done: CH built in {:.1}s ({} nodes, {} edges)",
+            res.build_secs, res.nodes, res.edges
+        );
+    }
     eprintln!("  pp: {}", res.pp_path.display());
     eprintln!("  ch: {}", res.ch_path.display());
     Ok(())

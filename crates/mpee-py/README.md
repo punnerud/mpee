@@ -109,7 +109,18 @@ r.bbox()                      # coverage of the loaded map
 ```
 
 `Router.build("map.osm.pbf", profile="car")` builds a cache from Python too
-(`profile` is `car` | `bicycle` | `foot`).
+(`profile` is `car` | `bicycle` | `foot`). It **reuses an existing cache** and
+returns instantly (`{"cached": True}`) unless you pass `force=True`, and it
+prints build progress by default — pass `progress=False` to silence it when
+driving the library from code:
+
+```python
+info = mpee.Router.build("data/region-latest.osm.pbf", progress=False)
+# {'pp_path': ..., 'ch_path': ..., 'nodes': ..., 'build_secs': ..., 'cached': False}
+```
+
+(The `mpee build` CLI mirrors this: `--quiet` silences progress, `--force`
+rebuilds an existing cache.)
 
 ## Real fleets: per-vehicle & per-stop constraints
 

@@ -5,25 +5,85 @@
 //! neither shells out nor duplicates the pipeline. Cache names APPEND to the
 //! full PBF path (matching bench_pp/bench_ch and the `--cache <pbf>`
 //! convention): `data/x.osm.pbf` → `data/x.osm.pbf.{csr,pp,ch}`.
+//!
+//! Two knobs make it friendly to call from a library / an agent:
+//!   * `progress` — when false, the engine's stdout progress chatter is
+//!     suppressed (default on for an interactive terminal).
+//!   * `force`    — when false, an existing `.pp` + `.ch` pair is reused
+//!     instead of rebuilt, so repeated calls return instantly.
 
 use std::path::{Path, PathBuf};
 
 use crate::osm_profile::Profile;
 
-/// Paths written and graph size, returned by [`build_cache`].
+/// Paths written (or reused) and graph size, returned by [`build_cache`].
 pub struct BuildResult {
     pub csr_path: PathBuf,
     pub pp_path: PathBuf,
     pub ch_path: PathBuf,
     pub nodes: usize,
     pub edges: usize,
-    /// Wall time of the CH-contraction step (the heavy phase), in seconds.
+    /// Wall time of the CH-contraction step, in seconds (0.0 when reused).
     pub build_secs: f64,
+    /// True if an existing cache was reused instead of rebuilt.
+    pub cached: bool,
 }
 
-/// Build `.csr` + `.pp` + `.ch` next to `pbf` for the given routing profile.
-/// Returns the written paths and graph size, or a human-readable error.
-pub fn build_cache(pbf: &Path, profile: Profile) -> Result<BuildResult, String> {
+/// RAII guard that redirects this process's stdout to /dev/null while alive,
+/// used to silence the engine's progress `println!`s when `progress=false`.
+/// A no-op when `active` is false.
+struct StdoutSilencer {
+    saved_fd: Option<i32>,
+}
+
+impl StdoutSilencer {
+    fn new(active: bool) -> Self {
+        if !active {
+            return Self { saved_fd: None };
+        }
+        // Flush Rust's stdout buffer first so nothing already queued leaks.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        unsafe {
+            let saved = libc::dup(1);
+            let devnull = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_WRONLY);
+            if saved >= 0 && devnull >= 0 {
+                libc::dup2(devnull, 1);
+                libc::close(devnull);
+                return Self { saved_fd: Some(saved) };
+            }
+            if saved >= 0 {
+                libc::close(saved);
+            }
+        }
+        Self { saved_fd: None }
+    }
+}
+
+impl Drop for StdoutSilencer {
+    fn drop(&mut self) {
+        if let Some(saved) = self.saved_fd {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            unsafe {
+                libc::dup2(saved, 1);
+                libc::close(saved);
+            }
+        }
+    }
+}
+
+/// Build (or reuse) `.csr` + `.pp` + `.ch` next to `pbf` for the given routing
+/// profile. Runs entirely in-process.
+///
+/// * `progress` — print the engine's parse/CH progress to stdout.
+/// * `force`    — rebuild even if a cache already exists.
+pub fn build_cache(
+    pbf: &Path,
+    profile: Profile,
+    progress: bool,
+    force: bool,
+) -> Result<BuildResult, String> {
     use crate::{cache_ch, cache_pp, ch, osm, preprocess::preprocess};
 
     let suffix = if profile == Profile::Car {
@@ -36,11 +96,30 @@ pub fn build_cache(pbf: &Path, profile: Profile) -> Result<BuildResult, String> 
     let pp_path = PathBuf::from(format!("{base}.pp"));
     let ch_path = PathBuf::from(format!("{base}.ch"));
 
+    // Reuse an existing cache unless asked to rebuild — repeated library calls
+    // (e.g. from an agent) then return instantly instead of re-contracting.
+    if !force && pp_path.is_file() && ch_path.is_file() {
+        let nodes = cache_pp::load_mmap(&pp_path)
+            .map(|p| p.coords.as_slice().len())
+            .unwrap_or(0);
+        return Ok(BuildResult {
+            csr_path,
+            pp_path,
+            ch_path,
+            nodes,
+            edges: 0,
+            build_secs: 0.0,
+            cached: true,
+        });
+    }
+
+    // Suppress the engine's progress chatter when not wanted.
+    let _silencer = StdoutSilencer::new(!progress);
+
     let (graph, coords, edge_dist) = osm::load_with_cache(pbf, csr_path.as_path(), profile)
         .map_err(|e| format!("osm load: {e}"))?;
 
-    // delta = average edge weight / average degree (matches the standalone
-    // bench_pp / iOS build paths).
+    // delta = average edge weight / average degree (matches bench_pp / iOS).
     let avg_w = if graph.edge_w.is_empty() {
         1.0
     } else {
@@ -88,5 +167,6 @@ pub fn build_cache(pbf: &Path, profile: Profile) -> Result<BuildResult, String> 
         nodes: pre.graph.n,
         edges: pre.graph.m(),
         build_secs,
+        cached: false,
     })
 }

@@ -278,9 +278,19 @@ impl Router {
     /// slow, one-time offline preprocessing step (seconds for a city,
     /// minutes for a country). `profile` is "car" | "bicycle" | "foot".
     /// Returns a dict with the output paths and graph size.
+    /// `progress` (default True) prints the engine's parse/CH progress to
+    /// stdout — pass False to silence it (e.g. when driving the library from
+    /// another program). `force=False` reuses an existing `.pp`+`.ch` cache
+    /// instead of rebuilding, so repeated calls return instantly.
     #[staticmethod]
-    #[pyo3(signature = (pbf, profile = "car"))]
-    fn build<'py>(py: Python<'py>, pbf: &str, profile: &str) -> PyResult<Bound<'py, PyDict>> {
+    #[pyo3(signature = (pbf, profile = "car", progress = true, force = false))]
+    fn build<'py>(
+        py: Python<'py>,
+        pbf: &str,
+        profile: &str,
+        progress: bool,
+        force: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
         use sssp_bench::osm_profile::Profile;
         let prof = Profile::from_name(profile).ok_or_else(|| {
             PyRuntimeError::new_err(format!("unknown profile {profile:?} (use car|bicycle|foot)"))
@@ -289,7 +299,9 @@ impl Router {
         // The whole pipeline (parse → preprocess → CH) runs in-process in the
         // shared `sssp_bench::build` helper; release the GIL for it.
         let res = py
-            .allow_threads(move || sssp_bench::build::build_cache(std::path::Path::new(&pbf_owned), prof))
+            .allow_threads(move || {
+                sssp_bench::build::build_cache(std::path::Path::new(&pbf_owned), prof, progress, force)
+            })
             .map_err(PyRuntimeError::new_err)?;
 
         let d = PyDict::new_bound(py);
@@ -298,6 +310,7 @@ impl Router {
         d.set_item("nodes", res.nodes)?;
         d.set_item("edges", res.edges)?;
         d.set_item("build_secs", res.build_secs)?;
+        d.set_item("cached", res.cached)?;
         Ok(d)
     }
 
