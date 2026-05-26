@@ -112,6 +112,12 @@
     display:inline-flex; align-items:center; gap:10px; background:var(--code-bg); color:var(--code-fg);
     padding:10px 14px; border-radius:9px; font-family:ui-monospace,monospace; font-size:.95rem;
   }
+  .punch{font-size:1.06rem; line-height:1.6; max-width:64ch; margin:0 0 1.4em; color:var(--muted)}
+  .punch b{color:var(--fg)}
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); gap:14px; margin-top:30px}
+  .stat{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 16px}
+  .stat .n{font-size:1.5rem; font-weight:800; color:var(--accent); line-height:1.05; letter-spacing:-.02em}
+  .stat .l{font-size:.84rem; color:var(--muted); margin-top:5px}
 
   nav.toc{
     position:sticky; top:0; z-index:5; background:color-mix(in srgb,var(--bg) 88%,transparent);
@@ -162,6 +168,13 @@
       geocoding fully <strong>offline</strong>: no API keys, no per-request
       billing, no data leaving your machine.
     </p>
+    <p class="punch">
+      Solve a <b>50,000-customer</b> vehicle-routing problem on a laptop
+      <b>without ever building the full distance matrix</b> — that
+      50,000&nbsp;×&nbsp;50,000 matrix alone is ~10&nbsp;GB. The Rust core
+      streams it on <b>CPU and GPU (Metal on&nbsp;Mac)</b>, so memory stays flat
+      and routes come out shorter than VROOM at equal runtime.
+    </p>
     <div class="badges">
       <a href="https://pypi.org/project/mpee/"><img src="https://img.shields.io/pypi/v/mpee.svg" alt="PyPI version of mpee"></a>
       <a href="https://pypi.org/project/mpee/"><img src="https://img.shields.io/pypi/pyversions/mpee.svg" alt="Supported Python versions"></a>
@@ -172,6 +185,12 @@
       <span class="install-pill">$ pip install mpee</span>
       <a class="btn" href="#quickstart">Quick start</a>
       <a class="btn ghost" href="https://github.com/punnerud/mpee">GitHub</a>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="n">50,000</div><div class="l">-customer VRP, on a laptop</div></div>
+      <div class="stat"><div class="n">No N×N matrix</div><div class="l">streamed, not stored — a 50k² matrix ≈ 10 GB, skipped</div></div>
+      <div class="stat"><div class="n">CPU + GPU</div><div class="l">GPU-accelerated (Metal on Mac)</div></div>
+      <div class="stat"><div class="n">&lt; 50 MB</div><div class="l">engine binary, fully offline</div></div>
     </div>
   </div>
 </header>
