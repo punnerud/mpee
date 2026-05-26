@@ -107,22 +107,27 @@ and dijeng were optimised to do together.
 
 ---
 
-## What is missing (this commit)
+## Status: shipped and running
 
-1. **The `mpee-cli` subcommands don't make calls yet** — scaffolding only.
-   Once brooom and sssp_bench are added as path dependencies in
-   `crates/mpee-cli/Cargo.toml` (commented out today), the rest is roughly
-   50 lines of plumbing.
-2. **brooom does not have an `MmmMatrixSource` impl** that consumes a
-   dijeng `&ContractionHierarchy`. See
-   `crates/brooom/integration.txt` §2 Step 2 for the ~40-line impl.
-3. **The snap layer** (lat/lon → pp node ID) lives in
-   `dijeng::routing::RoutingService`, but brooom expects customers to
-   already carry node IDs. A small adapter belongs in `mpee-cli`.
+This integration is **done** — it runs end-to-end today, it is not scaffolding:
 
-Once those three are in place, `mpe pipeline <region> <problem.json>`
-runs end-to-end in a single Rust process without touching disk after
-the cache load.
+- `mpee-cli` has live path-deps on `brooom` + `sssp_bench`. Its `solve` /
+  `pipeline` verbs load a CH cache, snap coords, build the N×N
+  duration+distance matrix via sssp_bench's bucket-MMM, and hand it to
+  `brooom::solver::solve_with_matrix` — one process, no IPC, no disk on the
+  hot path.
+- The same pipeline is exposed to Python via `mpee.Router` (in
+  `crates/mpee-py`) and shipped on PyPI as **`mpee`** (`mpee route` /
+  `optimize` / `solve`, plus `download` / `build`).
+- The snap layer (`dijeng::routing::RoutingService` /
+  `matrix_with_distance`) and the in-process cache build
+  (`sssp_bench::build::build_cache`) are wired in.
+
+**Note on the contract above:** the shipped path builds a *precomputed CH
+matrix* and calls `solve_with_matrix(&problem, &matrix, &cfg)` (ideal up to a
+few thousand stops). brooom builds its granular K-NN neighbourhood from that
+matrix inside the solver; the zero-copy granular hand-off sketched above is the
+design target for extreme N (50k+).
 
 ---
 
@@ -150,6 +155,6 @@ mpee-cli should configure the pool once and let both operate inside
 
 ## Reference implementation
 
-When this integration is finished, the glue code lives in
-`crates/mpee-cli/src/main.rs` (the `solve` and `pipeline` subcommands).
-The pattern is already sketched as comments there.
+The glue code lives in `crates/mpee-cli/src/main.rs` (the `solve` / `pipeline`
+verbs) and in `crates/mpee-py/src/lib.rs` (the `Router` class). Both drive the
+same `sssp_bench` + `brooom` library calls in one process.

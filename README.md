@@ -23,12 +23,12 @@ mpee download europe/great-britain/england/greater-london
 mpee build data/greater-london-latest.osm.pbf
 
 # 2. Route from A to B (offline):
-mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london.osm.pbf
+mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london-latest.osm.pbf
 #   → distance: 2.38 km   duration: 4.4 min
 
 # 3. Optimize a multi-vehicle delivery run over your own stops:
 mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
-    --cache data/greater-london.osm.pbf
+    --cache data/greater-london-latest.osm.pbf
 #   → 50 stops, 3 vehicles used, 60.0 km total (solved in 4.6s)
 ```
 
@@ -36,13 +36,21 @@ From Python:
 
 ```python
 import mpee
-r = mpee.Router("data/greater-london.osm.pbf.pp", "data/greater-london.osm.pbf.ch")
+r = mpee.Router("data/greater-london-latest.osm.pbf.pp", "data/greater-london-latest.osm.pbf.ch")
 leg = r.route(51.5080, -0.1281, 51.5138, -0.0984)     # {distance_km, duration_min, ...}
 plan = r.optimize(stops, vehicles=5, capacity=20)      # multi-vehicle VRP
 ```
 
 See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
 [pypi.org/project/mpee](https://pypi.org/project/mpee/).
+
+> **Heads-up: there are two CLIs, both named `mpee`.** The commands above are
+> the **pip package** (`pip install mpee` → verbs `route` / `optimize` /
+> `download` / `build` / `serve`). The Rust workspace binary
+> (`cargo run -p mpee-cli`, i.e. `./target/release/mpee`) is a *different* tool
+> with VRP-focused verbs (`gen` / `download` / `build` / `solve` / `pipeline`)
+> — it has **no** point-to-point `route`. Use the pip package for the examples
+> on this page.
 
 ## The Rust workbench
 
@@ -102,9 +110,12 @@ mpee/
     │   ├── README.md               # Routing details + benchmarks
     │   ├── integration.txt         # API contract with the solver
     │   └── src/
-    └── mpee-cli/                    # Thin shared driver
-        ├── Cargo.toml              # Path-deps on both engines
-        └── src/main.rs             # Subcommands: download / build / solve / pipeline
+    ├── mpee-cli/                    # Rust CLI binary `mpee` (VRP driver)
+    │   ├── Cargo.toml              # Path-deps on both engines
+    │   └── src/main.rs             # Verbs: gen / download / build / solve / pipeline
+    ├── mpee-py/                     # PyO3 bindings + the `pip install mpee` CLI
+    │   └── ...                      # Verbs: route / optimize / download / build / serve
+    └── mpee-serve/                  # Live HTTP server + embedded Leaflet map UI
 ```
 
 Each engine has its own `integration.txt` describing exactly which types
@@ -118,7 +129,11 @@ at the workspace root is the bird's-eye view — how the two fit together.
 ### Requirements
 - Stable Rust (tested with 1.76+).
 - For the brooom GPU path: a wgpu-supported GPU (Metal on Mac, Vulkan on Linux, DX12 on Windows).
-- For brooom's neural module: `ort` downloads ~200 MB of ONNX Runtime on first build.
+
+**ONNX is not pulled by default.** brooom's experimental `neural` module (and
+its ~200 MB `ort` runtime) is opt-in — only `--features neural` / `--features
+full` builds it. A plain `cargo build --workspace`, `-p mpee-cli`, or
+`pip install mpee` downloads no ONNX. Routing/VRP need none of it.
 
 ### Build the whole workspace
 
@@ -150,10 +165,14 @@ cargo run --release -p mpee-cli -- --help
 # Direct VRP solve with brooom (Vroom-compatible JSON)
 cargo run --release -p brooom -- -i problem.json -o solution.json
 
-# Build a CH cache for London (one-off, ~3-4 min)
-cargo run --release -p sssp_bench --bin bench_pp -- london car
-cargo run --release -p sssp_bench --bin bench_ch -- london car
+# Build a routable CH cache for ANY region (in-process, ~seconds–minutes):
+cargo run --release -p mpee-cli -- build data/greater-london-latest.osm.pbf
 ```
+
+> Build caches with `mpee build` (or the pip `mpee build`) — **not** with
+> `bench_pp` / `bench_ch`. Those are *benchmark* tools: they write the cache and
+> then run a long SSSP/Dijkstra benchmark suite (100 s+) that has nothing to do
+> with building it. `mpee build` runs the build-only pipeline in-process.
 
 ---
 
@@ -199,7 +218,8 @@ this issue.
 
 ## License
 
-MIT for brooom and mpee-cli. See each crate for details.
+MIT — every crate: `brooom`, `dijeng` (Cargo name `sssp_bench`), `mpee-cli`,
+`mpee-py`, and `mpee-serve`. See each crate's `Cargo.toml` for details.
 
 ---
 
