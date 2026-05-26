@@ -118,6 +118,17 @@ want. Street-level only: the name lives on the OSM road, so you get the street
 and its coordinate, not a house number. The sidecar is independently deletable
 if you only need routing.
 
+> **Multi-city caches:** street names are unique only within a downloaded area.
+> On a whole-country cache the same name (e.g. *Munkegata*, *Kongens gate*)
+> exists in several towns, so a bare `geocode`/`crossing` returns an arbitrary
+> one. Add `--near LAT,LON` to pick the match nearest a reference point, and
+> `--radius-km` to a crossing to keep only nearby hits:
+> ```bash
+> mpee geocode "Munkegata" --near 63.43,10.40 --cache norway.osm.pbf      # Trondheim
+> mpee crossing "Prinsens gate" "Kongens gate" --near 63.43,10.40 --radius-km 5 --cache norway.osm.pbf
+> ```
+> (For a city-sized cache — the example above — names are already unambiguous.)
+
 ---
 
 ## Use it from Python
@@ -162,7 +173,9 @@ r.bbox()                      # coverage of the loaded map
 # Geocoding (offline, if a .names sidecar was built — see CLI section 4):
 r.reverse(51.5080, -0.1281)                  # → "Trafalgar Square" (or None)
 r.geocode("Baker Street")                    # → {"name": ..., "lat": ..., "lon": ...} (or None)
+r.geocode("Munkegata", near=(63.43, 10.40))  # multi-city: nearest match to the point
 r.intersection("Oxford Street", "Regent Street")  # → [{"lat": ..., "lon": ...}, ...] crossings
+r.intersection("Prinsens gate", "Kongens gate", near=(63.43, 10.40), radius_km=5)
 r.has_names()                                # → True if geocoding is available
 ```
 

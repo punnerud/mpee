@@ -162,6 +162,10 @@ enum Cmd {
     Geocode {
         /// Street name to look up.
         query: String,
+        /// Disambiguate on a multi-city cache: return the match nearest this
+        /// "LAT,LON" reference point (e.g. the city centre).
+        #[arg(long, allow_hyphen_values = true)]
+        near: Option<String>,
         /// Cache prefix — uses <prefix>.pp + <prefix>.names. Or pass --ch/--pp.
         #[arg(long)]
         cache: Option<PathBuf>,
@@ -178,6 +182,13 @@ enum Cmd {
         a: String,
         /// Second street name.
         b: String,
+        /// Disambiguate on a multi-city cache: sort crossings nearest-first to
+        /// this "LAT,LON" reference point.
+        #[arg(long, allow_hyphen_values = true)]
+        near: Option<String>,
+        /// With --near, keep only crossings within this many km of the point.
+        #[arg(long)]
+        radius_km: Option<f64>,
         /// Cache prefix — uses <prefix>.pp + <prefix>.names. Or pass --ch/--pp.
         #[arg(long)]
         cache: Option<PathBuf>,
@@ -239,13 +250,15 @@ fn main() -> Result<()> {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             cmd_reverse(parse_lat_lon(&point)?, &ch, &pp)
         }
-        Cmd::Geocode { query, cache, ch, pp } => {
+        Cmd::Geocode { query, near, cache, ch, pp } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
-            cmd_geocode(&query, &ch, &pp)
+            let near = match near.as_deref() { Some(s) => Some(parse_lat_lon(s)?), None => None };
+            cmd_geocode(&query, near, &ch, &pp)
         }
-        Cmd::Crossing { a, b, cache, ch, pp } => {
+        Cmd::Crossing { a, b, near, radius_km, cache, ch, pp } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
-            cmd_crossing(&a, &b, &ch, &pp)
+            let near = match near.as_deref() { Some(s) => Some(parse_lat_lon(s)?), None => None };
+            cmd_crossing(&a, &b, near, radius_km, &ch, &pp)
         }
         Cmd::Pipeline {
             region, n_jobs, n_vehicles, seed, capacity, cache, ch, pp,
@@ -565,7 +578,7 @@ fn cmd_reverse(point: (f64, f64), ch_path: &Path, pp_path: &Path) -> Result<()> 
     Ok(())
 }
 
-fn cmd_geocode(query: &str, ch_path: &Path, pp_path: &Path) -> Result<()> {
+fn cmd_geocode(query: &str, near: Option<(f64, f64)>, ch_path: &Path, pp_path: &Path) -> Result<()> {
     let svc = load_service_with_names(ch_path, pp_path)?;
     if !svc.has_names() {
         bail!(
@@ -574,7 +587,11 @@ fn cmd_geocode(query: &str, ch_path: &Path, pp_path: &Path) -> Result<()> {
             pp_path.display()
         );
     }
-    match svc.geocode(query) {
+    let hit = match near {
+        Some((la, lo)) => svc.geocode_near(query, la as f32, lo as f32),
+        None => svc.geocode(query),
+    };
+    match hit {
         Some((lat, lon, name)) => {
             println!("{name}");
             println!("{lat:.6},{lon:.6}");
@@ -584,7 +601,14 @@ fn cmd_geocode(query: &str, ch_path: &Path, pp_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_crossing(a: &str, b: &str, ch_path: &Path, pp_path: &Path) -> Result<()> {
+fn cmd_crossing(
+    a: &str,
+    b: &str,
+    near: Option<(f64, f64)>,
+    radius_km: Option<f64>,
+    ch_path: &Path,
+    pp_path: &Path,
+) -> Result<()> {
     let svc = load_service_with_names(ch_path, pp_path)?;
     if !svc.has_names() {
         bail!(
@@ -593,7 +617,10 @@ fn cmd_crossing(a: &str, b: &str, ch_path: &Path, pp_path: &Path) -> Result<()> 
             pp_path.display()
         );
     }
-    let hits = svc.intersection(a, b);
+    let hits = match near {
+        Some((la, lo)) => svc.intersection_near(a, b, la as f32, lo as f32, radius_km),
+        None => svc.intersection(a, b),
+    };
     if hits.is_empty() {
         bail!("no intersection of {a:?} and {b:?} found (unknown street, or they share no node)");
     }

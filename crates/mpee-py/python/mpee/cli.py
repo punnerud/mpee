@@ -34,6 +34,17 @@ def _latlon(s: str) -> tuple[float, float]:
     return (lat, lon)
 
 
+def _haversine_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Great-circle distance in metres between two (lat, lon) points."""
+    import math
+    r = 6_371_000.0
+    la1, la2 = math.radians(a[0]), math.radians(b[0])
+    dlat = math.radians(b[0] - a[0])
+    dlon = math.radians(b[1] - a[1])
+    h = math.sin(dlat / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin(dlon / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(h)))
+
+
 def _resolve_cache(args) -> tuple[str, str]:
     """Return (pp_path, ch_path) from --cache PREFIX or explicit --pp/--ch."""
     if args.pp and args.ch:
@@ -81,10 +92,15 @@ def cmd_route(args) -> int:
     if args.json:
         print(json.dumps(leg))
         return 0
+    src, dst = leg["source_snapped"], leg["destination_snapped"]
+    snap_from = _haversine_m(args.frm, src)
+    snap_to = _haversine_m(args.to, dst)
     print(f"distance: {leg['distance_km']:.2f} km")
     print(f"duration: {leg['duration_min']:.1f} min")
-    print(f"from (snapped): {leg['source_snapped']}")
-    print(f"to   (snapped): {leg['destination_snapped']}")
+    print(f"from (snapped): ({src[0]:.5f}, {src[1]:.5f})  [{snap_from:.0f} m from input]")
+    print(f"to   (snapped): ({dst[0]:.5f}, {dst[1]:.5f})  [{snap_to:.0f} m from input]")
+    if snap_from > 500 or snap_to > 500:
+        print("WARN: a point snapped >500 m — check LAT,LON order and cache coverage")
     if args.geometry:
         print(f"geometry: {len(leg['geometry'])} points")
     return 0
@@ -141,7 +157,8 @@ def cmd_geocode(args) -> int:
         raise SystemExit(
             f"error: no .names sidecar next to {pp} — rebuild the cache "
             "(`mpee build`) with this version to enable geocoding")
-    hit = r.geocode(args.query)
+    near = _latlon(args.near) if args.near else None
+    hit = r.geocode(args.query, near=near)
     if hit is None:
         raise SystemExit(f"no street matching {args.query!r} found in this area")
     if args.json:
@@ -160,7 +177,8 @@ def cmd_crossing(args) -> int:
         raise SystemExit(
             f"error: no .names sidecar next to {pp} — rebuild the cache "
             "(`mpee build`) with this version to enable geocoding")
-    hits = r.intersection(args.a, args.b)
+    near = _latlon(args.near) if args.near else None
+    hits = r.intersection(args.a, args.b, near=near, radius_km=args.radius_km)
     if not hits:
         raise SystemExit(
             f"no intersection of {args.a!r} and {args.b!r} found "
@@ -247,6 +265,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pg = sub.add_parser("geocode", help="forward-geocode: street name -> LAT,LON")
     pg.add_argument("query", help="street name (case-insensitive; substring matches)")
+    pg.add_argument("--near", metavar="LAT,LON",
+                    help="on a multi-city cache, return the match nearest this point")
     pg.add_argument("--json", action="store_true", help="emit JSON")
     _add_cache_args(pg)
     pg.set_defaults(func=cmd_geocode)
@@ -254,6 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("crossing", help="intersection search: where two streets cross")
     pc.add_argument("a", help="first street name")
     pc.add_argument("b", help="second street name")
+    pc.add_argument("--near", metavar="LAT,LON",
+                    help="sort crossings nearest-first to this point (disambiguates cities)")
+    pc.add_argument("--radius-km", type=float, default=None,
+                    help="with --near, keep only crossings within this many km")
     pc.add_argument("--json", action="store_true", help="emit JSON")
     _add_cache_args(pc)
     pc.set_defaults(func=cmd_crossing)

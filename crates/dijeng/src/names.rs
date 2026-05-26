@@ -87,7 +87,8 @@ impl NameTable {
         self.name_by_id(id)
     }
 
-    fn name_by_id(&self, id: u32) -> Option<&str> {
+    /// The canonical street name for a name id.
+    pub fn name_by_id(&self, id: u32) -> Option<&str> {
         if id == NO_NAME {
             return None;
         }
@@ -127,7 +128,7 @@ impl NameTable {
     }
 
     /// The road nodes a street touches (sorted), by name id.
-    fn street_nodes(&self, id: u32) -> &[u32] {
+    pub fn street_nodes(&self, id: u32) -> &[u32] {
         let off = self.sn_offsets.as_slice();
         match (off.get(id as usize), off.get(id as usize + 1)) {
             (Some(&a), Some(&b)) => &self.sn_nodes.as_slice()[a as usize..b as usize],

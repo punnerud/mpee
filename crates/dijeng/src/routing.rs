@@ -114,6 +114,52 @@ impl RoutingService {
         }
     }
 
+    /// Forward-geocode disambiguated by a reference point: among all road nodes
+    /// of the matched street (which, on a multi-city cache, may span several
+    /// towns sharing the name), return the one nearest `(ref_lat, ref_lon)`.
+    /// Use this to pick "Munkegata in Trondheim" rather than an arbitrary first
+    /// hit. `None` if no sidecar / the name doesn't resolve.
+    pub fn geocode_near(&self, query: &str, ref_lat: f32, ref_lon: f32) -> Option<(f32, f32, &str)> {
+        let names = self.names.as_ref()?;
+        let id = names.find_id(query)?;
+        let nodes = names.street_nodes(id);
+        let best = *nodes.iter().min_by(|&&a, &&b| {
+            let (la, lo) = self.coords[a as usize];
+            let (lb, lob) = self.coords[b as usize];
+            haversine_m(ref_lat, ref_lon, la, lo)
+                .partial_cmp(&haversine_m(ref_lat, ref_lon, lb, lob))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        let (lat, lon) = self.coords[best as usize];
+        Some((lat, lon, names.name_by_id(id)?))
+    }
+
+    /// Intersection search disambiguated by a reference point: crossings of `a`
+    /// and `b` sorted nearest-first to `(ref_lat, ref_lon)`, and (when
+    /// `radius_km` is given) filtered to that radius. Lets a country cache
+    /// answer "Prinsens gate × Kongens gate near Trondheim" instead of
+    /// returning every same-named crossing nationwide.
+    pub fn intersection_near(
+        &self,
+        a: &str,
+        b: &str,
+        ref_lat: f32,
+        ref_lon: f32,
+        radius_km: Option<f64>,
+    ) -> Vec<(f32, f32)> {
+        let mut hits = self.intersection(a, b);
+        hits.sort_by(|p, q| {
+            haversine_m(ref_lat, ref_lon, p.0, p.1)
+                .partial_cmp(&haversine_m(ref_lat, ref_lon, q.0, q.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some(r_km) = radius_km {
+            let r_m = (r_km * 1000.0) as f32;
+            hits.retain(|p| haversine_m(ref_lat, ref_lon, p.0, p.1) <= r_m);
+        }
+        hits
+    }
+
     /// Nearest road node by squared planar distance (longitude scaled by
     /// `cos(lat)` for correct ordering). Backed by a uniform grid index;
     /// typically ~50 µs on city/country-scale graphs.

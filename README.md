@@ -17,9 +17,6 @@ than the alternatives; the engine binary is under ~50 MB.
 In head-to-head tests on a Mac, MPEE produced **shorter routes than
 [VROOM](https://github.com/VROOM-Project) at equal runtime**.
 
-In head-to-head tests on a Mac, MPEE produced **shorter routes than
-[VROOM](https://github.com/VROOM-Project) at equal runtime**.
-
 ## Install (Python / CLI)
 
 The fastest way to use the engine is the `mpee` Python package — a thin CLI
@@ -157,8 +154,12 @@ full` builds it. A plain `cargo build --workspace`, `-p mpee-cli`, or
 ### Build the whole workspace
 
 ```bash
-cargo build --release --workspace
+# Exclude mpee-py: it's a PyO3 extension and must be built with maturin
+# (a plain `cargo build` of the cdylib fails to link Python symbols).
+cargo build --release --workspace --exclude mpee-py
 ```
+
+Build the Python extension separately with maturin (see `crates/mpee-py/`).
 
 ### Build a single crate
 

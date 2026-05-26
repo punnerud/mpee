@@ -374,8 +374,19 @@ impl Router {
     /// substring matches, e.g. `"karl johan"` finds `"Karl Johans gate"`).
     /// Returns a dict `{"name", "lat", "lon"}` for the matched street, or
     /// `None` if nothing matches / no sidecar is loaded.
-    fn geocode<'py>(&self, py: Python<'py>, query: &str) -> PyResult<Option<Bound<'py, PyDict>>> {
-        match self.routing.geocode(query) {
+    ///
+    /// On a multi-city cache the same name exists in several towns; pass
+    /// `near=(lat, lon)` to return the match nearest that point (e.g. to pick
+    /// "Munkegata in Trondheim" rather than an arbitrary first hit).
+    #[pyo3(signature = (query, near = None))]
+    fn geocode<'py>(
+        &self, py: Python<'py>, query: &str, near: Option<(f32, f32)>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let hit = match near {
+            Some((la, lo)) => self.routing.geocode_near(query, la, lo),
+            None => self.routing.geocode(query),
+        };
+        match hit {
             Some((lat, lon, name)) => {
                 let d = PyDict::new_bound(py);
                 d.set_item("name", name)?;
@@ -392,8 +403,19 @@ impl Router {
     /// cross more than once or share a stretch). Empty if no sidecar is loaded,
     /// a name doesn't resolve, or the streets share no node. Names are matched
     /// case-insensitively (substring), e.g. `("Karl Johans gate", "Kongens gate")`.
-    fn intersection<'py>(&self, py: Python<'py>, a: &str, b: &str) -> PyResult<Bound<'py, PyList>> {
-        let hits = self.routing.intersection(a, b);
+    ///
+    /// On a multi-city cache, pass `near=(lat, lon)` to sort crossings
+    /// nearest-first to that point, and `radius_km` to keep only those within
+    /// it (e.g. "… near Trondheim" instead of every same-named crossing).
+    #[pyo3(signature = (a, b, near = None, radius_km = None))]
+    fn intersection<'py>(
+        &self, py: Python<'py>, a: &str, b: &str,
+        near: Option<(f32, f32)>, radius_km: Option<f64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let hits = match near {
+            Some((la, lo)) => self.routing.intersection_near(a, b, la, lo, radius_km),
+            None => self.routing.intersection(a, b),
+        };
         let out = PyList::empty_bound(py);
         for (lat, lon) in hits {
             let d = PyDict::new_bound(py);
