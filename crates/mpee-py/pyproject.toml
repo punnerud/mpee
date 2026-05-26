@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mpee"
-version = "0.3.3"
+version = "0.3.4"
 description = "MPEE — offline route calculations and optimization. A self-contained Rust routing + VRP engine you drive from Python or the `mpee` CLI: point-to-point routes, N×N tables, and multi-vehicle delivery optimization, all offline from a downloaded map."
 readme = "README.md"
 requires-python = ">=3.8"

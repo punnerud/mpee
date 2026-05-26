@@ -69,7 +69,9 @@ enum Cmd {
     /// Preprocess a PBF into CSR + PP + CH caches (in-process).
     Build {
         pbf: PathBuf,
-        #[arg(long, default_value = "car")]
+        /// Routing profile (optional positional, like bench_pp/bench_ch):
+        /// `mpee build x.osm.pbf` or `mpee build x.osm.pbf bicycle`.
+        #[arg(default_value = "car")]
         profile: String,
         /// Suppress the engine's parse/CH progress output.
         #[arg(long, short = 'q')]

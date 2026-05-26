@@ -138,15 +138,16 @@ def cmd_download(args) -> int:
 
 def cmd_build(args) -> int:
     from . import Router
-    print(f"building cache from {args.pbf} (profile={args.profile}) — "
-          "this can take seconds (city) to minutes (country)...")
-    info = Router.build(args.pbf, profile=args.profile)
-    print(f"done in {info['build_secs']:.1f}s  "
-          f"({info['nodes']:,} nodes, {info['edges']:,} edges)")
+    info = Router.build(args.pbf, profile=args.profile,
+                        progress=not args.quiet, force=args.force)
+    if info["cached"]:
+        print("reused existing cache (pass --force to rebuild)")
+    else:
+        print(f"done in {info['build_secs']:.1f}s  "
+              f"({info['nodes']:,} nodes, {info['edges']:,} edges)")
     print(f"  pp: {info['pp_path']}")
     print(f"  ch: {info['ch_path']}")
-    print(f"route with:  mpee route LAT,LON LAT,LON --cache "
-          f"{info['ch_path'][:-3]}")
+    print(f"route with:  mpee route LAT,LON LAT,LON --cache {info['ch_path'][:-3]}")
     return 0
 
 
@@ -191,7 +192,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     pb = sub.add_parser("build", help="preprocess a .osm.pbf into a routable cache")
     pb.add_argument("pbf", help="path to the .osm.pbf")
-    pb.add_argument("--profile", default="car", choices=["car", "bicycle", "foot"])
+    # Profile is an optional positional (matches bench_pp/bench_ch), so both
+    # `mpee build x.osm.pbf` and `mpee build x.osm.pbf bicycle` work.
+    pb.add_argument("profile", nargs="?", default="car",
+                    choices=["car", "bicycle", "foot"], help="routing profile (default: car)")
+    pb.add_argument("--quiet", "-q", action="store_true", help="suppress build progress output")
+    pb.add_argument("--force", action="store_true", help="rebuild even if a cache already exists")
     pb.set_defaults(func=cmd_build)
 
     ps = sub.add_parser("serve", help="serve prebuilt caches over the local network")

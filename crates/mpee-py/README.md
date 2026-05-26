@@ -40,11 +40,13 @@ mpee download europe/great-britain/england/greater-london
 
 # … and preprocess it into a routable cache (.pp + .ch).
 # Seconds for a city, a few minutes for a whole country.
-mpee build data/greater-london-latest.osm.pbf
+mpee build data/greater-london-latest.osm.pbf          # car (default)
+# mpee build data/greater-london-latest.osm.pbf bicycle  # or a profile (car|bicycle|foot)
 ```
 
-After this you are fully offline. The cache is reusable forever (until you
-want fresher map data).
+After this you are fully offline. The cache is reusable forever — a re-run of
+`mpee build` reuses it instantly (pass `--force` to rebuild, `--quiet` to
+hush progress).
 
 ## 2. Route from A to B
 
