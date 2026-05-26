@@ -272,7 +272,10 @@ fn cmd_download(region: &str, out_dir: &Path) -> Result<()> {
 
 fn cmd_build(pbf: &Path, profile: &str) -> Result<()> {
     use std::process::Command;
-    let pbf_arg = pbf.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+    // Pass the FULL pbf path (e.g. data/norway.osm.pbf), not file_stem —
+    // bench_pp/bench_ch treat a non-shortcut value as a literal PBF base path
+    // and append .csr/.pp/.ch to it. Stripping to a stem broke the lookup.
+    let pbf_arg = pbf.to_str().unwrap_or("unknown");
     eprintln!("(1/2) bench_pp {pbf_arg} {profile}");
     let s1 = Command::new("cargo")
         .args(["run", "--release", "-p", "sssp_bench", "--bin", "bench_pp", "--", pbf_arg, profile])

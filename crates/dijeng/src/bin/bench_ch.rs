@@ -65,7 +65,7 @@ fn main() -> std::io::Result<()> {
 
     let g = &pp.graph;
     let n = g.n;
-    println!("=== CH on London ===");
+    println!("=== CH on {pbf_name} ===");
     println!("Graph: n={}, m={}, avg_deg={:.2}", n, g.m(), g.m() as f32 / n.max(1) as f32);
 
     // Try mmap-load CH cache first (instant) — else build and save.

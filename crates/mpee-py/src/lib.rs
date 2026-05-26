@@ -287,11 +287,15 @@ impl Router {
         let prof = Profile::from_name(profile)
             .ok_or_else(|| PyRuntimeError::new_err(format!("unknown profile {profile:?} (use car|bicycle|foot)")))?;
         let suffix = if prof == Profile::Car { String::new() } else { format!(".{}", prof.name()) };
-        let trim = |s: &str| s.trim_start_matches('.').to_string();
         let pbf_path = Path::new(pbf);
-        let csr_cache = pbf_path.with_extension(format!("{}.csr", trim(&suffix)));
-        let pp_cache = pbf_path.with_extension(format!("{}.pp", trim(&suffix)));
-        let ch_cache = pbf_path.with_extension(format!("{}.ch", trim(&suffix)));
+        // Cache names APPEND to the full PBF path (keeping `.pbf`), matching
+        // bench_pp/bench_ch and the `--cache <pbf>` CLI convention — e.g.
+        // data/oslo.osm.pbf → data/oslo.osm.pbf.pp / .ch. (Using
+        // `with_extension` here would drop `.pbf` and break that convention.)
+        let base = format!("{pbf}{suffix}");
+        let csr_cache = std::path::PathBuf::from(format!("{base}.csr"));
+        let pp_cache = std::path::PathBuf::from(format!("{base}.pp"));
+        let ch_cache = std::path::PathBuf::from(format!("{base}.ch"));
 
         // Release the GIL for the heavy CPU work so other Python threads run.
         let result = py.allow_threads(|| -> Result<(usize, usize, f64), String> {

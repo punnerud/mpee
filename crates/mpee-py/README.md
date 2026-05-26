@@ -49,7 +49,7 @@ want fresher map data).
 ## 2. Route from A to B
 
 ```bash
-mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london.osm.pbf
+mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london-latest.osm.pbf
 ```
 ```
 distance: 2.38 km
@@ -63,7 +63,7 @@ to   (snapped): (51.51328, -0.09844)
 ```bash
 # stops.txt: one "lat,lon" per line (or a JSON [[lat,lon], …])
 mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
-    --cache data/greater-london.osm.pbf
+    --cache data/greater-london-latest.osm.pbf
 ```
 ```
 stops: 50  vehicles used: 3/5  unassigned: 0
@@ -87,8 +87,8 @@ import mpee
 # The .pp/.ch cache comes from a one-time `mpee download` + `mpee build`
 # (see "Get a map" above) — or build it straight from Python:
 #   mpee.Router.build("data/greater-london-latest.osm.pbf")   # → .pp + .ch
-r = mpee.Router("data/greater-london.osm.pbf.pp",
-                "data/greater-london.osm.pbf.ch")
+r = mpee.Router("data/greater-london-latest.osm.pbf.pp",
+                "data/greater-london-latest.osm.pbf.ch")
 
 # Distance + time between two points (set geometry=True for the path).
 leg = r.route(51.5080, -0.1281, 51.5138, -0.0984)
@@ -120,7 +120,7 @@ distinct start/end depots:
 
 ```python
 import json, mpee
-r = mpee.Router("data/greater-london.osm.pbf.pp", "data/greater-london.osm.pbf.ch")
+r = mpee.Router("data/greater-london-latest.osm.pbf.pp", "data/greater-london-latest.osm.pbf.ch")
 
 problem = {
   "vehicles": [
