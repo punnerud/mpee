@@ -198,6 +198,7 @@
 <nav class="toc">
   <div class="wrap">
     <a href="#what">What it is</a>
+    <a href="#benchmarks">Benchmarks</a>
     <a href="#install">Install</a>
     <a href="#quickstart">CLI</a>
     <a href="#python">Python</a>
@@ -233,6 +234,47 @@
       a route-anywhere-on-Earth offline map. There is no global tiling, by
       design: within your area, one cache is simpler and faster.</p>
     </blockquote>
+  </section>
+
+  <section id="benchmarks">
+    <h2>How it compares <span class="muted" style="font-weight:400; font-size:1rem">(measured, Apple M3 Pro)</span></h2>
+    <p>
+      A 50,000-customer fleet implies a 50,000&nbsp;×&nbsp;50,000 distance
+      matrix — <strong>~10&nbsp;GB</strong> if you store it. The classic
+      <strong>OSRM&nbsp;+&nbsp;VROOM</strong> split builds and ships that matrix
+      between two processes; MPEE <strong>streams it in one process and never
+      materialises it</strong> — which is where the speed and memory wins come from.
+    </p>
+
+    <h3>Routing — N×N duration+distance matrix <span class="muted" style="font-weight:400">· dijeng vs OSRM, Greater London CH (n = 1.16 M)</span></h3>
+    <table>
+      <thead><tr><th>Matrix</th><th>MPEE — time</th><th>MPEE — peak RAM</th><th>OSRM</th></tr></thead>
+      <tbody>
+        <tr><td>10k × 10k</td><td>4.3 s</td><td>streamed</td><td>impractical — no chunked many-to-many</td></tr>
+        <tr><td><b>50k × 50k</b></td><td><b>94 s</b></td><td><b>≤ 500 MB</b></td><td><b>OOM</b> — the matrix alone is ~10 GB</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="font-size:.88rem">
+      Honest caveat: OSRM is ~3× faster on a <em>single</em> point-to-point query
+      (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized
+      matrix — the case VRP actually requires.
+    </p>
+
+    <h3>Optimisation — VRP solver <span class="muted" style="font-weight:400">· brooom vs PyVRP / VROOM / OR-Tools, Solomon-style</span></h3>
+    <table>
+      <thead><tr><th>Scale</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>N = 1,000</td><td>beats the next-best solver (PyVRP) on <b>17 / 20</b> seeds, p&nbsp;≈&nbsp;10⁻⁷</td></tr>
+        <tr><td>N = 50,000</td><td>the <b>only</b> tested solver that converges on a laptop</td></tr>
+        <tr><td>Inner loop</td><td>the entire local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as <b>one GPU megakernel</b> — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="font-size:.88rem">
+      End-to-end on this machine: 2,000 jobs / 50 vehicles in ~2 min (matrix 0.32 s);
+      5,000 / 100 in ~9 min (matrix 4.10 s), both ≥99 % assigned. Full numbers in the
+      <a href="https://github.com/punnerud/mpee/tree/main/crates/dijeng">dijeng</a> and
+      <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom">brooom</a> READMEs.
+    </p>
   </section>
 
   <section id="install">

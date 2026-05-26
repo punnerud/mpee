@@ -8,14 +8,37 @@ route and optimize within it fully **offline** — no API keys, no per-request
 billing, no data leaving your machine. It uses CPU **and** GPU and less memory
 than the alternatives; the engine binary is under ~50 MB.
 
+## How it compares (measured, Apple M3 Pro)
+
+A 50,000-customer fleet implies a 50,000 × 50,000 distance matrix — **~10 GB**
+if you store it. The classic **OSRM + VROOM** split builds and ships that matrix
+between two processes; MPEE **streams it in one process and never materialises
+it**, which is where the speed and memory wins come from.
+
+**Routing — N×N duration+distance matrix** · dijeng vs OSRM, Greater London CH (n = 1.16 M)
+
+| Matrix | MPEE — time | MPEE — peak RAM | OSRM |
+|---|--:|--:|---|
+| 10k × 10k | 4.3 s | streamed | impractical — no chunked many-to-many |
+| **50k × 50k** | **94 s** | **≤ 500 MB** | **OOM** — the matrix alone is ~10 GB |
+
+<sub>Honest caveat: OSRM is ~3× faster on a *single* point-to-point query (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized matrix — the case VRP actually requires. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
+
+**Optimisation — VRP solver** · brooom vs PyVRP / VROOM / OR-Tools, Solomon-style
+
+| Scale | Result |
+|---|---|
+| N = 1,000 | beats the next-best solver (PyVRP) on **17 / 20** seeds, p ≈ 10⁻⁷ |
+| N = 50,000 | the **only** tested solver that converges on a laptop |
+| Inner loop | the *entire* local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as **one GPU megakernel** — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration |
+
+<sub>End-to-end on this machine: 2,000 jobs / 50 vehicles solved in ~2 min (matrix 0.32 s); 5,000 / 100 in ~9 min (matrix 4.10 s), both ≥99 % assigned. ([full benchmarks](crates/brooom/README.md))</sub>
+
 > **Scope:** MPEE covers a single downloaded area — it isn't a
 > route-anywhere-on-Earth offline map. Pick the OSM extract that matches your
 > operating area; the cache scales with it (a city ≈ tens of MB, a whole
 > country ≈ GBs). There's no global tiling, by design — within your area, one
 > cache is simpler and faster.
-
-In head-to-head tests on a Mac, MPEE produced **shorter routes than
-[VROOM](https://github.com/VROOM-Project) at equal runtime**.
 
 ## Install (Python / CLI)
 
