@@ -1,5 +1,5 @@
 ================================================================================
-sssp_bench — Integration Reference
+dijeng — Integration Reference
 ================================================================================
 
 This file is the practical reference for anyone wiring the routing engine into
@@ -8,7 +8,7 @@ VRP solvers, custom route consumers, future agents continuing this work.
 
 Original standalone repo path: /Users/punnerud/Downloads/dikstra
 (Now lives at crates/dijeng/ inside the mpee workspace.)
-Crate name: sssp_bench
+Crate name: dijeng
 Target machine baseline: Apple M3 Pro (6P + 5E cores, 36 GB unified RAM)
 Test graph baseline: Greater London OSM, n=1 159 073, m_aug=3 899 581
 
@@ -23,12 +23,12 @@ Option A — path dependency inside a workspace (recommended for brooom):
 
     # In brooom/Cargo.toml
     [dependencies]
-    sssp_bench = { path = "../sssp_bench" }
+    dijeng = { path = "../dijeng" }
     rayon = "1"
 
 Option B — git dependency:
 
-    sssp_bench = { git = "https://github.com/<your-org>/sssp_bench", branch = "main" }
+    dijeng = { git = "https://github.com/<your-org>/dijeng", branch = "main" }
 
 Both options give zero-copy data sharing. Pass `&Vec<T>` / `Arc<KnnTable>` etc.
 directly — no serialization, no copy. On Apple Silicon (unified memory) the same
@@ -66,13 +66,13 @@ After caches exist, load takes ~0.02 ms via mmap regardless of graph size.
 3. PUBLIC API SURFACE
 ================================================================================
 
-All paths are `use sssp_bench::<module>::<item>`.
+All paths are `use dijeng::<module>::<item>`.
 
 --------------------------------------------------------------------------------
 3.1 Loading caches
 --------------------------------------------------------------------------------
 
-    use sssp_bench::{cache_ch, cache_pp};
+    use dijeng::{cache_ch, cache_pp};
 
     let pp = cache_pp::load_mmap("data/greater-london.osm.pbf.pp")?;
     let ch = cache_ch::load_mmap("data/greater-london.osm.pbf.ch")?;
@@ -89,7 +89,7 @@ All paths are `use sssp_bench::<module>::<item>`.
 3.2 Single point-to-point query (ch::query)
 --------------------------------------------------------------------------------
 
-    use sssp_bench::ch;
+    use dijeng::ch;
 
     // Distance only (88 µs/call steady-state on M3 Pro; allocates 9 MB scratch
     // per call — see PathScratch for reusable variant).
@@ -98,7 +98,7 @@ All paths are `use sssp_bench::<module>::<item>`.
     let dur = ch::query(&ch, internal_src, internal_dst);  // Option<f32>
 
     // With path + reused scratch (the right API for hot loops).
-    use sssp_bench::ch::PathScratch;
+    use dijeng::ch::PathScratch;
     let mut scratch = PathScratch::new(ch.graph_fwd.n);
     let dur = ch::query_with_path_into(&ch, internal_src, internal_dst, &mut scratch);
     // path is in scratch.path : Vec<u32> of internal IDs
@@ -115,7 +115,7 @@ otherwise.
 3.3 Many-to-many distance matrix
 --------------------------------------------------------------------------------
 
-    use sssp_bench::ch;
+    use dijeng::ch;
 
     // Inputs are CH-internal IDs (use ch.perm to convert from csr IDs).
     let srcs: Vec<u32> = ...;   // length n_src
@@ -145,7 +145,7 @@ The right primitive when the consumer is a granular VRP solver (Toth-Vigo
 style): for each customer, the K nearest other customers by **graph
 distance** (not great-circle).
 
-    use sssp_bench::knn::{knn_matrix, knn_matrix_flat};
+    use dijeng::knn::{knn_matrix, knn_matrix_flat};
 
     let customers: Vec<u32> = ...;     // node IDs in pp.graph numbering
     let edge_dist = pp.edge_dist.as_slice();
@@ -173,7 +173,7 @@ Measured on M3 Pro, London, N=50 000, K=160: 1.22 s, 92 MB output,
 For streaming matrix rows in geometrically diverse order (downstream solver
 can start working before full matrix is computed):
 
-    use sssp_bench::farthest_first::farthest_first_order;
+    use dijeng::farthest_first::farthest_first_order;
 
     let coords_for_srcs: Vec<(f32, f32)> = srcs.iter()
         .map(|&csr| pp.coords[csr as usize])
@@ -191,7 +191,7 @@ parallel).
 
 Caller declares a hard byte cap; planner picks (n_threads, chunk_size):
 
-    use sssp_bench::budget::{plan_for_budget_with_n_src, MatrixBudget};
+    use dijeng::budget::{plan_for_budget_with_n_src, MatrixBudget};
 
     let budget = MatrixBudget {
         max_bytes: 800 * 1024 * 1024,
@@ -221,7 +221,7 @@ doesn't help — the planner caps automatically.
 Wraps CH + snap-grid + per-vertex coords for app-facing route/matrix calls
 with lat/lon I/O:
 
-    use sssp_bench::routing::RoutingService;
+    use dijeng::routing::RoutingService;
 
     let svc = RoutingService::new(ch, pp.coords);
 
@@ -314,7 +314,7 @@ appends the same trailer.
 LEB128 unsigned + zig-zag signed varints for delta-encoded sparse edge
 lists or other small-integer payloads.
 
-    use sssp_bench::varint::{
+    use dijeng::varint::{
         write_u64, read_u64, write_i64, read_i64,
         encode_u64_buf, decode_u64_buf,
         zigzag, unzigzag,
@@ -347,14 +347,14 @@ parallelism for a single call:
 
     let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build()?;
     pool.install(|| {
-        // any sssp_bench code here uses up to 4 threads
+        // any dijeng code here uses up to 4 threads
     });
 
 `ch::query` is NOT internally parallel — it's a single Dijeng. To run many
 queries in parallel:
 
     use rayon::prelude::*;
-    use sssp_bench::ch::PathScratch;
+    use dijeng::ch::PathScratch;
 
     let results: Vec<_> = pairs
         .par_iter()
@@ -372,7 +372,7 @@ drops to zero.
 ================================================================================
 
 On Apple Silicon, CPU and GPU share the same physical memory pool. Any Vec
-or Arc owned by sssp_bench can be wrapped as an MTLBuffer with zero copy:
+or Arc owned by dijeng can be wrapped as an MTLBuffer with zero copy:
 
     use metal::{Device, MTLResourceOptions};
 
@@ -480,7 +480,7 @@ PATTERN C — On-demand single-pair query in a multi-threaded solver
 --------------------------------------------------------------------------------
 
     use rayon::prelude::*;
-    use sssp_bench::ch::PathScratch;
+    use dijeng::ch::PathScratch;
 
     let results: Vec<f32> = queries
         .par_iter()

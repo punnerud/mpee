@@ -1,11 +1,11 @@
 // Test delta_stepping AND duan_inspired on multiple delta values on the London graph.
 // If we can reproduce FAIL with a specific delta, we can minimize.
 
-use sssp_bench::delta_step::delta_stepping;
-use sssp_bench::dijeng::{dijeng_binary, INF};
-use sssp_bench::duan::duan_inspired;
-use sssp_bench::osm::load_with_cache;
-use sssp_bench::osm_profile::Profile;
+use dijeng::delta_step::delta_stepping;
+use dijeng::dijeng::{dijeng_binary, INF};
+use dijeng::duan::duan_inspired;
+use dijeng::osm::load_with_cache;
+use dijeng::osm_profile::Profile;
 
 fn count_bad(reference: &[f32], other: &[f32]) -> (usize, Option<(usize, f32, f32)>) {
     let mut bad = 0usize;

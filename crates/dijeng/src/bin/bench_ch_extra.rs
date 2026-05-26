@@ -8,11 +8,11 @@
 
 use std::time::Instant;
 
-use sssp_bench::ch;
-use sssp_bench::dijeng::dijeng_binary;
-use sssp_bench::graph::{gen_grid, gen_random_sparse, CsrGraph, Rng};
-use sssp_bench::rubik::build_pocket_cube_graph;
-use sssp_bench::synth::gen_rmat;
+use dijeng::ch;
+use dijeng::dijeng::dijeng_binary;
+use dijeng::graph::{gen_grid, gen_random_sparse, CsrGraph, Rng};
+use dijeng::rubik::build_pocket_cube_graph;
+use dijeng::synth::gen_rmat;
 
 fn run_ch_bench(label: &str, g: &CsrGraph, n_pairs: usize) {
     let n = g.n;

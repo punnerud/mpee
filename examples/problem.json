@@ -1,0 +1,14 @@
+{
+  "vehicles": [
+    { "id": 1, "start": [-0.1278, 51.5074], "end": [-0.1278, 51.5074], "capacity": [100], "profile": "car" },
+    { "id": 2, "start": [-0.1278, 51.5074], "end": [-0.1278, 51.5074], "capacity": [100], "profile": "car" }
+  ],
+  "jobs": [
+    { "id": 101, "location": [-0.0984, 51.5138], "delivery": [10] },
+    { "id": 102, "location": [-0.1196, 51.5098], "delivery": [12] },
+    { "id": 103, "location": [-0.0890, 51.5161], "delivery": [8]  },
+    { "id": 104, "location": [-0.0837, 51.4954], "delivery": [15] },
+    { "id": 105, "location": [-0.1370, 51.5206], "delivery": [9]  },
+    { "id": 106, "location": [-0.1100, 51.5150], "delivery": [11] }
+  ]
+}

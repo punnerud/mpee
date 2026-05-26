@@ -47,7 +47,7 @@ See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
 > **Heads-up: there are two CLIs, both named `mpee`.** The commands above are
 > the **pip package** (`pip install mpee` → verbs `route` / `optimize` /
 > `download` / `build`). The Rust workspace binary
-> (`cargo run -p mpee-cli`, i.e. `./target/release/mpee`) is a *different* tool
+> (`cargo run -p mpee-cli`, i.e. `./target/release/mpee-cli`) is a *different* tool
 > with VRP-focused verbs (`gen` / `download` / `build` / `solve` / `pipeline`)
 > — it has **no** point-to-point `route`. Use the pip package for the examples
 > on this page.
@@ -69,7 +69,7 @@ no IPC, no file hand-off on the hot path.
 
 > Note on the folder name: the routing crate lives in `crates/dijeng/`
 > after Edsger W. Dijkstra. The earlier spelling `dikstra` was a typo.
-> The Cargo crate name itself is still `sssp_bench` (the original
+> The Cargo crate name itself is still `dijeng` (the original
 > standalone-project name).
 
 ---
@@ -145,7 +145,7 @@ cargo build --release --workspace
 
 ```bash
 cargo build --release -p brooom
-cargo build --release -p sssp_bench
+cargo build --release -p dijeng
 cargo build --release -p mpee-cli
 ```
 
@@ -174,6 +174,40 @@ cargo run --release -p mpee-cli -- build data/greater-london-latest.osm.pbf
 > then run a long SSSP/Dijkstra benchmark suite (100 s+) that has nothing to do
 > with building it. `mpee build` runs the build-only pipeline in-process.
 
+### Solve your own VRP from JSON
+
+`mpee-cli solve` runs a VROOM-style problem against a CH cache. A minimal one
+ships at [`examples/problem.json`](examples/problem.json):
+
+```bash
+# Build a cache first (above), then solve:
+cargo run --release -p mpee-cli -- solve examples/problem.json \
+    --ch data/greater-london-latest.osm.pbf.ch \
+    --pp data/greater-london-latest.osm.pbf.pp \
+    --time-limit-s 5 -o solution.json
+#   → jobs 6 (assigned 6 / unassigned 0), 1 vehicle, ≈ 15.2 km
+```
+
+Schema (VROOM-native — note coordinates are **`[lon, lat]`** arrays here, unlike
+the Python `solve()` which uses `{"coord": [lon, lat]}`):
+
+```jsonc
+{
+  "vehicles": [
+    { "id": 1, "start": [-0.1278, 51.5074], "end": [-0.1278, 51.5074],
+      "capacity": [100], "profile": "car" }
+  ],
+  "jobs": [
+    { "id": 101, "location": [-0.0984, 51.5138], "delivery": [10] }
+  ]
+}
+```
+
+Per-vehicle `capacity` / `skills` / `time_window` / `speed_factor` /
+`max_travel_time` / `max_distance` and per-job `delivery` / `pickup` / `skills`
+/ `time_windows` / `service` / `priority` are all honoured — see the full
+constraint table in [`crates/mpee-py/`](crates/mpee-py/) (same engine model).
+
 ---
 
 ## Status
@@ -187,9 +221,9 @@ cargo run --release -p mpee-cli -- build data/greater-london-latest.osm.pbf
   [crates/brooom/README.md](crates/brooom/README.md).
 
 - **mpee-cli**: end-to-end VRP pipeline. The `download` / `build` /
-  `solve` / `pipeline` subcommands load a CH cache via sssp_bench, snap
+  `solve` / `pipeline` subcommands load a CH cache via dijeng, snap
   random / supplied coords to the road graph, build the N×N
-  duration+distance matrix with sssp_bench's bucket-MMM, and hand the
+  duration+distance matrix with dijeng's bucket-MMM, and hand the
   matrix straight to brooom's solver — all in the same address space,
   no IPC, no disk on the hot path.
 - **mpee-viz**: live HTTP server (port 8032 by default) that runs the
@@ -218,7 +252,7 @@ this issue.
 
 ## License
 
-MIT — every crate: `brooom`, `dijeng` (Cargo name `sssp_bench`), `mpee-cli`,
+MIT — every crate: `brooom`, `dijeng` (Cargo name `dijeng`), `mpee-cli`,
 `mpee-py`, and `mpee-viz`. See each crate's `Cargo.toml` for details.
 
 ---

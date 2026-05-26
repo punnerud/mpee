@@ -2,9 +2,9 @@
 
 use std::time::Instant;
 
-use sssp_bench::cache_pp;
-use sssp_bench::graph::Rng;
-use sssp_bench::knn::knn_matrix;
+use dijeng::cache_pp;
+use dijeng::graph::Rng;
+use dijeng::knn::knn_matrix;
 
 fn main() -> std::io::Result<()> {
     let dataset = std::env::args().nth(1).unwrap_or_else(|| "london".to_string());

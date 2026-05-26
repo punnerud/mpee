@@ -22,18 +22,18 @@ use std::time::Instant;
 use std::fs::File;
 use std::io::BufWriter;
 
-use sssp_bench::binary_table::{BinaryTableWriter, CellDtype, WriterConfig};
-use sssp_bench::budget::{fmt_bytes, plan_for_budget_with_n_src, MatrixBudget};
-use sssp_bench::cache_ch;
-use sssp_bench::cache_pp;
-use sssp_bench::ch;
-use sssp_bench::farthest_first::farthest_first_order;
-use sssp_bench::graph::Rng;
+use dijeng::binary_table::{BinaryTableWriter, CellDtype, WriterConfig};
+use dijeng::budget::{fmt_bytes, plan_for_budget_with_n_src, MatrixBudget};
+use dijeng::cache_ch;
+use dijeng::cache_pp;
+use dijeng::ch;
+use dijeng::farthest_first::farthest_first_order;
+use dijeng::graph::Rng;
 
 fn main() -> std::io::Result<()> {
     let dataset = std::env::args().nth(1).unwrap_or_else(|| "london".to_string());
     let profile_name = std::env::args().nth(2).unwrap_or_else(|| "car".to_string());
-    let profile = sssp_bench::osm_profile::Profile::from_name(&profile_name)
+    let profile = dijeng::osm_profile::Profile::from_name(&profile_name)
         .expect("unknown profile");
     let sizes: Vec<usize> = std::env::args()
         .nth(3)
@@ -78,7 +78,7 @@ fn main() -> std::io::Result<()> {
         .parse()
         .unwrap_or(0);
 
-    let suffix = if profile == sssp_bench::osm_profile::Profile::Car {
+    let suffix = if profile == dijeng::osm_profile::Profile::Car {
         String::new()
     } else {
         format!(".{}", profile.name())

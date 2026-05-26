@@ -6,13 +6,13 @@
 
 use std::time::Instant;
 
-use sssp_bench::auto::sssp_auto;
-use sssp_bench::delta_step::delta_stepping;
-use sssp_bench::dijeng::{dijeng_4ary, dijeng_binary, INF};
-use sssp_bench::duan::duan_inspired;
-use sssp_bench::graph::{CsrGraph, Rng};
-use sssp_bench::osm::load_with_cache;
-use sssp_bench::osm_profile::Profile;
+use dijeng::auto::sssp_auto;
+use dijeng::delta_step::delta_stepping;
+use dijeng::dijeng::{dijeng_4ary, dijeng_binary, INF};
+use dijeng::duan::duan_inspired;
+use dijeng::graph::{CsrGraph, Rng};
+use dijeng::osm::load_with_cache;
+use dijeng::osm_profile::Profile;
 
 fn verify(reference: &[f32], other: &[f32], label: &str) -> bool {
     if reference.len() != other.len() {

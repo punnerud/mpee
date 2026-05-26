@@ -8,8 +8,8 @@
 //!   - 202 + the current status while `state == "solving"`
 //!   - 500 + the error if `state == "failed"`
 //!
-//! Same shared-memory pipeline as before: sssp_bench loads the CH cache,
-//! brooom solves on top of the matrix sssp_bench produces, and the HTTP
+//! Same shared-memory pipeline as before: dijeng loads the CH cache,
+//! brooom solves on top of the matrix dijeng produces, and the HTTP
 //! handlers read the resulting `&Problem` / `&Solution` / `&Matrix` in
 //! place. The browser sees an HTML page within milliseconds; the
 //! 2 000-job solve finishes around the 2-minute mark and the map
@@ -312,16 +312,16 @@ fn solve_in_process(args: &Args, state: &Arc<RwLock<AppState>>) -> Result<()> {
     }
 
     set_phase(state, "mmap", "mmap CH + PP caches", 0.10);
-    let pp = sssp_bench::cache_pp::load_mmap(&args.pp)
+    let pp = dijeng::cache_pp::load_mmap(&args.pp)
         .with_context(|| format!("load PP cache {}", args.pp.display()))?;
-    let ch = sssp_bench::cache_ch::load_mmap(&args.ch)
+    let ch = dijeng::cache_ch::load_mmap(&args.ch)
         .with_context(|| format!("load CH cache {}", args.ch.display()))?;
 
     let (coords, vehicle_starts, vehicle_ends, job_indices) = collect_coords(&problem)?;
     let n_points = coords.len();
     set_phase(state, "snap", &format!("{} coords ready, building snap index", n_points), 0.15);
 
-    let svc = sssp_bench::routing::RoutingService::new(ch, pp.coords);
+    let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
     set_phase(state, "matrix", &format!("building {n_points}×{n_points} routing matrix"), 0.20);
     let t = std::time::Instant::now();
     let (durs_f32, dists_f32, _, _) = svc.matrix_with_distance(&coords, &coords);

@@ -1,4 +1,4 @@
-# sssp_bench  (a.k.a. dijeng)
+# dijeng  (a.k.a. dijeng)
 
 > Part of the **[mpee](../../README.md)** workspace. Standalone crate —
 > `cargo build` in this directory works on its own. Integrates with
@@ -244,7 +244,7 @@ components (<160 nodes).
 
 Same machine (M3 Pro), London road network:
 
-| Metric | sssp_bench | OSRM |
+| Metric | dijeng | OSRM |
 |---|---:|---:|
 | Preprocessing time | 3-4 min | ~37 s |
 | CH cache size | 150 MB | ~140 MB |
@@ -256,7 +256,7 @@ Same machine (M3 Pro), London road network:
 
 OSRM is ~3× faster per p2p query, but has no chunked many-to-many for
 matrices larger than ~5k×5k without external orchestration. For VRP
-fleets of 50k–100k customers, sssp_bench is the only practical option.
+fleets of 50k–100k customers, dijeng is the only practical option.
 
 ## Files / modules
 
@@ -330,18 +330,18 @@ the same workspace:
 ```toml
 # Top-level Cargo.toml
 [workspace]
-members = ["sssp_bench", "brooom", "app-gui"]
+members = ["dijeng", "brooom", "app-gui"]
 
 # brooom/Cargo.toml
 [dependencies]
-sssp_bench = { path = "../sssp_bench" }
+dijeng = { path = "../dijeng" }
 rayon = "1"
 ```
 
 Then brooom can consume K-NN data without a single copy:
 
 ```rust
-use sssp_bench::knn::knn_matrix_flat;
+use dijeng::knn::knn_matrix_flat;
 use std::sync::Arc;
 
 let granular = Arc::new(knn_matrix_flat(&pp.graph, &customers, 160, Some(&pp.edge_dist)));

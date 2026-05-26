@@ -1,9 +1,9 @@
 //! Small correctness test for CH: build CH on random sparse graphs and
 //! verify that ch::query matches full Dijeng on 100 random (s,d) pairs.
 
-use sssp_bench::ch;
-use sssp_bench::dijeng::dijeng_binary;
-use sssp_bench::graph::{gen_random_sparse, CsrGraph, Rng};
+use dijeng::ch;
+use dijeng::dijeng::dijeng_binary;
+use dijeng::graph::{gen_random_sparse, CsrGraph, Rng};
 
 fn test_correctness(g: &CsrGraph, n_pairs: usize, label: &str) -> bool {
     println!(

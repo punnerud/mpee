@@ -1,5 +1,5 @@
 [package]
-name = "sssp_bench"
+name = "dijeng"
 version = "0.1.0"
 edition = "2024"
 
@@ -22,11 +22,11 @@ panic = "abort"
 debug = false
 
 [lib]
-name = "sssp_bench"
+name = "dijeng"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sssp_bench"
+name = "dijeng"
 path = "src/main.rs"
 
 [[bin]]

@@ -1,8 +1,8 @@
-use sssp_bench::auto::sssp_auto;
-use sssp_bench::delta_step::delta_stepping;
-use sssp_bench::dijeng::{dijeng_4ary, dijeng_binary, INF};
-use sssp_bench::duan::duan_inspired;
-use sssp_bench::graph::{
+use dijeng::auto::sssp_auto;
+use dijeng::delta_step::delta_stepping;
+use dijeng::dijeng::{dijeng_4ary, dijeng_binary, INF};
+use dijeng::duan::duan_inspired;
+use dijeng::graph::{
     gen_grid, gen_path, gen_power_law, gen_random_exp_weights, gen_random_sparse, time_it,
     CsrGraph,
 };

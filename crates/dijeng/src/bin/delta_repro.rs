@@ -1,8 +1,8 @@
 // Reproducer for delta_stepping path-bug.
 
-use sssp_bench::delta_step::{delta_stepping, delta_stepping_debug, delta_stepping_v2};
-use sssp_bench::dijeng::{dijeng_binary, INF};
-use sssp_bench::graph::gen_path;
+use dijeng::delta_step::{delta_stepping, delta_stepping_debug, delta_stepping_v2};
+use dijeng::dijeng::{dijeng_binary, INF};
+use dijeng::graph::gen_path;
 
 fn main() {
     // Sweep over n to find when bug starts.

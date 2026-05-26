@@ -54,8 +54,8 @@ address space.
 
 ```rust
 // 1. Load the CH cache mmap'd once per process (≈20 µs regardless of size)
-let pp = sssp_bench::cache_pp::load_mmap("data/greater-london.osm.pbf.pp")?;
-let ch = sssp_bench::cache_ch::load_mmap("data/greater-london.osm.pbf.ch")?;
+let pp = dijeng::cache_pp::load_mmap("data/greater-london.osm.pbf.pp")?;
+let ch = dijeng::cache_ch::load_mmap("data/greater-london.osm.pbf.ch")?;
 
 // 2. Convert VRP customer lat/lon into pp graph IDs via snap
 let customers: Vec<u32> = problem.jobs.iter()
@@ -63,7 +63,7 @@ let customers: Vec<u32> = problem.jobs.iter()
     .collect();
 
 // 3. Build the granular K=160 K-NN — 1.22 s for 50 000 customers, 92 MB output
-let knn: Vec<(u32, f32, f32)> = sssp_bench::knn::knn_matrix_flat(
+let knn: Vec<(u32, f32, f32)> = dijeng::knn::knn_matrix_flat(
     &pp.graph,
     &customers,
     160,
@@ -111,9 +111,9 @@ and dijeng were optimised to do together.
 
 This integration is **done** — it runs end-to-end today, it is not scaffolding:
 
-- `mpee-cli` has live path-deps on `brooom` + `sssp_bench`. Its `solve` /
+- `mpee-cli` has live path-deps on `brooom` + `dijeng`. Its `solve` /
   `pipeline` verbs load a CH cache, snap coords, build the N×N
-  duration+distance matrix via sssp_bench's bucket-MMM, and hand it to
+  duration+distance matrix via dijeng's bucket-MMM, and hand it to
   `brooom::solver::solve_with_matrix` — one process, no IPC, no disk on the
   hot path.
 - The same pipeline is exposed to Python via `mpee.Router` (in
@@ -121,7 +121,7 @@ This integration is **done** — it runs end-to-end today, it is not scaffolding
   `optimize` / `solve`, plus `download` / `build`).
 - The snap layer (`dijeng::routing::RoutingService` /
   `matrix_with_distance`) and the in-process cache build
-  (`sssp_bench::build::build_cache`) are wired in.
+  (`dijeng::build::build_cache`) are wired in.
 
 **Note on the contract above:** the shipped path builds a *precomputed CH
 matrix* and calls `solve_with_matrix(&problem, &matrix, &cfg)` (ideal up to a
@@ -157,4 +157,4 @@ mpee-cli should configure the pool once and let both operate inside
 
 The glue code lives in `crates/mpee-cli/src/main.rs` (the `solve` / `pipeline`
 verbs) and in `crates/mpee-py/src/lib.rs` (the `Router` class). Both drive the
-same `sssp_bench` + `brooom` library calls in one process.
+same `dijeng` + `brooom` library calls in one process.

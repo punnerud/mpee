@@ -9,15 +9,15 @@
 
 use std::time::Instant;
 
-use sssp_bench::auto::sssp_auto;
-use sssp_bench::delta_step::delta_stepping;
-use sssp_bench::dijeng::{dijeng_4ary, dijeng_binary, INF};
-use sssp_bench::duan::duan_inspired;
-use sssp_bench::graph::CsrGraph;
-use sssp_bench::rubik::{build_pocket_cube_graph, SOLVED};
-use sssp_bench::snap::load_snap_edge_list;
-use sssp_bench::synth::gen_rmat;
-use sssp_bench::wordladder::{build_word_ladder, pick_word};
+use dijeng::auto::sssp_auto;
+use dijeng::delta_step::delta_stepping;
+use dijeng::dijeng::{dijeng_4ary, dijeng_binary, INF};
+use dijeng::duan::duan_inspired;
+use dijeng::graph::CsrGraph;
+use dijeng::rubik::{build_pocket_cube_graph, SOLVED};
+use dijeng::snap::load_snap_edge_list;
+use dijeng::synth::gen_rmat;
+use dijeng::wordladder::{build_word_ladder, pick_word};
 
 fn count_bad(reference: &[f32], other: &[f32], eps: f32) -> usize {
     let mut bad = 0;

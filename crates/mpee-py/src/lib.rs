@@ -252,9 +252,9 @@ impl Engine {
 
 #[pyclass]
 struct Router {
-    routing: sssp_bench::routing::RoutingService,
+    routing: dijeng::routing::RoutingService,
     // Keep the mmap-backed PP cache alive for the Router's lifetime.
-    _pp: sssp_bench::cache_pp::PpFull,
+    _pp: dijeng::cache_pp::PpFull,
 }
 
 #[pymethods]
@@ -265,12 +265,12 @@ impl Router {
     /// peak RAM stays low.
     #[new]
     fn new(pp_path: &str, ch_path: &str) -> PyResult<Self> {
-        let pp = sssp_bench::cache_pp::load_mmap(pp_path)
+        let pp = dijeng::cache_pp::load_mmap(pp_path)
             .map_err(|e| PyRuntimeError::new_err(format!("load PP cache {pp_path}: {e}")))?;
-        let ch = sssp_bench::cache_ch::load_mmap(ch_path)
+        let ch = dijeng::cache_ch::load_mmap(ch_path)
             .map_err(|e| PyRuntimeError::new_err(format!("load CH cache {ch_path}: {e}")))?;
-        let coords = sssp_bench::buffer::Buffer::from(pp.coords.as_slice().to_vec());
-        let routing = sssp_bench::routing::RoutingService::new(ch, coords);
+        let coords = dijeng::buffer::Buffer::from(pp.coords.as_slice().to_vec());
+        let routing = dijeng::routing::RoutingService::new(ch, coords);
         Ok(Self { routing, _pp: pp })
     }
 
@@ -291,16 +291,16 @@ impl Router {
         progress: bool,
         force: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
-        use sssp_bench::osm_profile::Profile;
+        use dijeng::osm_profile::Profile;
         let prof = Profile::from_name(profile).ok_or_else(|| {
             PyRuntimeError::new_err(format!("unknown profile {profile:?} (use car|bicycle|foot)"))
         })?;
         let pbf_owned = pbf.to_string();
         // The whole pipeline (parse → preprocess → CH) runs in-process in the
-        // shared `sssp_bench::build` helper; release the GIL for it.
+        // shared `dijeng::build` helper; release the GIL for it.
         let res = py
             .allow_threads(move || {
-                sssp_bench::build::build_cache(std::path::Path::new(&pbf_owned), prof, progress, force)
+                dijeng::build::build_cache(std::path::Path::new(&pbf_owned), prof, progress, force)
             })
             .map_err(PyRuntimeError::new_err)?;
 
@@ -809,16 +809,16 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
     }
 
     set_phase(state, "mmap", "mmap CH + PP caches", 0.10);
-    let pp = sssp_bench::cache_pp::load_mmap(&args.pp)
+    let pp = dijeng::cache_pp::load_mmap(&args.pp)
         .with_context(|| format!("load PP cache {}", args.pp))?;
-    let ch = sssp_bench::cache_ch::load_mmap(&args.ch)
+    let ch = dijeng::cache_ch::load_mmap(&args.ch)
         .with_context(|| format!("load CH cache {}", args.ch))?;
 
     let (coords, vehicle_starts, vehicle_ends, job_indices) = collect_coords(&problem)?;
     let n_points = coords.len();
     set_phase(state, "snap", &format!("{} coords ready", n_points), 0.15);
 
-    let svc = sssp_bench::routing::RoutingService::new(ch, pp.coords);
+    let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
     set_phase(state, "matrix", &format!("building {n_points}×{n_points} routing matrix"), 0.20);
     let t = std::time::Instant::now();
     let (durs_f32, dists_f32, _, _) = svc.matrix_with_distance(&coords, &coords);

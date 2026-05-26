@@ -8,19 +8,19 @@ use petgraph::algo::dijkstra as pg_dijeng;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::time::Instant;
 
-use sssp_bench::auto::sssp_auto;
-use sssp_bench::delta_step::delta_stepping;
-use sssp_bench::dijeng::{dijeng_4ary, dijeng_8ary, dijeng_binary, INF};
-use sssp_bench::duan::duan_inspired;
-use sssp_bench::graph::{
+use dijeng::auto::sssp_auto;
+use dijeng::delta_step::delta_stepping;
+use dijeng::dijeng::{dijeng_4ary, dijeng_8ary, dijeng_binary, INF};
+use dijeng::duan::duan_inspired;
+use dijeng::graph::{
     gen_grid, gen_path, gen_power_law, gen_random_sparse, CsrGraph,
 };
-use sssp_bench::osm::load_with_cache;
-use sssp_bench::osm_profile::Profile;
-use sssp_bench::rubik::build_pocket_cube_graph;
-use sssp_bench::snap::load_snap_edge_list;
-use sssp_bench::synth::gen_rmat;
-use sssp_bench::wordladder::build_word_ladder;
+use dijeng::osm::load_with_cache;
+use dijeng::osm_profile::Profile;
+use dijeng::rubik::build_pocket_cube_graph;
+use dijeng::snap::load_snap_edge_list;
+use dijeng::synth::gen_rmat;
+use dijeng::wordladder::build_word_ladder;
 
 fn build_petgraph(g: &CsrGraph) -> (DiGraph<(), OrderedFloat<f32>>, Vec<NodeIndex>) {
     let mut pg = DiGraph::<(), OrderedFloat<f32>>::with_capacity(g.n, g.m());

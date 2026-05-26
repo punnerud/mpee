@@ -13,10 +13,10 @@ use std::time::Instant;
 
 use memmap2::Mmap;
 use rayon::prelude::*;
-use sssp_bench::cache_ch;
-use sssp_bench::ch;
-use sssp_bench::graph::Rng;
-use sssp_bench::paged::{ChLayout, PagedMmap, TouchBuf, is_rank_ordered};
+use dijeng::cache_ch;
+use dijeng::ch;
+use dijeng::graph::Rng;
+use dijeng::paged::{ChLayout, PagedMmap, TouchBuf, is_rank_ordered};
 
 fn main() -> std::io::Result<()> {
     let dataset = std::env::args().nth(1).unwrap_or_else(|| "london".to_string());

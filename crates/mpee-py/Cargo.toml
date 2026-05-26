@@ -14,12 +14,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Same path-deps as the Rust binaries — the bindings sit on top of the
-# exact same brooom + sssp_bench code path. The Python caller and the
+# exact same brooom + dijeng code path. The Python caller and the
 # solver share one address space; the JSON bytes returned by
 # get_dataset_json() come straight out of the same Arc<String> that the
 # solver thread populated.
 brooom     = { path = "../brooom", default-features = false }  # no ONNX/OSRM/clap — the VRP solve path needs none of them
-sssp_bench = { path = "../dijeng" }
+dijeng = { path = "../dijeng" }
 
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
 

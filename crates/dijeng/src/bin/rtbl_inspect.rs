@@ -5,7 +5,7 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use sssp_bench::binary_table::BinaryTableReader;
+use dijeng::binary_table::BinaryTableReader;
 
 fn main() -> std::io::Result<()> {
     let path = std::env::args()

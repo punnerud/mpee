@@ -8,11 +8,11 @@
 
 use std::time::Instant;
 
-use sssp_bench::auto::sssp_auto;
-use sssp_bench::bidir::bidir_dijeng;
-use sssp_bench::cache_pp;
-use sssp_bench::dijeng::dijeng_binary;
-use sssp_bench::graph::Rng;
+use dijeng::auto::sssp_auto;
+use dijeng::bidir::bidir_dijeng;
+use dijeng::cache_pp;
+use dijeng::dijeng::dijeng_binary;
+use dijeng::graph::Rng;
 
 fn main() -> std::io::Result<()> {
     let pp_cache = "data/greater-london.osm.pbf.pp";

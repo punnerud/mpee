@@ -437,6 +437,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dijeng"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "libc",
+ "lru",
+ "memmap2 0.9.10",
+ "ordered-float",
+ "osmpbf",
+ "petgraph",
+ "rayon",
+ "ureq 2.12.1",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1160,11 +1175,11 @@ dependencies = [
  "anyhow",
  "brooom",
  "clap",
+ "dijeng",
  "rand",
  "rand_chacha",
  "serde",
  "serde_json",
- "sssp_bench",
  "ureq 2.12.1",
 ]
 
@@ -1174,12 +1189,12 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "brooom",
+ "dijeng",
  "pyo3",
  "rand",
  "rand_chacha",
  "serde",
  "serde_json",
- "sssp_bench",
 ]
 
 [[package]]
@@ -1189,11 +1204,11 @@ dependencies = [
  "anyhow",
  "brooom",
  "clap",
+ "dijeng",
  "rand",
  "rand_chacha",
  "serde",
  "serde_json",
- "sssp_bench",
  "tiny_http",
 ]
 
@@ -2017,21 +2032,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
 dependencies = [
  "bitflags 2.11.1",
-]
-
-[[package]]
-name = "sssp_bench"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "libc",
- "lru",
- "memmap2 0.9.10",
- "ordered-float",
- "osmpbf",
- "petgraph",
- "rayon",
- "ureq 2.12.1",
 ]
 
 [[package]]

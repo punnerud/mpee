@@ -24,11 +24,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use sssp_bench::cache_ch;
-use sssp_bench::cache_pp;
-use sssp_bench::osm_profile::Profile;
-use sssp_bench::polyline;
-use sssp_bench::routing::{RouteResponse, RoutingService};
+use dijeng::cache_ch;
+use dijeng::cache_pp;
+use dijeng::osm_profile::Profile;
+use dijeng::polyline;
+use dijeng::routing::{RouteResponse, RoutingService};
 
 /// Server state: which profiles are mounted, plus their RoutingServices.
 struct ServerState {

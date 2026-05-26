@@ -6,9 +6,9 @@
 
 use std::time::Instant;
 
-use sssp_bench::cache_ch;
-use sssp_bench::cache_pp;
-use sssp_bench::ch;
+use dijeng::cache_ch;
+use dijeng::cache_pp;
+use dijeng::ch;
 
 /// Major UK cities (approximate (lat, lon) of city center).
 const CITIES: &[(&str, f32, f32)] = &[

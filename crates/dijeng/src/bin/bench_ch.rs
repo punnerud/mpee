@@ -3,25 +3,25 @@
 
 use std::time::Instant;
 
-use sssp_bench::bidir::{bidir_dijeng, transpose};
-use sssp_bench::cache_ch;
-use sssp_bench::cache_pp;
-use sssp_bench::ch;
-use sssp_bench::dijeng::dijeng_binary;
-use sssp_bench::graph::Rng;
+use dijeng::bidir::{bidir_dijeng, transpose};
+use dijeng::cache_ch;
+use dijeng::cache_pp;
+use dijeng::ch;
+use dijeng::dijeng::dijeng_binary;
+use dijeng::graph::Rng;
 
 fn main() -> std::io::Result<()> {
     // Allow specifying dataset and profile: `bench_ch london [car|motorcycle|bicycle|foot]`.
     let dataset = std::env::args().nth(1).unwrap_or_else(|| "london".to_string());
     let profile_name = std::env::args().nth(2).unwrap_or_else(|| "car".to_string());
-    let profile = match sssp_bench::osm_profile::Profile::from_name(&profile_name) {
+    let profile = match dijeng::osm_profile::Profile::from_name(&profile_name) {
         Some(p) => p,
         None => {
             eprintln!("unknown profile '{profile_name}' — try car/motorcycle/bicycle/foot");
             std::process::exit(1);
         }
     };
-    let suffix = if profile == sssp_bench::osm_profile::Profile::Car {
+    let suffix = if profile == dijeng::osm_profile::Profile::Car {
         String::new()
     } else {
         format!(".{}", profile.name())

@@ -2,8 +2,8 @@
 //!   * tid (real wall-clock)
 //!   * korrekthet (sammenligner CSR-arrays + koordinater bit-for-bit)
 
-use sssp_bench::osm::{load_osm_routing, load_osm_routing_par};
-use sssp_bench::osm_profile::Profile;
+use dijeng::osm::{load_osm_routing, load_osm_routing_par};
+use dijeng::osm_profile::Profile;
 use std::time::Instant;
 
 fn main() -> std::io::Result<()> {
@@ -40,7 +40,7 @@ fn main() -> std::io::Result<()> {
     // The parallel version can yield a different NODE-ID order because blobs
     // are processed out of order. That means the internal indices are permuted.
     // So we check *structure* (sorted edge list) instead of index equality.
-    fn canonical_edges(g: &sssp_bench::graph::CsrGraph, coords: &[(f32, f32)]) -> Vec<(u64, u64, f32)> {
+    fn canonical_edges(g: &dijeng::graph::CsrGraph, coords: &[(f32, f32)]) -> Vec<(u64, u64, f32)> {
         // Use (lat,lon) as identity, round to ~1cm precision to be tolerant.
         // We pack lat/lon into a u64.
         let key = |i: u32| -> u64 {

@@ -12,9 +12,9 @@
 use std::time::Instant;
 
 use rayon::prelude::*;
-use sssp_bench::cache_ch;
-use sssp_bench::ch::{self, PathScratch};
-use sssp_bench::graph::Rng;
+use dijeng::cache_ch;
+use dijeng::ch::{self, PathScratch};
+use dijeng::graph::Rng;
 
 fn main() -> std::io::Result<()> {
     let dataset = std::env::args().nth(1).unwrap_or_else(|| "london".to_string());

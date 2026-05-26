@@ -1,4 +1,4 @@
-//! mpe — unified driver for the mpee workspace.
+//! mpee-cli — unified driver for the mpee workspace.
 //!
 //! Subcommands:
 //!   gen       — random Vroom-compatible problem inside a region's bbox
@@ -6,11 +6,11 @@
 //!   build     — preprocess an OSM PBF → CSR + PP + CH caches (delegates
 //!               to the standalone bench_pp / bench_ch binaries)
 //!   solve     — load CH cache, snap customer coords, build the N×N
-//!               routing matrix via sssp_bench's bucket-MMM, hand it
+//!               routing matrix via dijeng's bucket-MMM, hand it
 //!               directly into brooom — no IPC, no disk
 //!   pipeline  — gen + solve in one shot
 //!
-//! The integration is in-process: the matrix that sssp_bench produces is
+//! The integration is in-process: the matrix that dijeng produces is
 //! a `Vec<f32>` that lives in this process; it is converted once to the
 //! `Vec<i32>` brooom wants and handed in by `&Matrix`. No serialisation
 //! after that.
@@ -23,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
-#[command(name = "mpe", version, about = "mpee: routing + VRP in one process.")]
+#[command(name = "mpee-cli", version, about = "mpee: routing + VRP in one process.")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -279,11 +279,11 @@ fn cmd_download(region: &str, out_dir: &Path) -> Result<()> {
 // -------------------------------------------------------------------------
 
 fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool) -> Result<()> {
-    // Build the cache IN-PROCESS via the shared sssp_bench helper — no
+    // Build the cache IN-PROCESS via the shared dijeng helper — no
     // `cargo run` subprocess, no recompilation, and works as a distributed
     // binary (cargo/source not required). Same pipeline as Python's
     // Router.build, so the outputs (and their names) are identical.
-    let prof = sssp_bench::osm_profile::Profile::from_name(profile)
+    let prof = dijeng::osm_profile::Profile::from_name(profile)
         .ok_or_else(|| anyhow::anyhow!("unknown profile {profile:?} — use car/bicycle/foot"))?;
     eprintln!(
         "building cache from {} (profile={profile}) — seconds for a city, minutes for a country…",
@@ -291,7 +291,7 @@ fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool) -> Result<(
     );
     // cmd_build's own status lines go to stderr, so they survive `--quiet`
     // (which only silences the engine's stdout progress chatter).
-    let res = sssp_bench::build::build_cache(pbf, prof, progress, force).map_err(|e| anyhow::anyhow!(e))?;
+    let res = dijeng::build::build_cache(pbf, prof, progress, force).map_err(|e| anyhow::anyhow!(e))?;
     if res.cached {
         eprintln!("reused existing cache (pass --force to rebuild)");
     } else {
@@ -334,9 +334,9 @@ fn cmd_solve(
     // 2. mmap-load the dijeng caches (~20 µs each regardless of size).
     eprintln!("[2/5] mmap CH {}", ch_path.display());
     let t = std::time::Instant::now();
-    let pp = sssp_bench::cache_pp::load_mmap(pp_path)
+    let pp = dijeng::cache_pp::load_mmap(pp_path)
         .with_context(|| format!("load PP cache {}", pp_path.display()))?;
-    let ch = sssp_bench::cache_ch::load_mmap(ch_path)
+    let ch = dijeng::cache_ch::load_mmap(ch_path)
         .with_context(|| format!("load CH cache {}", ch_path.display()))?;
     eprintln!(
         "      loaded in {:.2} ms (graph_n={}, edges={})",
@@ -347,17 +347,17 @@ fn cmd_solve(
 
     // 3. Collect every (lat, lon) referenced by the problem: vehicles first
     //    (so vehicle starts/ends land at indices 0..2V), then jobs (V..V+J).
-    //    brooom-style JSON uses [lon, lat]; sssp_bench wants (lat, lon).
+    //    brooom-style JSON uses [lon, lat]; dijeng wants (lat, lon).
     let (coords_latlon, vehicle_starts, vehicle_ends, job_indices) = collect_coords(&problem)?;
     let n_points = coords_latlon.len();
     eprintln!("[3/5] {} coords to snap", n_points);
 
     // 4. Build RoutingService and the routing matrix in one shot.
-    //    `matrix_with_distance` runs sssp_bench's bucket-MMM: forward sweep
+    //    `matrix_with_distance` runs dijeng's bucket-MMM: forward sweep
     //    per src, backward sweep per dst, all in parallel, dual-channel
     //    (dur + dist) at no extra Dijeng cost.
-    eprintln!("[4/5] sssp_bench::matrix_with_distance ({n_points}×{n_points})");
-    let svc = sssp_bench::routing::RoutingService::new(ch, pp.coords);
+    eprintln!("[4/5] dijeng::matrix_with_distance ({n_points}×{n_points})");
+    let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
     let t = std::time::Instant::now();
     let (durs_f32, dists_f32, _snap_src, _snap_dst) =
         svc.matrix_with_distance(&coords_latlon, &coords_latlon);
@@ -602,7 +602,7 @@ fn print_summary(
     }
 
     eprintln!();
-    eprintln!("─── mpe solve summary ─────────────────────────────────────");
+    eprintln!("─── mpee solve summary ─────────────────────────────────────");
     eprintln!("jobs              : {} (assigned {} / unassigned {})", problem.jobs.len(), assigned_jobs, unassigned);
     eprintln!("vehicles          : {} (used {})", n_routes, used);
     eprintln!("matrix MMM time   : {:.2} s", mmm_secs);

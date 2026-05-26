@@ -18,8 +18,8 @@ the engine and watching how many thousand routes lay out on the map.
 ```
                 ┌──────── mpee-viz (single Rust process) ──────────────┐
                 │                                                       │
-                │  sssp_bench::cache_pp/ch::load_mmap   (mmap ~20 µs)   │
-                │  sssp_bench::routing::matrix_with_distance            │
+                │  dijeng::cache_pp/ch::load_mmap   (mmap ~20 µs)   │
+                │  dijeng::routing::matrix_with_distance            │
                 │       │                                               │
                 │       ▼   Vec<f32> in shared address space            │
                 │  one f32→i32 pass into brooom::Matrix                 │

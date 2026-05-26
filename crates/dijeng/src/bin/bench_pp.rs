@@ -4,15 +4,15 @@
 
 use std::time::Instant;
 
-use sssp_bench::auto::sssp_auto;
-use sssp_bench::bidir::bidir_dijeng;
-use sssp_bench::cache_pp;
-use sssp_bench::delta_step::{delta_stepping, delta_stepping_partitioned};
-use sssp_bench::dijeng::{dijeng_4ary, dijeng_binary};
-use sssp_bench::graph::{CsrGraph, Rng};
-use sssp_bench::osm::load_with_cache;
-use sssp_bench::osm_profile::Profile;
-use sssp_bench::preprocess::{preprocess, remap_src};
+use dijeng::auto::sssp_auto;
+use dijeng::bidir::bidir_dijeng;
+use dijeng::cache_pp;
+use dijeng::delta_step::{delta_stepping, delta_stepping_partitioned};
+use dijeng::dijeng::{dijeng_4ary, dijeng_binary};
+use dijeng::graph::{CsrGraph, Rng};
+use dijeng::osm::load_with_cache;
+use dijeng::osm_profile::Profile;
+use dijeng::preprocess::{preprocess, remap_src};
 
 fn estimate_avg_weight(g: &CsrGraph) -> f32 {
     if g.edge_w.is_empty() {
@@ -102,7 +102,7 @@ fn main() -> std::io::Result<()> {
             );
 
             let t = Instant::now();
-            let (reverse, rev_edge_dist) = sssp_bench::bidir::transpose_with_dist(
+            let (reverse, rev_edge_dist) = dijeng::bidir::transpose_with_dist(
                 &preprocessed.graph,
                 preprocessed.edge_dist.as_slice(),
             );
@@ -141,7 +141,7 @@ fn main() -> std::io::Result<()> {
                 rev_edge_dist: rev_edge_dist.into(),
                 light_count: preprocessed.light_count,
                 new_id: preprocessed.new_id,
-                coords: sssp_bench::buffer::Buffer::from(new_coords),
+                coords: dijeng::buffer::Buffer::from(new_coords),
                 delta,
             }
         }
@@ -306,7 +306,7 @@ fn remap_src_local(new_id: &[u32], old: u32) -> u32 {
 
 #[allow(dead_code)]
 fn _use_remap_src(pp: &cache_pp::PpFull, src: u32) -> u32 {
-    let pp_simple = sssp_bench::preprocess::Preprocessed {
+    let pp_simple = dijeng::preprocess::Preprocessed {
         graph: CsrGraph {
             n: pp.graph.n,
             head: pp.graph.head.clone(),
