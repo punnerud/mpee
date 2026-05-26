@@ -269,8 +269,23 @@ impl Router {
             .map_err(|e| PyRuntimeError::new_err(format!("load PP cache {pp_path}: {e}")))?;
         let ch = dijeng::cache_ch::load_mmap(ch_path)
             .map_err(|e| PyRuntimeError::new_err(format!("load CH cache {ch_path}: {e}")))?;
+        let n = pp.coords.as_slice().len();
         let coords = dijeng::buffer::Buffer::from(pp.coords.as_slice().to_vec());
-        let routing = dijeng::routing::RoutingService::new(ch, coords);
+        let mut routing = dijeng::routing::RoutingService::new(ch, coords);
+
+        // Auto-attach the street-name sidecar if present (`x.osm.pbf.names`,
+        // derived from the `.pp` path), enabling offline geocoding. Absent or
+        // mismatched → routing still works, geocoding just returns None.
+        let names_path = pp_path
+            .strip_suffix(".pp")
+            .map(|base| format!("{base}.names"))
+            .unwrap_or_else(|| format!("{pp_path}.names"));
+        if std::path::Path::new(&names_path).is_file() {
+            match dijeng::names::NameTable::load_mmap(&names_path, n) {
+                Ok(nt) => routing.set_names(nt),
+                Err(e) => eprintln!("[mpee] ignoring names sidecar {names_path}: {e}"),
+            }
+        }
         Ok(Self { routing, _pp: pp })
     }
 
@@ -309,6 +324,7 @@ impl Router {
         let d = PyDict::new_bound(py);
         d.set_item("pp_path", res.pp_path.to_string_lossy().to_string())?;
         d.set_item("ch_path", res.ch_path.to_string_lossy().to_string())?;
+        d.set_item("names_path", res.names_path.to_string_lossy().to_string())?;
         d.set_item("nodes", res.nodes)?;
         d.set_item("edges", res.edges)?;
         d.set_item("build_secs", res.build_secs)?;
@@ -344,6 +360,36 @@ impl Router {
     fn snap(&self, lat: f32, lon: f32) -> (f32, f32) {
         let csr = self.routing.nearest_node(lat, lon);
         self.routing.coords[csr as usize]
+    }
+
+    /// Reverse-geocode: the street name nearest to a (lat, lon). Returns the
+    /// street name string, or `None` if no `.names` sidecar is loaded or the
+    /// nearest road node has no name. The sidecar is produced automatically by
+    /// `Router.build` / `mpee build` (no separate indexing step).
+    fn reverse(&self, lat: f32, lon: f32) -> Option<String> {
+        self.routing.reverse(lat, lon).map(|s| s.to_string())
+    }
+
+    /// Forward-geocode: look up a street by name (case-insensitive; a
+    /// substring matches, e.g. `"karl johan"` finds `"Karl Johans gate"`).
+    /// Returns a dict `{"name", "lat", "lon"}` for the matched street, or
+    /// `None` if nothing matches / no sidecar is loaded.
+    fn geocode<'py>(&self, py: Python<'py>, query: &str) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match self.routing.geocode(query) {
+            Some((lat, lon, name)) => {
+                let d = PyDict::new_bound(py);
+                d.set_item("name", name)?;
+                d.set_item("lat", lat)?;
+                d.set_item("lon", lon)?;
+                Ok(Some(d))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Whether a street-name sidecar is loaded (i.e. geocoding is available).
+    fn has_names(&self) -> bool {
+        self.routing.has_names()
     }
 
     /// Bounding box (min_lat, min_lon, max_lat, max_lon) of the loaded graph.

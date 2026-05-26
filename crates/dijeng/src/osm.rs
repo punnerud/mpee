@@ -60,7 +60,9 @@ pub fn load_with_cache<P: AsRef<Path>>(
         }
     }
 
-    let (g, coords, edge_dist) = load_osm_routing_par(pbf, profile)?;
+    // The .csr cache stores routing data only; street names are reconstructed
+    // by `build::build_cache`, which calls `load_osm_routing_par` directly.
+    let (g, coords, edge_dist, _names, _name_pool) = load_osm_routing_par(pbf, profile)?;
     let t = std::time::Instant::now();
     if let Err(e) = cache::save(cache_p, &g, &coords, &edge_dist) {
         eprintln!("[osm/{}] failed to save cache: {e}", profile.name());
@@ -85,14 +87,14 @@ pub fn load_with_cache<P: AsRef<Path>>(
 pub fn load_osm_routing_par<P: AsRef<Path>>(
     path: P,
     profile: Profile,
-) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>)> {
+) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>)> {
     let path = path.as_ref();
     println!("[osm] opening {} (parallel)", path.display());
 
     let blob_reader = BlobReader::from_path(path).map_err(io_err)?;
     let t = std::time::Instant::now();
 
-    type Acc = (Vec<(Vec<i64>, OneWay, f32)>, Vec<(i64, f32, f32)>);
+    type Acc = (Vec<WayRec>, Vec<(i64, f32, f32)>);
 
     let (ways, nodes_data) = blob_reader
         .par_bridge()
@@ -103,7 +105,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
         })
         .map(|block| -> Acc {
             // Reasonable pre-allocation — a typical PrimitiveBlock has 8000 elements.
-            let mut ways: Vec<(Vec<i64>, OneWay, f32)> = Vec::with_capacity(64);
+            let mut ways: Vec<WayRec> = Vec::with_capacity(64);
             let mut nodes: Vec<(i64, f32, f32)> = Vec::with_capacity(8000);
             for elem in block.elements() {
                 match elem {
@@ -118,10 +120,12 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
                         let mut maxspeed: Option<f32> = None;
                         let mut oneway: OneWay = OneWay::No;
                         let mut roundabout = false;
+                        let mut name: Option<&str> = None;
                         for (k, v) in w.tags() {
                             match k {
                                 "highway" => hw = Some(v),
                                 "maxspeed" => maxspeed = parse_maxspeed(v),
+                                "name" => name = Some(v),
                                 "oneway" => match v {
                                     "yes" | "true" | "1" => oneway = OneWay::Forward,
                                     "-1" | "reverse" => oneway = OneWay::Backward,
@@ -146,7 +150,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
                                 if refs.len() >= 2 {
                                     let speed_kmh = profile.speed_kmh(h, maxspeed);
                                     let speed_mps = kmh_to_mps(speed_kmh).max(0.5);
-                                    ways.push((refs, oneway, speed_mps));
+                                    ways.push((refs, oneway, speed_mps, name.map(|s| s.into())));
                                 }
                             }
                         }
@@ -191,7 +195,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
 pub fn load_osm_routing<P: AsRef<Path>>(
     path: P,
     profile: Profile,
-) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>)> {
+) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>)> {
     let path = path.as_ref();
     println!("[osm] opening {}", path.display());
 
@@ -199,7 +203,7 @@ pub fn load_osm_routing<P: AsRef<Path>>(
     // for London ~5-10M nodes × 16 bytes ≈ 80-160 MB — but it lets us
     // read the file in a single pass.
     let mut node_coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(8_000_000);
-    let mut ways: Vec<(Vec<i64>, OneWay, f32)> = Vec::with_capacity(300_000);
+    let mut ways: Vec<WayRec> = Vec::with_capacity(300_000);
     let mut total_nodes = 0usize;
     let mut total_ways = 0usize;
     let mut kept_ways = 0usize;
@@ -222,10 +226,12 @@ pub fn load_osm_routing<P: AsRef<Path>>(
                 let mut maxspeed: Option<f32> = None;
                 let mut oneway: OneWay = OneWay::No;
                 let mut roundabout = false;
+                let mut name: Option<&str> = None;
                 for (k, v) in w.tags() {
                     match k {
                         "highway" => hw = Some(v),
                         "maxspeed" => maxspeed = parse_maxspeed(v),
+                        "name" => name = Some(v),
                         "oneway" => match v {
                             "yes" | "true" | "1" => oneway = OneWay::Forward,
                             "-1" | "reverse" => oneway = OneWay::Backward,
@@ -250,7 +256,7 @@ pub fn load_osm_routing<P: AsRef<Path>>(
                         if refs.len() >= 2 {
                             let speed_kmh = profile.speed_kmh(h, maxspeed);
                             let speed_mps = kmh_to_mps(speed_kmh).max(0.5);
-                            ways.push((refs, oneway, speed_mps));
+                            ways.push((refs, oneway, speed_mps, name.map(|s| s.into())));
                             kept_ways += 1;
                         }
                     }
@@ -271,17 +277,41 @@ pub fn load_osm_routing<P: AsRef<Path>>(
 }
 
 fn finalize_csr(
-    ways: Vec<(Vec<i64>, OneWay, f32)>,
+    ways: Vec<WayRec>,
     node_coords: HashMap<i64, (f32, f32)>,
-) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>)> {
+) -> std::io::Result<(CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>)> {
+    use crate::names::NO_NAME;
     let t = std::time::Instant::now();
     let mut id_map: HashMap<i64, u32> = HashMap::with_capacity(1_500_000);
     let mut coords: Vec<(f32, f32)> = Vec::with_capacity(1_500_000);
+    // Per-node street name: `node_name[csr_id]` indexes into `name_pool`, or
+    // `NO_NAME`. Grown in lockstep with `coords`. The pool dedups the distinct
+    // street names (a city has only a few thousand). First named way to touch
+    // a node wins (matters only at intersections).
+    let mut node_name: Vec<u32> = Vec::with_capacity(1_500_000);
+    let mut name_pool: Vec<String> = Vec::new();
+    let mut name_map: HashMap<String, u32> = HashMap::new();
     // (u, v, duration_s, distance_m). The graph's `edge_w` will be duration;
     // the parallel `edge_dist` array is the metres returned alongside.
     let mut edges: Vec<(u32, u32, f32, f32)> = Vec::with_capacity(2 * ways.len() * 4);
     let mut dropped = 0usize;
-    for (refs, oneway, speed_mps) in &ways {
+    for (refs, oneway, speed_mps, wname) in &ways {
+        // Intern this way's street name once.
+        let wname_id: u32 = match wname {
+            Some(s) => {
+                let key: &str = s;
+                match name_map.get(key) {
+                    Some(&id) => id,
+                    None => {
+                        let id = name_pool.len() as u32;
+                        name_pool.push(key.to_string());
+                        name_map.insert(key.to_string(), id);
+                        id
+                    }
+                }
+            }
+            None => NO_NAME,
+        };
         for win in refs.windows(2) {
             let a_idx = match id_map.get(&win[0]) {
                 Some(&i) => i,
@@ -289,6 +319,7 @@ fn finalize_csr(
                     Some(&xy) => {
                         let i = coords.len() as u32;
                         coords.push(xy);
+                        node_name.push(NO_NAME);
                         id_map.insert(win[0], i);
                         i
                     }
@@ -304,6 +335,7 @@ fn finalize_csr(
                     Some(&xy) => {
                         let i = coords.len() as u32;
                         coords.push(xy);
+                        node_name.push(NO_NAME);
                         id_map.insert(win[1], i);
                         i
                     }
@@ -313,6 +345,15 @@ fn finalize_csr(
                     }
                 },
             };
+            // Stamp the street name on both endpoints (first named way wins).
+            if wname_id != NO_NAME {
+                if node_name[a_idx as usize] == NO_NAME {
+                    node_name[a_idx as usize] = wname_id;
+                }
+                if node_name[b_idx as usize] == NO_NAME {
+                    node_name[b_idx as usize] = wname_id;
+                }
+            }
             if a_idx == b_idx {
                 continue;
             }
@@ -340,13 +381,18 @@ fn finalize_csr(
     drop(node_coords);
 
     let (g, edge_dist) = CsrGraph::from_edges_with_dist(coords.len(), &edges);
+    debug_assert_eq!(node_name.len(), coords.len());
+    let named = node_name.iter().filter(|&&id| id != crate::names::NO_NAME).count();
     println!(
-        "[osm] CSR: n = {}, m = {}, avg_deg = {:.2}",
+        "[osm] CSR: n = {}, m = {}, avg_deg = {:.2} — {} distinct street names, {}/{} nodes named",
         g.n,
         g.m(),
-        g.m() as f32 / g.n.max(1) as f32
+        g.m() as f32 / g.n.max(1) as f32,
+        name_pool.len(),
+        named,
+        g.n,
     );
-    Ok((g, coords, edge_dist))
+    Ok((g, coords, edge_dist, node_name, name_pool))
 }
 
 #[derive(Clone, Copy)]
@@ -355,6 +401,10 @@ enum OneWay {
     Forward,
     Backward,
 }
+
+/// A drivable way as collected during parsing: node refs, direction, speed
+/// (m/s) and the OSM `name=*` tag (the street name), used for geocoding.
+type WayRec = (Vec<i64>, OneWay, f32, Option<Box<str>>);
 
 #[inline]
 fn haversine_m(lat1: f32, lon1: f32, lat2: f32, lon2: f32) -> f32 {

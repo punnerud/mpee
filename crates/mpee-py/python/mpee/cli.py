@@ -3,6 +3,8 @@
 Subcommands:
     route      point-to-point driving route (distance + time)
     optimize   multi-vehicle delivery optimization (VRP) over your own stops
+    reverse    reverse-geocode: nearest street name to a LAT,LON point
+    geocode    forward-geocode: look up a street by name -> its LAT,LON
     download   fetch an OSM extract from Geofabrik
     build      preprocess a .osm.pbf into a routable .pp + .ch cache
 
@@ -114,6 +116,41 @@ def cmd_optimize(args) -> int:
     return 0
 
 
+def cmd_reverse(args) -> int:
+    from . import Router
+    pp, ch = _resolve_cache(args)
+    r = Router(pp, ch)
+    if not r.has_names():
+        raise SystemExit(
+            f"error: no .names sidecar next to {pp} — rebuild the cache "
+            "(`mpee build`) with this version to enable geocoding")
+    name = r.reverse(args.point[0], args.point[1])
+    if args.json:
+        print(json.dumps({"name": name}))
+        return 0
+    print(name if name else "(no street name on the nearest road)")
+    return 0
+
+
+def cmd_geocode(args) -> int:
+    from . import Router
+    pp, ch = _resolve_cache(args)
+    r = Router(pp, ch)
+    if not r.has_names():
+        raise SystemExit(
+            f"error: no .names sidecar next to {pp} — rebuild the cache "
+            "(`mpee build`) with this version to enable geocoding")
+    hit = r.geocode(args.query)
+    if hit is None:
+        raise SystemExit(f"no street matching {args.query!r} found in this area")
+    if args.json:
+        print(json.dumps(hit))
+        return 0
+    print(hit["name"])
+    print(f"{hit['lat']:.6f},{hit['lon']:.6f}")
+    return 0
+
+
 def cmd_download(args) -> int:
     import urllib.request
 
@@ -178,6 +215,18 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--json", action="store_true", help="emit JSON")
     _add_cache_args(po)
     po.set_defaults(func=cmd_optimize)
+
+    prv = sub.add_parser("reverse", help="reverse-geocode: nearest street name to a point")
+    prv.add_argument("point", type=_latlon, metavar="LAT,LON")
+    prv.add_argument("--json", action="store_true", help="emit JSON")
+    _add_cache_args(prv)
+    prv.set_defaults(func=cmd_reverse)
+
+    pg = sub.add_parser("geocode", help="forward-geocode: street name -> LAT,LON")
+    pg.add_argument("query", help="street name (case-insensitive; substring matches)")
+    pg.add_argument("--json", action="store_true", help="emit JSON")
+    _add_cache_args(pg)
+    pg.set_defaults(func=cmd_geocode)
 
     pd = sub.add_parser("download", help="fetch an OSM extract from Geofabrik")
     pd.add_argument("slug", help="Geofabrik path, e.g. europe/great-britain/england/greater-london")

@@ -10,6 +10,7 @@ data leaving your machine:
 
 - 🧭 **Point-to-point routes** — driving distance + time between two coordinates.
 - 🚚 **Multi-vehicle optimization (VRP)** — best routes for *N* vehicles over your own stops, with capacities.
+- 🔎 **Offline geocoding** — street name ⇄ coordinate, reusing the same cache (no extra index; street-level).
 - 🗺️ **Bring your own area** — any OpenStreetMap extract sized to where you operate (a city, a region). Not a route-anywhere-on-Earth offline map: one downloaded area, one cache.
 - ⚡ **Fast & small** — a Rust engine (CH routing + `brooom` VRP solver) using CPU **and** GPU; the engine itself is under ~50 MB (the map cache scales with the area).
 
@@ -87,6 +88,28 @@ Tune the fleet with `--vehicles` and `--capacity`; bound the search with
 `--time SECONDS`; pin the depot with `--depot LAT,LON` (defaults to the
 centroid of the stops).
 
+## 4. Look up street names (geocoding)
+
+`mpee build` also writes a small `.names` sidecar next to the cache, so the
+same area answers street ⇄ coordinate lookups — offline, with **no separate
+index**. Reverse reuses the routing snap; forward scans the area's distinct
+street names.
+
+```bash
+# coordinate → nearest street name
+mpee reverse 51.5080,-0.1281 --cache data/greater-london.osm.pbf
+#  → Trafalgar Square
+
+# street name → coordinate (case-insensitive; substring matches)
+mpee geocode "Baker Street" --cache data/greater-london.osm.pbf
+#  → Baker Street
+#  → 51.522072,-0.157497
+```
+
+Street-level only: the name lives on the OSM road, so you get the street and
+its coordinate, not a house number. The sidecar is independently deletable if
+you only need routing.
+
 ---
 
 ## Use it from Python
@@ -127,6 +150,11 @@ for route in plan["routes"]:
 r.snap(51.50, -0.12)          # nearest routable road node
 r.table(stops)                # full N×N duration + distance table
 r.bbox()                      # coverage of the loaded map
+
+# Geocoding (offline, if a .names sidecar was built — see CLI section 4):
+r.reverse(51.5080, -0.1281)   # → "Trafalgar Square" (or None)
+r.geocode("Baker Street")     # → {"name": ..., "lat": ..., "lon": ...} (or None)
+r.has_names()                 # → True if geocoding is available
 ```
 
 `Router.build("map.osm.pbf", profile="car")` builds a cache from Python too

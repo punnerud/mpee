@@ -19,6 +19,10 @@ pub struct RoutingService {
     inv_perm: Buffer<u32>,
     /// Spatial index over `coords` for sub-100 µs nearest-vertex lookup.
     snap_grid: LatLonGrid,
+    /// Optional street-name sidecar, enabling offline geocoding. Reverse
+    /// lookups reuse `snap_grid`; forward lookups scan the distinct names.
+    /// `None` when no `.names` sidecar was attached.
+    names: Option<crate::names::NameTable>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +62,40 @@ impl RoutingService {
             coords,
             inv_perm: inv.into(),
             snap_grid,
+            names: None,
         }
+    }
+
+    /// Attach a street-name sidecar (built next to the `.pp`/`.ch` caches),
+    /// enabling `reverse` and `geocode`. The sidecar's node count must match
+    /// the loaded graph; `load_mmap` already enforces that.
+    pub fn set_names(&mut self, names: crate::names::NameTable) {
+        self.names = Some(names);
+    }
+
+    /// Whether a street-name sidecar is loaded (geocoding available).
+    pub fn has_names(&self) -> bool {
+        self.names.is_some()
+    }
+
+    /// Reverse-geocode: the street name nearest to `(lat, lon)`. Snaps to the
+    /// nearest road node (the same grid `route` uses) and returns that node's
+    /// street name. `None` if no sidecar is loaded or the node has no name.
+    pub fn reverse(&self, lat: f32, lon: f32) -> Option<&str> {
+        let node = self.nearest_node(lat, lon);
+        self.names.as_ref()?.name_of(node)
+    }
+
+    /// Forward-geocode: find a street by name and return its coordinate plus
+    /// the matched street name. Case-insensitive; an exact match wins, else
+    /// the first street whose name contains the query. `None` if no sidecar
+    /// is loaded or nothing matches.
+    pub fn geocode(&self, query: &str) -> Option<(f32, f32, &str)> {
+        let names = self.names.as_ref()?;
+        let node = names.find(query)?;
+        let (lat, lon) = self.coords[node as usize];
+        let name = names.name_of(node)?;
+        Some((lat, lon, name))
     }
 
     /// Nearest road node by squared planar distance (longitude scaled by

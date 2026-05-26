@@ -15,6 +15,7 @@ pub mod farthest_first;
 pub mod geo_index;
 pub mod graph;
 pub mod knn;
+pub mod names;
 pub mod osm;
 pub mod osm_profile;
 pub mod paged;

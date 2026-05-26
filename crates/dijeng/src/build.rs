@@ -21,6 +21,8 @@ pub struct BuildResult {
     pub csr_path: PathBuf,
     pub pp_path: PathBuf,
     pub ch_path: PathBuf,
+    /// Street-name sidecar for offline geocoding (written on a full build).
+    pub names_path: PathBuf,
     pub nodes: usize,
     pub edges: usize,
     /// Wall time of the CH-contraction step, in seconds (0.0 when reused).
@@ -88,7 +90,7 @@ pub fn build_cache(
     force: bool,
     keep_csr: bool,
 ) -> Result<BuildResult, String> {
-    use crate::{cache_ch, cache_pp, ch, osm, preprocess::preprocess};
+    use crate::{cache, cache_ch, cache_pp, ch, names, osm, preprocess::preprocess};
 
     let suffix = if profile == Profile::Car {
         String::new()
@@ -99,6 +101,7 @@ pub fn build_cache(
     let csr_path = PathBuf::from(format!("{base}.csr"));
     let pp_path = PathBuf::from(format!("{base}.pp"));
     let ch_path = PathBuf::from(format!("{base}.ch"));
+    let names_path = PathBuf::from(format!("{base}.names"));
 
     // Reuse an existing cache unless asked to rebuild — repeated library calls
     // (e.g. from an agent) then return instantly instead of re-contracting.
@@ -110,6 +113,7 @@ pub fn build_cache(
             csr_path,
             pp_path,
             ch_path,
+            names_path,
             nodes,
             edges: 0,
             build_secs: 0.0,
@@ -120,8 +124,17 @@ pub fn build_cache(
     // Suppress the engine's progress chatter when not wanted.
     let _silencer = StdoutSilencer::new(!progress);
 
-    let (graph, coords, edge_dist) = osm::load_with_cache(pbf, csr_path.as_path(), profile)
-        .map_err(|e| format!("osm load: {e}"))?;
+    // Parse directly (not via load_with_cache) so we reconstruct street names
+    // in the same pass. A fresh build therefore always re-parses rather than
+    // reading an existing `.csr`; the `.csr` is only re-written when keep_csr
+    // is set, as a parse accelerator for other tools.
+    let (graph, coords, edge_dist, node_name, name_pool) =
+        osm::load_osm_routing_par(pbf, profile).map_err(|e| format!("osm load: {e}"))?;
+    if keep_csr {
+        if let Err(e) = cache::save(&csr_path, &graph, &coords, edge_dist.as_slice()) {
+            eprintln!("[build] failed to write .csr accelerator: {e}");
+        }
+    }
 
     // delta = average edge weight / average degree (matches bench_pp / iOS).
     let avg_w = if graph.edge_w.is_empty() {
@@ -143,8 +156,12 @@ pub fn build_cache(
     let (reverse, rev_edge_dist) =
         crate::bidir::transpose_with_dist(&pre.graph, pre.edge_dist.as_slice());
     let mut new_coords = vec![(0.0f32, 0.0f32); graph.n];
+    // Street names follow the same node permutation as coords, so the sidecar
+    // stays aligned with the `.pp` coords (and hence the snap grid).
+    let mut new_name_id = vec![names::NO_NAME; graph.n];
     for old in 0..graph.n {
         new_coords[pre.new_id[old] as usize] = coords[old];
+        new_name_id[pre.new_id[old] as usize] = node_name[old];
     }
     cache_pp::save(
         pp_path.as_path(),
@@ -164,8 +181,14 @@ pub fn build_cache(
     let build_secs = t.elapsed().as_secs_f64();
     cache_ch::save(ch_path.as_path(), &h).map_err(|e| format!("ch save: {e}"))?;
 
+    // Street-name sidecar for offline geocoding (deletable when only routing
+    // is needed — it never affects route/solve).
+    if let Err(e) = names::save(&names_path, &new_name_id, &name_pool) {
+        eprintln!("[build] failed to write names sidecar: {e}");
+    }
+
     // The .csr is only a PBF-parse accelerator for rebuilds; routing/solve use
-    // .pp + .ch. Drop it by default to keep the on-disk footprint small.
+    // .pp + .ch. Drop any stale one by default to keep the footprint small.
     if !keep_csr {
         let _ = std::fs::remove_file(&csr_path);
     }
@@ -174,6 +197,7 @@ pub fn build_cache(
         csr_path,
         pp_path,
         ch_path,
+        names_path,
         nodes: pre.graph.n,
         edges: pre.graph.m(),
         build_secs,

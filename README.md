@@ -40,6 +40,10 @@ mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london-latest.os
 mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
     --cache data/greater-london-latest.osm.pbf
 #   → 50 stops, 3 vehicles used, 60.0 km total (solved in 4.6s)
+
+# 4. Geocode within the same area, offline (street ⇄ coordinate):
+mpee reverse 51.5080,-0.1281 --cache data/greater-london-latest.osm.pbf   # → Trafalgar Square
+mpee geocode "Baker Street"  --cache data/greater-london-latest.osm.pbf   # → 51.522072,-0.157497
 ```
 
 From Python:
@@ -49,6 +53,8 @@ import mpee
 r = mpee.Router("data/greater-london-latest.osm.pbf.pp", "data/greater-london-latest.osm.pbf.ch")
 leg = r.route(51.5080, -0.1281, 51.5138, -0.0984)     # {distance_km, duration_min, ...}
 plan = r.optimize(stops, vehicles=5, capacity=20)      # multi-vehicle VRP
+name = r.reverse(51.5080, -0.1281)                     # → "Trafalgar Square" (offline geocoding)
+hit  = r.geocode("Baker Street")                       # → {"name", "lat", "lon"}
 ```
 
 See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
@@ -56,10 +62,10 @@ See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
 
 > **Heads-up: there are two CLIs, both named `mpee`.** The commands above are
 > the **pip package** (`pip install mpee` → verbs `route` / `optimize` /
-> `download` / `build`). The Rust workspace binary
+> `reverse` / `geocode` / `download` / `build`). The Rust workspace binary
 > (`cargo run -p mpee-cli`, i.e. `./target/release/mpee-cli`) is a *different* tool
-> with VRP-focused verbs (`gen` / `route` / `download` / `build` / `solve` /
-> `pipeline`). They take different inputs (e.g. `mpee-cli solve` reads VROOM
+> with VRP-focused verbs (`gen` / `route` / `reverse` / `geocode` / `download` /
+> `build` / `solve` / `pipeline`). They take different inputs (e.g. `mpee-cli solve` reads VROOM
 > JSON; the pip CLI takes `--stops`). Use the pip package for the examples on
 > this page.
 

@@ -142,6 +142,35 @@ enum Cmd {
         pp: Option<PathBuf>,
     },
 
+    /// Reverse-geocode: the nearest street name to a LAT,LON point. Offline,
+    /// using the `.names` sidecar built alongside the cache (no extra index).
+    Reverse {
+        /// Point as "LAT,LON" (e.g. 59.913,10.752). Negative values OK.
+        #[arg(allow_hyphen_values = true)]
+        point: String,
+        /// Cache prefix — uses <prefix>.pp + <prefix>.names. Or pass --ch/--pp.
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        #[arg(long)]
+        ch: Option<PathBuf>,
+        #[arg(long)]
+        pp: Option<PathBuf>,
+    },
+
+    /// Forward-geocode: look up a street by name → its LAT,LON. Offline;
+    /// case-insensitive and matches substrings (e.g. "karl johan").
+    Geocode {
+        /// Street name to look up.
+        query: String,
+        /// Cache prefix — uses <prefix>.pp + <prefix>.names. Or pass --ch/--pp.
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        #[arg(long)]
+        ch: Option<PathBuf>,
+        #[arg(long)]
+        pp: Option<PathBuf>,
+    },
+
     /// End-to-end: gen + solve.
     Pipeline {
         #[arg(long, default_value = "london")]
@@ -189,6 +218,14 @@ fn main() -> Result<()> {
         Cmd::Route { from, to, cache, ch, pp } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             cmd_route(parse_lat_lon(&from)?, parse_lat_lon(&to)?, &ch, &pp)
+        }
+        Cmd::Reverse { point, cache, ch, pp } => {
+            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
+            cmd_reverse(parse_lat_lon(&point)?, &ch, &pp)
+        }
+        Cmd::Geocode { query, cache, ch, pp } => {
+            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
+            cmd_geocode(&query, &ch, &pp)
         }
         Cmd::Pipeline {
             region, n_jobs, n_vehicles, seed, capacity, cache, ch, pp,
@@ -415,6 +452,9 @@ fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool, keep_csr: b
     }
     eprintln!("  pp: {}", res.pp_path.display());
     eprintln!("  ch: {}", res.ch_path.display());
+    if !res.cached && res.names_path.is_file() {
+        eprintln!("  names: {} (street names for `mpee reverse`/`geocode` — delete to save space)", res.names_path.display());
+    }
     Ok(())
 }
 
@@ -448,6 +488,78 @@ fn cmd_route(from: (f64, f64), to: (f64, f64), ch_path: &Path, pp_path: &Path) -
             "WARN: a point snapped >500 m to the road network — check you passed LAT,LON \
              (not lon,lat) and that the cache covers this area"
         );
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// geocode: reverse (point → street) and forward (street → point), offline.
+// Both reuse the snap grid the router already builds; the street names come
+// from the `.names` sidecar written by `mpee build`. No separate index.
+// -------------------------------------------------------------------------
+
+/// Open a routing service from a cache pair, attaching the `.names` sidecar
+/// (derived from the PP path) when one is present.
+fn load_service_with_names(ch_path: &Path, pp_path: &Path) -> Result<dijeng::routing::RoutingService> {
+    let pp = dijeng::cache_pp::load_mmap(pp_path)
+        .with_context(|| format!("load PP cache {}", pp_path.display()))?;
+    let ch = dijeng::cache_ch::load_mmap(ch_path)
+        .with_context(|| format!("load CH cache {}", ch_path.display()))?;
+    let n = pp.coords.as_slice().len();
+    let mut svc = dijeng::routing::RoutingService::new(ch, pp.coords);
+
+    let pp_str = pp_path.to_string_lossy();
+    let names_path = pp_str
+        .strip_suffix(".pp")
+        .map(|b| format!("{b}.names"))
+        .unwrap_or_else(|| format!("{pp_str}.names"));
+    if Path::new(&names_path).is_file() {
+        match dijeng::names::NameTable::load_mmap(&names_path, n) {
+            Ok(nt) => svc.set_names(nt),
+            Err(e) => eprintln!("WARN: ignoring names sidecar {names_path}: {e}"),
+        }
+    }
+    Ok(svc)
+}
+
+fn cmd_reverse(point: (f64, f64), ch_path: &Path, pp_path: &Path) -> Result<()> {
+    let svc = load_service_with_names(ch_path, pp_path)?;
+    if !svc.has_names() {
+        bail!(
+            "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \
+             version to enable geocoding",
+            pp_path.display()
+        );
+    }
+    let (lat, lon) = (point.0 as f32, point.1 as f32);
+    let snapped = svc.coords[svc.nearest_node(lat, lon) as usize];
+    let snap_d = haversine_m(point, (snapped.0 as f64, snapped.1 as f64));
+    match svc.reverse(lat, lon) {
+        Some(name) => println!("{name}"),
+        None => println!("(no street name on the nearest road)"),
+    }
+    println!("nearest road: ({:.5}, {:.5})  [{:.0} m away]", snapped.0, snapped.1, snap_d);
+    if snap_d > 500.0 {
+        eprintln!("WARN: nearest road is >500 m away — check LAT,LON order and cache coverage");
+    }
+    Ok(())
+}
+
+fn cmd_geocode(query: &str, ch_path: &Path, pp_path: &Path) -> Result<()> {
+    let svc = load_service_with_names(ch_path, pp_path)?;
+    if !svc.has_names() {
+        bail!(
+            "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \
+             version to enable geocoding",
+            pp_path.display()
+        );
+    }
+    match svc.geocode(query) {
+        Some((lat, lon, name)) => {
+            println!("{name}");
+            println!("{lat:.6},{lon:.6}");
+        }
+        None => bail!("no street matching {query:?} found in this area"),
     }
     Ok(())
 }
