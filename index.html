@@ -162,18 +162,17 @@
     <div class="eyebrow">MPEE · Rust routing engine</div>
     <h1>Offline route calculations &amp; optimization</h1>
     <p class="lede">
-      A self-contained engine you drive from Python or a command line. Download
-      <strong>one operating area</strong> once — a city, a county, a delivery
-      district — then compute routes, multi-vehicle delivery plans, and street
-      geocoding fully <strong>offline</strong>: no API keys, no per-request
-      billing, no data leaving your machine.
+      One Rust engine that replaces the <strong>OSRM&nbsp;+&nbsp;VROOM</strong>
+      stack — routing and vehicle-routing optimization in a single process.
+      Download one area once, then route, optimize, and geocode it
+      <strong>fully offline</strong>.
     </p>
     <p class="punch">
-      Solve a <b>50,000-customer</b> vehicle-routing problem on a laptop
-      <b>without ever building the full distance matrix</b> — that
-      50,000&nbsp;×&nbsp;50,000 matrix alone is ~10&nbsp;GB. The Rust core
-      streams it on <b>CPU and GPU (Metal on&nbsp;Mac)</b>, so memory stays flat
-      and routes come out shorter than VROOM at equal runtime.
+      A 50,000&nbsp;×&nbsp;50,000 distance matrix is <b>~10&nbsp;GB</b>
+      materialised — what OSRM&nbsp;+&nbsp;VROOM build. MPEE never does: it
+      <b>streams it in ~500&nbsp;MB (≈20× less memory)</b>, finishes it in
+      <b>94&nbsp;s</b> where OSRM runs out of RAM, and runs the whole VRP search
+      on <b>CPU&nbsp;+&nbsp;GPU (Metal on&nbsp;Mac)</b>.
     </p>
     <div class="badges">
       <a href="https://pypi.org/project/mpee/"><img src="https://img.shields.io/pypi/v/mpee.svg" alt="PyPI version of mpee"></a>
@@ -187,10 +186,10 @@
       <a class="btn ghost" href="https://github.com/punnerud/mpee">GitHub</a>
     </div>
     <div class="stats">
-      <div class="stat"><div class="n">50,000</div><div class="l">-customer VRP, on a laptop</div></div>
-      <div class="stat"><div class="n">No N×N matrix</div><div class="l">streamed, not stored — a 50k² matrix ≈ 10 GB, skipped</div></div>
-      <div class="stat"><div class="n">CPU + GPU</div><div class="l">GPU-accelerated (Metal on Mac)</div></div>
-      <div class="stat"><div class="n">&lt; 50 MB</div><div class="l">engine binary, fully offline</div></div>
+      <div class="stat"><div class="n">~10 GB → ≤500 MB</div><div class="l">50k×50k matrix, streamed not stored — ≈20× less RAM</div></div>
+      <div class="stat"><div class="n">94 s</div><div class="l">to build that 50k² matrix — OSRM runs out of memory</div></div>
+      <div class="stat"><div class="n">CPU + GPU</div><div class="l">GPU-accelerated VRP search (Metal on Mac)</div></div>
+      <div class="stat"><div class="n">50,000</div><div class="l">-customer VRP on a laptop, fully offline</div></div>
     </div>
   </div>
 </header>

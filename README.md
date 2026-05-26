@@ -1,12 +1,12 @@
 # MPEE — Offline route calculations and optimization
 
-An open, unified Rust engine for routing and vehicle-routing optimisation — an
-alternative stack to **OSRM** + **VROOM**, where both engines run in the same
-process and share memory directly. It's built for **one operating area**:
-download that area's map once (a city, a county, a delivery district) and then
-route and optimize within it fully **offline** — no API keys, no per-request
-billing, no data leaving your machine. It uses CPU **and** GPU and less memory
-than the alternatives; the engine binary is under ~50 MB.
+**One Rust engine that replaces the OSRM + VROOM stack** — routing *and*
+vehicle-routing optimization in a single process, sharing memory directly.
+Download one area once, then route, optimize, and geocode it **fully offline**.
+
+⚡ A 50,000 × 50,000 distance matrix is **~10 GB** materialised (what OSRM + VROOM
+build). MPEE never does — it **streams it in ~500 MB (≈20× less memory)** and
+solves the fleet on **CPU + GPU**.
 
 ## How it compares (measured, Apple M3 Pro)
 
