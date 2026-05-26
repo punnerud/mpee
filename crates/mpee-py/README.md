@@ -48,6 +48,12 @@ After this you are fully offline. The cache is reusable forever — a re-run of
 `mpee build` reuses it instantly (pass `--force` to rebuild, `--quiet` to
 hush progress).
 
+> **Cache size scales with map area.** A city is tens of MB; a whole country
+> is gigabytes (e.g. Norway ≈ 3 GB of `.pp`+`.ch`). For a phone or other tight
+> target, build a **city or bbox extract** (e.g. a small region from
+> [BBBike](https://download.bbbike.org/osm/)), not a country. `build` deletes
+> the intermediate `.csr` by default (`--keep-csr` to keep it for fast rebuilds).
+
 ## 2. Route from A to B
 
 ```bash

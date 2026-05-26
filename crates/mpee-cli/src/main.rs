@@ -89,6 +89,9 @@ enum Cmd {
         /// Rebuild even if a cache already exists (default: reuse it).
         #[arg(long)]
         force: bool,
+        /// Keep the intermediate .csr file (default: delete it to save disk).
+        #[arg(long)]
+        keep_csr: bool,
     },
 
     /// Solve a Vroom-compatible problem in-process against a CH cache.
@@ -178,7 +181,7 @@ fn main() -> Result<()> {
             cmd_gen(&region, center, radius_km, n_jobs, n_vehicles, capacity, seed, &output)
         }
         Cmd::Download { region, out_dir } => cmd_download(&region, &out_dir),
-        Cmd::Build { pbf, profile, quiet, force } => cmd_build(&pbf, &profile, !quiet, force),
+        Cmd::Build { pbf, profile, quiet, force, keep_csr } => cmd_build(&pbf, &profile, !quiet, force, keep_csr),
         Cmd::Solve { problem, cache, ch, pp, time_limit_s, multi_start, output } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             cmd_solve(&problem, &ch, &pp, time_limit_s, multi_start, output.as_deref())
@@ -388,7 +391,7 @@ fn cmd_download(region: &str, out_dir: &Path) -> Result<()> {
 // and parallelised. The unified CLI keeps them visible as one command.
 // -------------------------------------------------------------------------
 
-fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool) -> Result<()> {
+fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool, keep_csr: bool) -> Result<()> {
     // Build the cache IN-PROCESS via the shared dijeng helper — no
     // `cargo run` subprocess, no recompilation, and works as a distributed
     // binary (cargo/source not required). Same pipeline as Python's
@@ -401,7 +404,7 @@ fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool) -> Result<(
     );
     // cmd_build's own status lines go to stderr, so they survive `--quiet`
     // (which only silences the engine's stdout progress chatter).
-    let res = dijeng::build::build_cache(pbf, prof, progress, force).map_err(|e| anyhow::anyhow!(e))?;
+    let res = dijeng::build::build_cache(pbf, prof, progress, force, keep_csr).map_err(|e| anyhow::anyhow!(e))?;
     if res.cached {
         eprintln!("reused existing cache (pass --force to rebuild)");
     } else {
@@ -525,11 +528,14 @@ fn cmd_solve(
         }
     );
     let cells = (n_points as u64).pow(2);
-    eprintln!(
-        "      matrix built in {:.2} s ({:.1} M cells/s)",
-        mmm_secs,
-        cells as f64 / mmm_secs / 1e6,
-    );
+    let mcells_s = cells as f64 / mmm_secs / 1e6;
+    // Throughput is only meaningful for big matrices; for tiny ones it rounds
+    // to 0.0, so just report the cell count there.
+    if mcells_s >= 1.0 {
+        eprintln!("      matrix built in {:.2} s ({:.0} M cells/s)", mmm_secs, mcells_s);
+    } else {
+        eprintln!("      matrix built in {:.2} s ({cells} cells)", mmm_secs);
+    }
 
     // 5. Convert f32 → i32 (brooom uses i32 for cache density). One pass,
     //    no extra allocations beyond the destination Vec. f32::INFINITY pairs
@@ -611,7 +617,10 @@ fn cmd_solve(
     let cfg = brooom::solver::SolverConfig {
         multi_start: multi_start.max(1),
         time_limit_ms: time_limit_s.map(|s| (s * 1000.0) as u64),
-        verbose: true,
+        // Quiet: brooom's verbose line prints a raw internal cost
+        // (runtime_s + 1e9·unassigned) that reads like an error. The summary
+        // below reports the meaningful numbers instead.
+        verbose: false,
         ..Default::default()
     };
     let t = std::time::Instant::now();
@@ -772,5 +781,22 @@ fn print_summary(
     eprintln!("wall time         : {:.2} s", total_secs);
     eprintln!("total drive time  : {} s  (≈ {:.1} h)", total_dur, total_dur as f64 / 3600.0);
     eprintln!("total drive dist  : {} m  (≈ {:.1} km)", total_dist, total_dist as f64 / 1000.0);
+
+    // Explain unassigned jobs so a correct run doesn't look broken.
+    if unassigned > 0 {
+        let demand: i64 = problem.jobs.iter().map(|j| j.delivery.iter().copied().sum::<i64>()).sum();
+        let cap: i64 = problem.vehicles.iter().map(|v| v.capacity.iter().copied().sum::<i64>()).sum();
+        if demand > cap {
+            eprintln!(
+                "⚠ {unassigned} unassigned: total demand {demand} > fleet capacity {cap} — \
+                 raise --capacity or add vehicles."
+            );
+        } else {
+            eprintln!(
+                "⚠ {unassigned} unassigned despite enough capacity — those stops are likely \
+                 unreachable (snapped to a disconnected road) or outside their time windows."
+            );
+        }
+    }
     eprintln!("───────────────────────────────────────────────────────────");
 }

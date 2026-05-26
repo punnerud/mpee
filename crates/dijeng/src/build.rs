@@ -78,11 +78,15 @@ impl Drop for StdoutSilencer {
 ///
 /// * `progress` — print the engine's parse/CH progress to stdout.
 /// * `force`    — rebuild even if a cache already exists.
+/// * `keep_csr` — keep the intermediate `.csr` (a PBF-parse cache that speeds
+///   up future rebuilds). Routing/solve never need it, so it is deleted by
+///   default to save disk (e.g. ~540 MB for Norway).
 pub fn build_cache(
     pbf: &Path,
     profile: Profile,
     progress: bool,
     force: bool,
+    keep_csr: bool,
 ) -> Result<BuildResult, String> {
     use crate::{cache_ch, cache_pp, ch, osm, preprocess::preprocess};
 
@@ -159,6 +163,12 @@ pub fn build_cache(
     let h = ch::build_with_dist(&pre.graph, pre.edge_dist.as_slice());
     let build_secs = t.elapsed().as_secs_f64();
     cache_ch::save(ch_path.as_path(), &h).map_err(|e| format!("ch save: {e}"))?;
+
+    // The .csr is only a PBF-parse accelerator for rebuilds; routing/solve use
+    // .pp + .ch. Drop it by default to keep the on-disk footprint small.
+    if !keep_csr {
+        let _ = std::fs::remove_file(&csr_path);
+    }
 
     Ok(BuildResult {
         csr_path,

@@ -283,13 +283,14 @@ impl Router {
     /// another program). `force=False` reuses an existing `.pp`+`.ch` cache
     /// instead of rebuilding, so repeated calls return instantly.
     #[staticmethod]
-    #[pyo3(signature = (pbf, profile = "car", progress = true, force = false))]
+    #[pyo3(signature = (pbf, profile = "car", progress = true, force = false, keep_csr = false))]
     fn build<'py>(
         py: Python<'py>,
         pbf: &str,
         profile: &str,
         progress: bool,
         force: bool,
+        keep_csr: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         use dijeng::osm_profile::Profile;
         let prof = Profile::from_name(profile).ok_or_else(|| {
@@ -297,10 +298,11 @@ impl Router {
         })?;
         let pbf_owned = pbf.to_string();
         // The whole pipeline (parse → preprocess → CH) runs in-process in the
-        // shared `dijeng::build` helper; release the GIL for it.
+        // shared `dijeng::build` helper; release the GIL for it. The .csr
+        // intermediate is deleted unless keep_csr (routing only needs .pp/.ch).
         let res = py
             .allow_threads(move || {
-                dijeng::build::build_cache(std::path::Path::new(&pbf_owned), prof, progress, force)
+                dijeng::build::build_cache(std::path::Path::new(&pbf_owned), prof, progress, force, keep_csr)
             })
             .map_err(PyRuntimeError::new_err)?;
 

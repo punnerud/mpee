@@ -5,7 +5,9 @@ optimisation — an alternative stack to **OSRM** + **VROOM**, where both
 engines run in the same process and share memory directly. Everything runs
 **offline** from a downloaded map: no API keys, no per-request billing, no
 data leaving your machine. It uses CPU **and** GPU, less memory than the
-alternatives, and the whole engine fits under ~50 MB.
+alternatives, and the engine binary is under ~50 MB. (Map *caches* scale with
+area — a city is tens of MB, a whole country is GBs — so for a phone, build a
+city/bbox extract, not a country.)
 
 In head-to-head tests on a Mac, MPEE produced **shorter routes than
 [VROOM](https://github.com/VROOM-Project) at equal runtime**.
