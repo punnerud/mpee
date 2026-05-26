@@ -490,7 +490,7 @@ impl Router {
                 }).collect();
                 (durs_f, dists_f, snapped, routes_out, unassigned, elapsed)
             });
-        let _ = (durs_f, dists_f); // matrix already consumed for output
+        let _ = durs_f; // matrix already consumed for output; dists_f used below
 
         // Assemble the Python result.
         let routes_list = PyList::empty_bound(py);
@@ -529,7 +529,24 @@ impl Router {
         out.set_item("total_duration_s", grand_t)?;
         out.set_item("total_duration_min", grand_t as f64 / 60.0)?;
         out.set_item("depot", (depot.0, depot.1))?;
+        // Categorise each unassigned stop by *why* it couldn't be placed.
+        let unassigned_detail = PyList::empty_bound(py);
+        for &jidx in &unassigned {
+            let mi = jidx + 1; // depot is index 0, stops are 1..=N
+            let reason = if dists_f[mi] >= 1e8_f32 || dists_f[mi * n] >= 1e8_f32 {
+                "unreachable" // no road connects this stop to the depot
+            } else if 1i64 > capacity {
+                "exceeds_capacity"
+            } else {
+                "no_room" // reachable & fits, but the fleet ran out of capacity
+            };
+            let sd = PyDict::new_bound(py);
+            sd.set_item("stop_index", jidx)?;
+            sd.set_item("reason", reason)?;
+            unassigned_detail.append(sd)?;
+        }
         out.set_item("unassigned", unassigned)?;
+        out.set_item("unassigned_detail", unassigned_detail)?;
         out.set_item("solve_s", solve_s)?;
         Ok(out)
     }
@@ -626,6 +643,19 @@ impl Router {
         let unassigned: Vec<u64> = sol.unassigned.iter().filter_map(|t| match t {
             brooom::solution::TaskRef::Job(j) => Some(problem.jobs[*j].id), _ => None,
         }).collect();
+        // Categorise each unassigned job by *why* it couldn't be placed.
+        let unassigned_detail = PyList::empty_bound(py);
+        for t in &sol.unassigned {
+            if let brooom::solution::TaskRef::Job(j) = t {
+                let reason = unassigned_reason(
+                    &problem.jobs[*j], ji[*j], n, &dist_i, &problem.vehicles, &vs, &ve,
+                );
+                let sd = PyDict::new_bound(py);
+                sd.set_item("job_id", problem.jobs[*j].id)?;
+                sd.set_item("reason", reason)?;
+                unassigned_detail.append(sd)?;
+            }
+        }
 
         let out = PyDict::new_bound(py);
         let vehicles_used = routes_list.len();
@@ -637,8 +667,56 @@ impl Router {
         out.set_item("total_duration_s", grand_t)?;
         out.set_item("total_duration_min", grand_t as f64 / 60.0)?;
         out.set_item("unassigned", unassigned)?;
+        out.set_item("unassigned_detail", unassigned_detail)?;
         out.set_item("solve_s", solve_s)?;
         Ok(out)
+    }
+}
+
+/// Distance (metres) at or above which a matrix cell is treated as "no road"
+/// (the routing engine's unreachable sentinel is ~2.1e9).
+const UNREACHABLE_I32: i32 = 100_000_000;
+
+/// Classify *why* a job ended up unassigned, for the categorized
+/// `unassigned_detail` output. `dist` is the row-major n×n distance matrix;
+/// `vstart`/`vend` are each vehicle's matrix index for its start/end.
+fn unassigned_reason(
+    job: &brooom::Job,
+    mi: usize,
+    n: usize,
+    dist: &[i32],
+    vehicles: &[brooom::Vehicle],
+    vstart: &[Option<usize>],
+    vend: &[Option<usize>],
+) -> &'static str {
+    let req = &job.skills;
+    let (mut reachable, mut skilled, mut fits) = (false, false, false);
+    for v in 0..vehicles.len() {
+        let veh = &vehicles[v];
+        let has = veh.has_skills(req);
+        skilled |= has;
+        let reach_v = matches!(
+            (vstart.get(v).copied().flatten(), vend.get(v).copied().flatten()),
+            (Some(s), Some(e)) if dist[s * n + mi] < UNREACHABLE_I32 && dist[mi * n + e] < UNREACHABLE_I32
+        );
+        reachable |= reach_v;
+        let cap_ok = job
+            .delivery
+            .iter()
+            .enumerate()
+            .all(|(i, &d)| d <= veh.capacity.get(i).copied().unwrap_or(0));
+        if has && reach_v && cap_ok {
+            fits = true;
+        }
+    }
+    if !reachable {
+        "unreachable" // no road connects this stop to any vehicle's depot
+    } else if !skilled {
+        "missing_skill" // no vehicle has the required skill(s)
+    } else if !fits {
+        "exceeds_capacity" // larger than any single capable+reachable vehicle
+    } else {
+        "no_room" // serviceable alone, but the fleet/time windows had no room left
     }
 }
 

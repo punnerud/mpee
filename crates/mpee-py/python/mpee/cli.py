@@ -106,6 +106,12 @@ def cmd_optimize(args) -> int:
     for rt in plan["routes"]:
         print(f"  vehicle {rt['vehicle_id']}: {rt['n_stops']} stops, "
               f"{rt['distance_km']:.1f} km, {rt['duration_min']:.0f} min")
+    if plan["unassigned"]:
+        from collections import Counter
+        reasons = Counter(d["reason"] for d in plan.get("unassigned_detail", []))
+        if reasons:
+            print("  unassigned by reason: " +
+                  ", ".join(f"{r}={c}" for r, c in reasons.items()))
     return 0
 
 

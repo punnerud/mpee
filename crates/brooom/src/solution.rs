@@ -223,6 +223,12 @@ pub fn evaluate_route(
     result
 }
 
+/// A matrix leg at or beyond this value means there was no path between the
+/// two points (the routing engine's "unreachable" sentinel is ~2.1e9). Such a
+/// leg makes the route infeasible — it is never a real, merely-long one
+/// (no road leg approaches 100 000 km / ~3 years of travel time).
+const UNREACHABLE_LEG: i64 = 100_000_000;
+
 #[inline]
 fn evaluate_route_with_buf(
     problem: &Problem,
@@ -306,6 +312,11 @@ fn evaluate_route_with_buf(
 
         if let Some(p) = prev_idx {
             let raw = matrix.duration(p, here);
+            // A sentinel-valued leg means "no road between these points"; such
+            // a route is infeasible, never a real (if long) one.
+            if raw as i64 >= UNREACHABLE_LEG {
+                return Err("unreachable leg (no road between stops)");
+            }
             let dur = ((raw as f64) * speed).round() as i64;
             t += dur;
             travel_time += dur;
@@ -377,6 +388,9 @@ fn evaluate_route_with_buf(
     // Final leg back to depot.
     if let (Some(p), Some(e)) = (prev_idx, end_idx) {
         let raw = matrix.duration(p, e);
+        if raw as i64 >= UNREACHABLE_LEG {
+            return Err("unreachable leg (no road back to depot)");
+        }
         let dur = ((raw as f64) * speed).round() as i64;
         t += dur;
         travel_time += dur;

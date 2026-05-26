@@ -14,7 +14,7 @@ path = "src/main.rs"
 # cache via sssp_bench, builds a routing matrix, and hands a `&Matrix` to
 # brooom. No IPC, no disk on the hot path. The two Vec<i32> buffers that
 # brooom consumes are owned by this process, in the same address space.
-brooom     = { path = "../brooom" }
+brooom     = { path = "../brooom", default-features = false }  # no ONNX/OSRM/clap — the VRP solve path needs none of them
 sssp_bench = { path = "../dijeng" }
 
 clap = { version = "4", features = ["derive"] }

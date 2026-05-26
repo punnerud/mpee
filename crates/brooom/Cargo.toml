@@ -16,21 +16,22 @@ required-features = ["cli", "osrm"]
 
 # Feature flags
 #
-# `default = ["full"]`     keeps the existing standalone build (binary +
-#                         OSRM client + neural warm-start) unchanged for
-#                         everyone running brooom on a workstation.
-# `full`                  enables every optional capability.
+# `default = ["cli", "osrm"]` standalone build = binary + OSRM client. It does
+#                         NOT pull `neural`, so a plain `cargo build` no longer
+#                         downloads the ~200 MB ONNX runtime.
+# `full`                  enables every optional capability (incl. neural).
 # `cli`                   the standalone `brooom` binary (clap + main.rs).
 # `osrm`                  HTTP-OSRM matrix source (ureq).
-# `neural`                ONNX Pointer-Network warm-start (ort + ndarray
-#                         + ~200 MB ONNX Runtime binary).
+# `neural`                ONNX Pointer-Network warm-start (ort + ndarray +
+#                         ~200 MB ONNX Runtime). Experimental and currently
+#                         NOT called from anywhere in the solver — opt-in only.
 # `mobile`                builds a slim library suitable for embedding
 #                         in iOS / Android / WASM. Excludes neural +
 #                         OSRM + the CLI binary. Keeps `wgpu` so the
 #                         Metal-backed GPU local-search still works on
 #                         Apple Silicon.
 [features]
-default = ["full"]
+default = ["cli", "osrm"]
 full    = ["cli", "osrm", "neural"]
 cli     = ["clap", "tracing-subscriber/env-filter"]
 osrm    = ["ureq"]

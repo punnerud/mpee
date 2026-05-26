@@ -13,7 +13,7 @@ path = "src/main.rs"
 # Same shared-memory hand-off as mpee-cli: the solver result (Problem,
 # Solution, Matrix) lives in this process's RAM and is read by the HTTP
 # handlers without any copy or disk round-trip.
-brooom     = { path = "../brooom" }
+brooom     = { path = "../brooom", default-features = false }  # no ONNX/OSRM/clap — the VRP solve path needs none of them
 sssp_bench = { path = "../dijeng" }
 
 # Pure-Rust blocking HTTP server. Lightweight and dependency-free; we

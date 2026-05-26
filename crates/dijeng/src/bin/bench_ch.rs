@@ -39,10 +39,15 @@ fn main() -> std::io::Result<()> {
             format!("data/england.osm.pbf{suffix}.pp"),
             format!("data/england.osm.pbf{suffix}.ch"),
         ),
-        other => {
-            eprintln!("Unknown dataset '{other}'. Use 'london' or 'england'.");
-            std::process::exit(1);
-        }
+        // Any other value is treated as a custom PBF base path (same fallback
+        // as bench_pp), so `bench_ch path/to/region.osm.pbf` works for ANY
+        // region — not just the two built-in shortcuts.
+        custom => (
+            custom,
+            format!("{custom}{suffix}.csr"),
+            format!("{custom}{suffix}.pp"),
+            format!("{custom}{suffix}.ch"),
+        ),
     };
     let csr_path = csr_path_str.as_str();
     let pp_path = pp_path_str.as_str();
