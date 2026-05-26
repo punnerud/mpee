@@ -185,7 +185,7 @@ exploits transit nodes / bridges / mountain passes). Then `evaluate_route`
 edges always land in K-NN.
 
 Pros: same single 96 MB storage. No fallback needed.
-Cons: needs MMM's `knn_matrix` to use graph-Dijkstra rather than Euclidean
+Cons: needs MMM's `knn_matrix` to use graph-Dijeng rather than Euclidean
 nearest, which it already does — so this is essentially Option A with bigger K.
 
 ---

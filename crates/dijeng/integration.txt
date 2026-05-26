@@ -1,0 +1,531 @@
+================================================================================
+sssp_bench — Integration Reference
+================================================================================
+
+This file is the practical reference for anyone wiring the routing engine into
+another Rust binary (a solver, a GUI, an HTTP service). Audience: brooom-style
+VRP solvers, custom route consumers, future agents continuing this work.
+
+Original standalone repo path: /Users/punnerud/Downloads/dikstra
+(Now lives at crates/dijeng/ inside the mpee workspace.)
+Crate name: sssp_bench
+Target machine baseline: Apple M3 Pro (6P + 5E cores, 36 GB unified RAM)
+Test graph baseline: Greater London OSM, n=1 159 073, m_aug=3 899 581
+
+================================================================================
+1. ADDING AS A DEPENDENCY
+================================================================================
+
+Option A — path dependency inside a workspace (recommended for brooom):
+
+    [workspace]
+    members = ["mmm", "brooom", "app-gui"]
+
+    # In brooom/Cargo.toml
+    [dependencies]
+    sssp_bench = { path = "../sssp_bench" }
+    rayon = "1"
+
+Option B — git dependency:
+
+    sssp_bench = { git = "https://github.com/<your-org>/sssp_bench", branch = "main" }
+
+Both options give zero-copy data sharing. Pass `&Vec<T>` / `Arc<KnnTable>` etc.
+directly — no serialization, no copy. On Apple Silicon (unified memory) the same
+buffer can also be wrapped as an MTLBuffer for GPU shaders via
+`MTLResourceOptions::StorageModeShared` (see section 8).
+
+================================================================================
+2. SETUP — building caches once per dataset
+================================================================================
+
+Each profile (car/motorcycle/bicycle/foot) has three cache files generated in
+sequence:
+
+  data/<file>.osm.pbf                # input
+  data/<file>.osm.pbf[.profile].csr  # raw CSR + coords + edge_dist  (SSSPCSR3)
+  data/<file>.osm.pbf[.profile].pp   # preprocessed (reordered)      (SSSPP2C)
+  data/<file>.osm.pbf[.profile].ch   # Contraction Hierarchy         (SSSPCH1D)
+
+Generate on first use:
+
+    cargo run --release --bin bench_pp -- london car   # builds .csr and .pp
+    cargo run --release --bin bench_ch -- london car   # builds .ch
+
+For non-car profiles the file extension is suffixed with the profile name,
+e.g. `greater-london.osm.pbf.bicycle.ch`. The `car` profile keeps the
+unsuffixed names for backward compatibility.
+
+CH build time on London (M3 Pro): ~3-4 minutes (one-off).
+CH cache size: ~150 MB.
+PP cache size: ~80 MB.
+
+After caches exist, load takes ~0.02 ms via mmap regardless of graph size.
+
+================================================================================
+3. PUBLIC API SURFACE
+================================================================================
+
+All paths are `use sssp_bench::<module>::<item>`.
+
+--------------------------------------------------------------------------------
+3.1 Loading caches
+--------------------------------------------------------------------------------
+
+    use sssp_bench::{cache_ch, cache_pp};
+
+    let pp = cache_pp::load_mmap("data/greater-london.osm.pbf.pp")?;
+    let ch = cache_ch::load_mmap("data/greater-london.osm.pbf.ch")?;
+
+`pp` (PpFull) exposes: `pp.graph` (CsrGraph), `pp.reverse`, `pp.edge_dist`,
+`pp.light_count`, `pp.new_id` (csr_id → pp_id remapper), `pp.coords`,
+`pp.delta`.
+
+`ch` (ContractionHierarchy) exposes: `ch.graph_fwd`, `ch.graph_bwd`,
+`ch.up_count_fwd`, `ch.up_count_bwd`, `ch.edge_dist_fwd`, `ch.edge_dist_bwd`,
+`ch.rank`, `ch.perm` (csr_id → ch_internal_id), `ch.shortcut_via_*`.
+
+--------------------------------------------------------------------------------
+3.2 Single point-to-point query (ch::query)
+--------------------------------------------------------------------------------
+
+    use sssp_bench::ch;
+
+    // Distance only (88 µs/call steady-state on M3 Pro; allocates 9 MB scratch
+    // per call — see PathScratch for reusable variant).
+    let internal_src = ch.perm[csr_src_id as usize];
+    let internal_dst = ch.perm[csr_dst_id as usize];
+    let dur = ch::query(&ch, internal_src, internal_dst);  // Option<f32>
+
+    // With path + reused scratch (the right API for hot loops).
+    use sssp_bench::ch::PathScratch;
+    let mut scratch = PathScratch::new(ch.graph_fwd.n);
+    let dur = ch::query_with_path_into(&ch, internal_src, internal_dst, &mut scratch);
+    // path is in scratch.path : Vec<u32> of internal IDs
+    // Map back to csr / coordinates via inv_perm.
+
+    // Convenience (allocates new scratch each call, slower):
+    let (dur, path) = ch::query_with_path(&ch, internal_src, internal_dst).unwrap();
+
+Per-thread tip: instantiate **one PathScratch per worker thread** and reuse.
+Allocator contention drops parallel throughput from 51 k calls/s to 14 k/s
+otherwise.
+
+--------------------------------------------------------------------------------
+3.3 Many-to-many distance matrix
+--------------------------------------------------------------------------------
+
+    use sssp_bench::ch;
+
+    // Inputs are CH-internal IDs (use ch.perm to convert from csr IDs).
+    let srcs: Vec<u32> = ...;   // length n_src
+    let dsts: Vec<u32> = ...;   // length n_dst
+
+    // In-memory variant — peak RAM = n_src * n_dst * 8 bytes.
+    let (durations, distances) = ch::matrix_with_dist(&ch, &srcs, &dsts);
+    // out[i * n_dst + j] = (durations[i*n_dst+j], distances[i*n_dst+j])
+
+    // Streaming chunked variant — bounded RAM regardless of size.
+    ch::matrix_with_dist_chunked(&ch, &srcs, &dsts, src_chunk_size,
+        |s_start, s_end, dur_block, dist_block| {
+            // dur_block.len() == dist_block.len() == (s_end - s_start) * n_dst
+            // Row layout: row s_local at [s_local * n_dst .. (s_local+1) * n_dst]
+            // Caller can stream to disk / socket / accumulator and free.
+        });
+
+    // Duration-only equivalents:
+    let durations = ch::matrix(&ch, &srcs, &dsts);
+    ch::matrix_chunked(&ch, &srcs, &dsts, K, |...|);   // (if needed; add as needed)
+
+--------------------------------------------------------------------------------
+3.4 K-NN granular neighbours (knn_matrix)
+--------------------------------------------------------------------------------
+
+The right primitive when the consumer is a granular VRP solver (Toth-Vigo
+style): for each customer, the K nearest other customers by **graph
+distance** (not great-circle).
+
+    use sssp_bench::knn::{knn_matrix, knn_matrix_flat};
+
+    let customers: Vec<u32> = ...;     // node IDs in pp.graph numbering
+    let edge_dist = pp.edge_dist.as_slice();
+
+    // Variable-size rows: Vec<Vec<(u32, f32, f32)>>
+    // out[i] = K nearest of customers[i], sorted ascending by dur.
+    // Entry: (idx_in_customers, dur_s, dist_m). Self is NOT included.
+    let rows = knn_matrix(&pp.graph, &customers, 160, Some(edge_dist));
+
+    // Cache-friendly flat layout: Vec<(u32, f32, f32)> of length N*K.
+    // Row i at [i*K .. i*K+K]. Padding: (u32::MAX, INF, INF).
+    let flat = knn_matrix_flat(&pp.graph, &customers, 160, Some(edge_dist));
+
+IMPORTANT: pass `pp.graph` (the original reordered graph), NOT
+`ch.graph_fwd`. The CH-augmented graph has shortcuts that skip intermediate
+customer nodes, which would mis-rank K-NN.
+
+Measured on M3 Pro, London, N=50 000, K=160: 1.22 s, 92 MB output,
+220 MB peak.
+
+--------------------------------------------------------------------------------
+3.5 Farthest-first source ordering
+--------------------------------------------------------------------------------
+
+For streaming matrix rows in geometrically diverse order (downstream solver
+can start working before full matrix is computed):
+
+    use sssp_bench::farthest_first::farthest_first_order;
+
+    let coords_for_srcs: Vec<(f32, f32)> = srcs.iter()
+        .map(|&csr| pp.coords[csr as usize])
+        .collect();
+    let order: Vec<u32> = farthest_first_order(&coords_for_srcs);
+    // order[0] and order[1] are the 2-approx diameter pair.
+    // Reorder srcs in this order before calling matrix_with_dist_chunked.
+
+Cost on M3 Pro: ~0.5 s for 5 k coords, ~1 s for 10 k, ~8 s for 50 k (O(n²)
+parallel).
+
+--------------------------------------------------------------------------------
+3.6 Memory budget planner
+--------------------------------------------------------------------------------
+
+Caller declares a hard byte cap; planner picks (n_threads, chunk_size):
+
+    use sssp_bench::budget::{plan_for_budget_with_n_src, MatrixBudget};
+
+    let budget = MatrixBudget {
+        max_bytes: 800 * 1024 * 1024,
+        graph_n: ch.graph_fwd.n as u32,
+        bytes_per_output_cell: 8,            // f32 dual-channel internal
+    };
+    let plan = plan_for_budget_with_n_src(&budget, n_dst, n_src);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(plan.n_threads)
+        .build()?;
+    pool.install(|| {
+        ch::matrix_with_dist_chunked(&ch, &srcs, &dsts, plan.chunk_size, on_chunk);
+    });
+
+The planner is conservative (1.6× transient-peak multiplier + 30 MB
+overhead) — measured peaks stay under cap in all 4 budget brackets tested
+(200/500/800/1500 MB on 50k×50k).
+
+Knee point is chunk≈1500 on M3 Pro (24-48 MB SLC). Past that, more memory
+doesn't help — the planner caps automatically.
+
+--------------------------------------------------------------------------------
+3.7 RoutingService (high-level facade)
+--------------------------------------------------------------------------------
+
+Wraps CH + snap-grid + per-vertex coords for app-facing route/matrix calls
+with lat/lon I/O:
+
+    use sssp_bench::routing::RoutingService;
+
+    let svc = RoutingService::new(ch, pp.coords);
+
+    let r = svc.route(src_lat, src_lon, dst_lat, dst_lon).unwrap();
+    // RouteResponse { distance_m, duration_s, geometry: Vec<(f32,f32)>, ... }
+
+    let (durations, snap_src, snap_dst) = svc.matrix(&srcs_latlon, &dsts_latlon);
+    let (du, di, snap_src, snap_dst) = svc.matrix_with_distance(&srcs, &dsts);
+
+Internally uses LatLonGrid for sub-100 µs nearest-vertex snap.
+
+================================================================================
+4. BINARY OUTPUT FORMAT  (Variant A row-streaming)
+================================================================================
+
+Magic: b"RTBL0001", little-endian throughout.
+
+Header (32 bytes, fixed):
+
+    offset  size  field
+    0       8     magic = b"RTBL0001"
+    8       2     version u16 = 1
+    10      2     flags u16   (see below)
+    12      4     cell_dtype u32  (0=f32, 1=u16, 2=u32)
+    16      4     n_src u32
+    20      4     n_dst u32
+    24      4     scale_exp i32  (encoded = real × 10^(-scale_exp))
+    28      4     reserved u32 = 0
+
+Flag bits:
+    0x01  FLAG_DUAL_CHANNEL    each cell is [dur, dist] interleaved
+    0x02  FLAG_PAD_64          rows padded to 64-byte boundary
+    0x04  FLAG_CRC32_FOOTER    16-byte trailer at end of file
+    0x08  FLAG_SYMMETRIC_UT    Variant B layout (no per-row records)
+
+Per row (Variant A, written in stream order — which may be FF-permuted):
+
+    offset  size                                field
+    0       4                                   row_index u32  (original src input idx)
+    4       4                                   row_byte_len u32 (= n_dst * dtype_size * channels)
+    8       row_byte_len                        cell data
+    [8+row_byte_len .. next 64-byte boundary]   zero padding (only when FLAG_PAD_64)
+
+Cell encoding:
+    - F32: IEEE 754; INF preserved as is
+    - U16: encoded = clamp((real × 10^(-scale_exp)).round(), 0, 65534)
+           sentinel: u16::MAX (65535) = INF / unreachable
+    - U32: same scheme with u32::MAX sentinel
+
+scale_exp examples (1-meter / 1-second precision is the common choice):
+    scale_exp =  0   →  1-unit precision, u16 caps at 65535
+    scale_exp =  1   →  10-unit precision, u16 caps at 655 350
+    scale_exp = -1   →  0.1-unit precision, u16 caps at 6553.5
+
+CRC32 trailer (when FLAG_CRC32_FOOTER):
+
+    offset  size  field
+    0       8     trailer magic = b"RTBLCRC1"
+    8       4     crc32 u32  (IEEE 802.3, zlib polynomial)
+    12      4     reserved u32 = 0
+
+The CRC covers every byte from file start to (but not including) the
+trailer itself.
+
+================================================================================
+5. BINARY OUTPUT FORMAT  (Variant B symmetric upper-triangle)
+================================================================================
+
+Same 32-byte header but with FLAG_SYMMETRIC_UT set. n_src must equal n_dst.
+
+After the header: a flat block of `n*(n-1)/2` cells in canonical scan order:
+
+    (0,1) (0,2) ... (0,n-1)
+    (1,2) (1,3) ... (1,n-1)
+    ...
+    (n-2, n-1)
+
+Flat index of cell (i, j) where i < j:
+
+    idx = i * (2n - i - 1) / 2 + (j - i - 1)
+
+Cell encoding is identical to Variant A. Optional FLAG_PAD_64 pads the
+*whole UT block* (not per-row) to a 64-byte boundary; FLAG_CRC32_FOOTER
+appends the same trailer.
+
+================================================================================
+6. VARINT MODULE  (src/varint.rs)
+================================================================================
+
+LEB128 unsigned + zig-zag signed varints for delta-encoded sparse edge
+lists or other small-integer payloads.
+
+    use sssp_bench::varint::{
+        write_u64, read_u64, write_i64, read_i64,
+        encode_u64_buf, decode_u64_buf,
+        zigzag, unzigzag,
+        MAX_VARINT_BYTES,  // = 10
+    };
+
+Typical use:
+
+    // Delta-encode sorted ids:
+    let mut prev = 0u64;
+    for &v in &sorted_ids {
+        write_u64(&mut out, v - prev)?;
+        prev = v;
+    }
+
+    // Decode:
+    let mut running = 0u64;
+    while let Ok(gap) = read_u64(&mut input) {
+        running += gap;
+        push(running);
+    }
+
+================================================================================
+7. THREADING MODEL
+================================================================================
+
+The engine uses rayon throughout. Some functions (matrix_with_dist_chunked,
+knn_matrix) parallelize internally and respect the global rayon pool. To cap
+parallelism for a single call:
+
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build()?;
+    pool.install(|| {
+        // any sssp_bench code here uses up to 4 threads
+    });
+
+`ch::query` is NOT internally parallel — it's a single Dijeng. To run many
+queries in parallel:
+
+    use rayon::prelude::*;
+    use sssp_bench::ch::PathScratch;
+
+    let results: Vec<_> = pairs
+        .par_iter()
+        .map_init(
+            || PathScratch::new(ch.graph_fwd.n),
+            |scratch, &(s, d)| ch::query_with_path_into(&ch, s, d, scratch),
+        )
+        .collect();
+
+`map_init` gives each rayon worker its own scratch; allocator contention
+drops to zero.
+
+================================================================================
+8. APPLE UNIFIED MEMORY ARCHITECTURE (UMA)
+================================================================================
+
+On Apple Silicon, CPU and GPU share the same physical memory pool. Any Vec
+or Arc owned by sssp_bench can be wrapped as an MTLBuffer with zero copy:
+
+    use metal::{Device, MTLResourceOptions};
+
+    let device = Device::system_default().unwrap();
+    let buffer = device.new_buffer_with_bytes_no_copy(
+        knn_flat.as_ptr() as *const _,
+        (knn_flat.len() * std::mem::size_of::<(u32, f32, f32)>()) as u64,
+        MTLResourceOptions::StorageModeShared,   // ← UMA
+        None,
+    );
+    // GPU shader reads the same RAM the CPU just wrote. No DMA, no copy.
+
+Same Vec can be safely accessed from the CPU side concurrently (without
+mutation). For mutable cross-side access, synchronise via MTLCommandBuffer
+completion handlers.
+
+On Intel / AMD, use `StorageModePrivate` + explicit blits — but the brooom
+target is Apple Silicon, so UMA is the right choice.
+
+================================================================================
+9. PERFORMANCE NUMBERS  (Apple M3 Pro, London CH)
+================================================================================
+
+Single-pair query (ch::query_with_path_into, reused scratch):
+    - 1 thread sequential: 88-93 µs/call → 10.8 k calls/s
+    - 11 threads parallel: 17 µs effective → 58.6 k calls/s
+    - alloc-per-call (ch::query without scratch reuse): 119 µs
+
+Many-to-many matrix (matrix_with_dist_chunked):
+    - 1 k × 1 k dur+dist:    0.27 s   (3.7 M cells/s)
+    - 5 k × 5 k dur+dist:    1.13 s   (22 M cells/s)
+    - 10 k × 10 k dur+dist:  4.3 s    (23 M cells/s)
+    - 30 k × 30 k dur+dist:  159 s    (5.7 M cells/s)
+    - 50 k × 50 k dur+dist:  94 s     (26.6 M cells/s)   ← 500 MB budget
+    - 100 k × 100 k dur+dist: 1098 s  (9.1 M cells/s)   ← chunked, 4.6 GB peak
+
+K-NN granular (knn_matrix):
+    - 50 k × K=160:  1.22 s, 92 MB output, 220 MB peak
+
+Farthest-first ordering:
+    - 5 k coords:    0.51 s
+    - 10 k coords:   1.14 s
+    - 50 k coords:   8.0 s
+
+Memory budget planner (50k × 50k dur+dist):
+    - 200 MB cap → 130 s,   actual peak 192 MB
+    - 500 MB cap → 94 s,    actual peak 371 MB    ← sweet spot
+    - 800 MB cap → 94 s,    actual peak 762 MB
+    - 1500 MB cap → 95 s,   actual peak 1057 MB   ← capped at chunk=1500
+
+================================================================================
+10. COMMON PATTERNS — code recipes
+================================================================================
+
+PATTERN A — Build a 50k × K=160 K-NN granular for brooom
+--------------------------------------------------------------------------------
+
+    let pp = cache_pp::load_mmap("data/greater-london.osm.pbf.pp")?;
+    let customers: Vec<u32> = ...;     // pp-numbering node IDs
+    let edge_dist = pp.edge_dist.as_slice();
+    let knn = knn_matrix(&pp.graph, &customers, 160, Some(edge_dist));
+    // Pass `Arc::new(knn)` to brooom; share across LS threads.
+
+PATTERN B — Build a 50k × 50k matrix with 800 MB cap, FF-ordered, binary out
+--------------------------------------------------------------------------------
+
+    let pp = cache_pp::load_mmap("...pp")?;
+    let ch = cache_ch::load_mmap("...ch")?;
+
+    let coords: Vec<(f32, f32)> = srcs_csr.iter()
+        .map(|&csr| pp.coords[csr as usize])
+        .collect();
+    let order = farthest_first_order(&coords);
+    let srcs: Vec<u32> = order.iter().map(|&i| ch.perm[srcs_csr[i as usize] as usize]).collect();
+    let dsts: Vec<u32> = dsts_csr.iter().map(|&csr| ch.perm[csr as usize]).collect();
+    let original_idx: Vec<u32> = order;   // for binary row_index
+
+    let budget = MatrixBudget { max_bytes: 800 << 20, graph_n: ch.graph_fwd.n as u32, bytes_per_output_cell: 8 };
+    let plan = plan_for_budget_with_n_src(&budget, dsts.len() as u32, srcs.len() as u32);
+
+    let f = File::create("matrix.rtbl")?;
+    let cfg = WriterConfig {
+        n_src: srcs.len() as u32, n_dst: dsts.len() as u32,
+        dual_channel: true, cell_dtype: CellDtype::U16, scale_exp: 0,
+        pad_64: true, crc32_footer: true,
+    };
+    let mut w = BinaryTableWriter::new(BufWriter::with_capacity(1 << 20, f), cfg)?;
+
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(plan.n_threads).build()?;
+    pool.install(|| {
+        ch::matrix_with_dist_chunked(&ch, &srcs, &dsts, plan.chunk_size,
+            |s_start, s_end, dur, dist| {
+                let n_dst = dsts.len();
+                for s_local in 0..(s_end - s_start) {
+                    let row_off = s_local * n_dst;
+                    let orig = original_idx[s_start + s_local];
+                    w.write_row(orig, &dur[row_off..row_off+n_dst], Some(&dist[row_off..row_off+n_dst])).unwrap();
+                }
+            });
+    });
+    let crc = w.finish()?;   // emits trailer
+    eprintln!("written crc {:08x}", crc);
+
+PATTERN C — On-demand single-pair query in a multi-threaded solver
+--------------------------------------------------------------------------------
+
+    use rayon::prelude::*;
+    use sssp_bench::ch::PathScratch;
+
+    let results: Vec<f32> = queries
+        .par_iter()
+        .map_init(
+            || PathScratch::new(ch.graph_fwd.n),
+            |scratch, &(s, d)| {
+                ch::query_with_path_into(&ch, s, d, scratch).unwrap_or(f32::INFINITY)
+            },
+        )
+        .collect();
+
+================================================================================
+11. STATUS / WHAT'S NOT DONE
+================================================================================
+
+Implemented:
+    [x] CH dual-channel (durations + distances)                       (SSSPCH1D)
+    [x] Bucket MMM: matrix_with_dist + matrix_with_dist_chunked       (parallel)
+    [x] K-NN: knn_matrix + knn_matrix_flat                            (5/5 tests)
+    [x] FF ordering: farthest_first_order                             (3/3 tests)
+    [x] Memory budget API: plan_for_budget                            (4/4 tests)
+    [x] Binary format: BinaryTableWriter/Reader + Symmetric variant   (8/8 tests)
+    [x] Varint module                                                 (5/5 tests)
+    [x] OSRM-compatible HTTP server: /route /table /nearest           (Variant A streaming)
+    [x] Multi-profile build: car / motorcycle / bicycle / foot
+
+Not implemented (in order of likely future need):
+    [ ] Transit Node Routing (TNR) — ~5-15 min preprocessing,
+        ~1-5 µs/p2p query. Useful for repeated p2p in a GUI; not for
+        one-off matrices.
+    [ ] Customizable CCH for fast re-weighting (live traffic)
+    [ ] Hub Labels — microsecond queries but hours preprocessing
+    [ ] Parallel CH preprocessing (currently ~3-4 min sequential for London)
+    [ ] u16 storage for in-memory dist arrays (would halve thread state,
+        let single-call ch::query drop to ~40 µs and matrix throughput improve
+        on cache-constrained hardware)
+
+================================================================================
+12. CONTACT POINTS  (for the next agent who picks this up)
+================================================================================
+
+    Historical user-preferences notes were kept at
+        ~/.claude/projects/-Users-punnerud-Downloads-dikstra/memory/
+        (engine-layer focus, not VRP optimiser). The crate itself now
+        lives at crates/dijeng/ inside the mpee workspace.
+    README.md — architecture overview, benchmarks, build instructions.
+
+End of integration.txt

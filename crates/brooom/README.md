@@ -1,8 +1,8 @@
 # brooom
 
-> Part of the **[mpe-engine](../../README.md)** workspace. Standalone crate —
+> Part of the **[mpee](../../README.md)** workspace. Standalone crate —
 > `cargo build` inside this directory works on its own. Integrates with
-> [`dijkstra`](../dijkstra/) (CH routing) via the contract in
+> [`dijeng`](../dijeng/) (CH routing) via the contract in
 > [`integration.txt`](integration.txt) and the workspace overview in
 > [`INTEGRATION.md`](../../INTEGRATION.md).
 

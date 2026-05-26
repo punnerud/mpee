@@ -1154,7 +1154,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpe-cli"
+name = "mpee-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1169,7 +1169,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpe-py"
+name = "mpee-py"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1183,7 +1183,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpe-serve"
+name = "mpee-serve"
 version = "0.1.0"
 dependencies = [
  "anyhow",

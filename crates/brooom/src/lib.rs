@@ -16,6 +16,7 @@ pub mod io;
 pub mod cache;
 pub mod embedding;
 pub mod regression;
+#[cfg(feature = "neural")]
 pub mod neural;
 pub mod pattern_db;
 pub mod warm_start;
@@ -31,6 +32,8 @@ pub use error::{Error, Result};
 pub use problem::{
     Capacity, Job, Location, Problem, Shipment, TimeWindow, Vehicle, VehicleStep, JobKind,
 };
-pub use matrix::{Matrix, MatrixSource, HaversineMatrix, OsrmClient};
+pub use matrix::{Matrix, MatrixSource, HaversineMatrix};
+#[cfg(feature = "osrm")]
+pub use matrix::OsrmClient;
 pub use solution::{Route, Solution, Step, StepKind, Summary, TaskRef};
 pub use solver::{solve, solve_full, solve_with_matrix, Solved, SolverConfig};

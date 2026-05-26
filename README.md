@@ -1,4 +1,4 @@
-# mpe-engine
+# mpee
 
 An open, unified Rust workbench for routing and vehicle-routing
 optimisation — an alternative stack to **OSRM** + **VROOM**, where both
@@ -6,19 +6,19 @@ engines run in the same process and share memory directly.
 
 | Layer                       | Crate                                    | Alternative to    |
 |-----------------------------|------------------------------------------|--------------------|
-| Road-network router (CH)    | [`crates/dijkstra/`](crates/dijkstra/)   | OSRM               |
+| Road-network router (CH)    | [`crates/dijeng/`](crates/dijeng/)   | OSRM               |
 | VRP solver (GPU + CPU LS)   | [`crates/brooom/`](crates/brooom/)       | VROOM              |
-| Shared CLI / orchestration  | [`crates/mpe-cli/`](crates/mpe-cli/)     | (new)              |
-| Live HTTP + map UI          | [`crates/mpe-serve/`](crates/mpe-serve/) | (new)              |
+| Shared CLI / orchestration  | [`crates/mpee-cli/`](crates/mpee-cli/)     | (new)              |
+| Live HTTP + map UI          | [`crates/mpee-serve/`](crates/mpee-serve/) | (new)              |
 
 Both engines **are** standalone Rust projects (each with its own
 `Cargo.toml`, its own binaries, its own tests) and can be run completely
-independently. mpe-engine wraps them as workspace members so a third
-crate, `mpe-cli`, can use both library APIs in the same address space —
+independently. mpee wraps them as workspace members so a third
+crate, `mpee-cli`, can use both library APIs in the same address space —
 no IPC, no file hand-off on the hot path.
 
-> Note on the folder name: the routing crate lives in `crates/dijkstra/`
-> after Edsger W. Dijkstra. The earlier spelling `dikstra` was a typo.
+> Note on the folder name: the routing crate lives in `crates/dijeng/`
+> after Edsger W. Dijeng. The earlier spelling `dikstra` was a typo.
 > The Cargo crate name itself is still `sssp_bench` (the original
 > standalone-project name).
 
@@ -26,10 +26,10 @@ no IPC, no file hand-off on the hot path.
 
 ## Background
 
-Both dijkstra and brooom were recently optimised to compute distances
+Both dijeng and brooom were recently optimised to compute distances
 **on the fly** rather than precomputing the entire N×N matrix:
 
-- **dijkstra** has bucket-based many-to-many MMM that streams rows,
+- **dijeng** has bucket-based many-to-many MMM that streams rows,
   granular K-NN (K=160 → 92 MB instead of 20 GB for 50k customers), and
   88 µs single-pair CH queries.
 - **brooom**'s local-search loop reads only K-nearest neighbours on the
@@ -44,7 +44,7 @@ laptop without ever materialising a full distance matrix.
 ## Layout
 
 ```
-mpe-engine/
+mpee/
 ├── Cargo.toml                      # Workspace root
 ├── README.md                       # You are here
 ├── INTEGRATION.md                  # How the crates talk to each other
@@ -55,12 +55,12 @@ mpe-engine/
     │   ├── README.md               # Solver details + benchmarks
     │   ├── integration.txt         # API contract with an external router
     │   └── src/
-    ├── dijkstra/                   # CH routing engine (OSRM alternative)
+    ├── dijeng/                   # CH routing engine (OSRM alternative)
     │   ├── Cargo.toml              # Standalone — `cargo build` works in-place
     │   ├── README.md               # Routing details + benchmarks
     │   ├── integration.txt         # API contract with the solver
     │   └── src/
-    └── mpe-cli/                    # Thin shared driver
+    └── mpee-cli/                    # Thin shared driver
         ├── Cargo.toml              # Path-deps on both engines
         └── src/main.rs             # Subcommands: download / build / solve / pipeline
 ```
@@ -89,21 +89,21 @@ cargo build --release --workspace
 ```bash
 cargo build --release -p brooom
 cargo build --release -p sssp_bench
-cargo build --release -p mpe-cli
+cargo build --release -p mpee-cli
 ```
 
 Or build a crate completely standalone:
 
 ```bash
 cd crates/brooom && cargo build --release
-cd crates/dijkstra && cargo build --release
+cd crates/dijeng && cargo build --release
 ```
 
 ### Run
 
 ```bash
 # CLI help
-cargo run --release -p mpe-cli -- --help
+cargo run --release -p mpee-cli -- --help
 
 # Direct VRP solve with brooom (Vroom-compatible JSON)
 cargo run --release -p brooom -- -i problem.json -o solution.json
@@ -117,27 +117,27 @@ cargo run --release -p sssp_bench --bin bench_ch -- london car
 
 ## Status
 
-- **dijkstra**: production-ready routing — CH build, K-NN in 1.2 s for
+- **dijeng**: production-ready routing — CH build, K-NN in 1.2 s for
   50k customers, OSRM-compatible HTTP server (`bench_osrm`, `serve`),
-  correctness verified against full Dijkstra. See
-  [crates/dijkstra/README.md](crates/dijkstra/README.md).
+  correctness verified against full Dijeng. See
+  [crates/dijeng/README.md](crates/dijeng/README.md).
 - **brooom**: GPU-accelerated VRP, beats PyVRP / Vroom / OR-Tools on
   Solomon R1-1000 (p ≈ 3·10⁻⁸), Vroom-compatible I/O. See
   [crates/brooom/README.md](crates/brooom/README.md).
 
-- **mpe-cli**: end-to-end VRP pipeline. The `download` / `build` /
+- **mpee-cli**: end-to-end VRP pipeline. The `download` / `build` /
   `solve` / `pipeline` subcommands load a CH cache via sssp_bench, snap
   random / supplied coords to the road graph, build the N×N
   duration+distance matrix with sssp_bench's bucket-MMM, and hand the
   matrix straight to brooom's solver — all in the same address space,
   no IPC, no disk on the hot path.
-- **mpe-serve**: live HTTP server (port 8032 by default) that runs the
+- **mpee-serve**: live HTTP server (port 8032 by default) that runs the
   same pipeline and then serves the result over an embedded
   Leaflet-based mobile UI. Designed so a phone on the same network can
   load `http://<laptop-ip>:8032/`, see every route colour-coded on a
   map, tap a stop for `job_id` / `vehicle_id` / `stop_order`, and zoom
   to any vehicle's bounding box. See
-  [`crates/mpe-serve/README.md`](crates/mpe-serve/README.md) for build
+  [`crates/mpee-serve/README.md`](crates/mpee-serve/README.md) for build
   instructions and the measured 2 000 / 5 000-job runs over Greater
   London.
 
@@ -157,4 +157,14 @@ this issue.
 
 ## License
 
-MIT for brooom and mpe-cli. See each crate for details.
+MIT for brooom and mpee-cli. See each crate for details.
+
+---
+
+## Naming
+
+- **MPEE** stands for **Morten Punnerud-Engelstad Engine**.
+- **dijeng** is the routing sub-engine — short for *Dijkstra engine*.
+
+The iOS/iPadOS/macOS SwiftUI demo (and its C ABI bridge) lives in a separate
+repo, `mpee-ios`, so this engine repo stays platform-neutral.

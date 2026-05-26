@@ -26,6 +26,7 @@ pub enum Error {
     Other(String),
 }
 
+#[cfg(feature = "osrm")]
 impl From<ureq::Error> for Error {
     fn from(value: ureq::Error) -> Self {
         Error::Http(value.to_string())

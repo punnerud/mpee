@@ -9,6 +9,7 @@
 //! For routing-engine-free use, `HaversineMatrix` is enough; for realistic
 //! road distances, `OsrmClient` is the production choice.
 
+#[cfg(feature = "osrm")]
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
@@ -132,9 +133,13 @@ pub fn haversine_m(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 // -------------------------------------------------------------------------
-// OSRM /table client.
+// OSRM /table client. Gated behind `osrm` because it pulls in `ureq` and
+// makes the binary larger; downstream consumers (including the iOS
+// embedding) build with `default-features = false` and turn it back on
+// only when they actually need it.
 // -------------------------------------------------------------------------
 
+#[cfg(feature = "osrm")]
 /// HTTP client for an OSRM `/table` endpoint. Works against the OSM-hosted
 /// demo server at `https://router.project-osrm.org` or any self-hosted OSRM.
 #[derive(Debug, Clone)]
@@ -143,12 +148,14 @@ pub struct OsrmClient {
     pub profile: String,
 }
 
+#[cfg(feature = "osrm")]
 impl OsrmClient {
     pub fn new(host: impl Into<String>, profile: impl Into<String>) -> Self {
         Self { host: host.into(), profile: profile.into() }
     }
 }
 
+#[cfg(feature = "osrm")]
 #[derive(Deserialize)]
 struct TableResp {
     code: String,
@@ -160,6 +167,7 @@ struct TableResp {
     distances: Option<Vec<Vec<Option<f64>>>>,
 }
 
+#[cfg(feature = "osrm")]
 impl MatrixSource for OsrmClient {
     fn build(&self, coords: &[[f64; 2]]) -> Result<Matrix> {
         let n = coords.len();

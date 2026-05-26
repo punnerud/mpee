@@ -2,10 +2,12 @@
 resolver = "2"
 members = [
     "crates/brooom",
-    "crates/dijkstra",
-    "crates/mpe-cli",
-    "crates/mpe-serve",
-    "crates/mpe-py",
+    "crates/dijeng",
+    "crates/mpee-cli",
+    "crates/mpee-serve",
+    "crates/mpee-py",
+    # NB: the iOS FFI crate (mpee-ios) and the SwiftUI demo app live in a
+    # separate sibling repo (../mpee-ios) so the engine stays platform-neutral.
 ]
 
 # Each subcrate also declares its own `[profile.release]`; cargo prefers

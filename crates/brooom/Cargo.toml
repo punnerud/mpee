@@ -12,20 +12,44 @@ path = "src/lib.rs"
 [[bin]]
 name = "brooom"
 path = "src/main.rs"
+required-features = ["cli", "osrm"]
+
+# Feature flags
+#
+# `default = ["full"]`     keeps the existing standalone build (binary +
+#                         OSRM client + neural warm-start) unchanged for
+#                         everyone running brooom on a workstation.
+# `full`                  enables every optional capability.
+# `cli`                   the standalone `brooom` binary (clap + main.rs).
+# `osrm`                  HTTP-OSRM matrix source (ureq).
+# `neural`                ONNX Pointer-Network warm-start (ort + ndarray
+#                         + ~200 MB ONNX Runtime binary).
+# `mobile`                builds a slim library suitable for embedding
+#                         in iOS / Android / WASM. Excludes neural +
+#                         OSRM + the CLI binary. Keeps `wgpu` so the
+#                         Metal-backed GPU local-search still works on
+#                         Apple Silicon.
+[features]
+default = ["full"]
+full    = ["cli", "osrm", "neural"]
+cli     = ["clap", "tracing-subscriber/env-filter"]
+osrm    = ["ureq"]
+neural  = ["ort", "ndarray"]
+mobile  = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"
 rayon = "1.10"
 rand = "0.8"
 rand_chacha = "0.3"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", features = ["json"], optional = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
-ndarray = "0.17"
+tracing-subscriber = { version = "0.3" }
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"], optional = true }
+ndarray = { version = "0.17", optional = true }
 # GPU compute (cross-platform: Metal on M3, Vulkan on Linux, DX12 on Win).
 # `pollster` blocks on the async device init since we don't bring tokio.
 # `bytemuck` lets us cast `Vec<i32>` straight into a GPU buffer.

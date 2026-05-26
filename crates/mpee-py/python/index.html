@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>mpee — live map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: rgba(20, 24, 32, 0.94);
+    --text: #e8eaee;
+    --muted: #9aa3b2;
+    --accent: #4dabf7;
+    --good: #51cf66;
+    --warn: #fab005;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); border-radius: 8px; }
+  .leaflet-popup-content { margin: 10px 12px; font-size: 13px; }
+  .leaflet-popup-content b { color: var(--accent); }
+
+  #header {
+    position: absolute; top: 0; left: 0; right: 0;
+    padding: env(safe-area-inset-top, 10px) 12px 8px;
+    background: linear-gradient(180deg, rgba(14,17,22,0.85), rgba(14,17,22,0));
+    z-index: 1000; pointer-events: none;
+  }
+  #header h1 { margin: 0; font-size: 15px; letter-spacing: 0.3px; font-weight: 600; pointer-events: auto; }
+  #header h1 small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  #status-pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 500; margin-left: 6px;
+    background: #1f2937; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; vertical-align: 1px;
+  }
+  #status-pill.solving { background: #1c3354; color: var(--accent); }
+  #status-pill.evolving { background: #3b3115; color: var(--warn); }
+  #status-pill.done { background: #163d22; color: var(--good); }
+  #status-pill.failed { background: #4a1820; color: #ff8787; }
+  #status-pill .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 6px; vertical-align: 1px; }
+  #status-pill.solving .dot, #status-pill.evolving .dot { animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+
+  #footer {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 8px 12px env(safe-area-inset-bottom, 8px);
+    background: var(--panel); backdrop-filter: blur(8px);
+    border-top: 1px solid #1c2230; z-index: 1000;
+    max-height: 55vh; overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+  #summary .kv { display: flex; flex-direction: column; }
+  #summary .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  #summary .v { font-size: 15px; font-weight: 600; }
+  #summary .v.delta-good { color: var(--good); }
+
+  #progress-wrap { margin-top: 8px; display: none; }
+  #progress-wrap.show { display: block; }
+  #progress-bar { height: 4px; background: #1c2230; border-radius: 2px; overflow: hidden; }
+  #progress-bar > div { height: 100%; background: var(--accent); width: 0%; transition: width 0.4s ease; }
+  #progress-text { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  #toolbar { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn {
+    border: 1px solid #2a3344; background: #161b25; color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn:hover { background: #1c2333; }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .btn.on { background: var(--accent); border-color: var(--accent); color: #001a30; }
+
+  #vehicle-list {
+    margin-top: 8px; display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 4px;
+  }
+  .veh-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 6px; border-radius: 4px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .veh-row.hidden { opacity: 0.35; }
+  .veh-row.focus { background: #1a2030; border-color: var(--accent); }
+  .veh-row .sw { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .veh-row .lbl { font-size: 12px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .veh-row .n { color: var(--muted); font-size: 11px; }
+
+  #stops-panel { display: none; margin-top: 10px; border-top: 1px solid #1c2230; padding-top: 8px; }
+  #stops-panel.show { display: block; }
+  #stops-panel .head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  #stops-panel .title { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  #stops-panel .title .sw { width: 14px; height: 14px; border-radius: 50%; }
+  #stops-panel .title b { font-weight: 600; }
+  #stops-panel .title .meta { color: var(--muted); }
+
+  #stops-pager { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+  #stops-pager .page { color: var(--muted); padding: 0 4px; min-width: 70px; text-align: center; font-variant-numeric: tabular-nums; }
+
+  #stops-list { display: grid; grid-template-columns: 1fr; gap: 2px; max-height: 30vh; overflow: auto; }
+  .stop-row {
+    display: grid; grid-template-columns: 32px 1fr auto;
+    gap: 8px; align-items: center;
+    padding: 5px 8px; border-radius: 4px; cursor: pointer;
+    border: 1px solid transparent; font-size: 12px;
+  }
+  .stop-row:hover { background: #161c28; }
+  .stop-row.selected { background: #1f3554; border-color: var(--accent); }
+  .stop-row .ord { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+  .stop-row .id { font-weight: 600; }
+  .stop-row .id .small { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
+  .stop-row .load { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+  #empty-state {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center; padding: 24px;
+    z-index: 1500; background: var(--bg); text-align: center; flex-direction: column; gap: 16px;
+  }
+  #empty-state.gone { display: none; }
+  #empty-state .spinner { width: 36px; height: 36px; border: 3px solid #2a3344; border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
+  #empty-state .msg { color: var(--muted); font-size: 13px; max-width: 320px; }
+  #empty-state .msg strong { color: var(--text); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>mpee <small id="region-label"></small><span id="status-pill"><span class="dot"></span><span id="status-text">init</span></span></h1>
+</div>
+
+<div id="map"></div>
+
+<div id="empty-state">
+  <div class="spinner"></div>
+  <div class="msg">
+    <strong id="empty-phase">Starting up…</strong>
+    <div id="empty-detail" style="margin-top: 6px;"></div>
+  </div>
+</div>
+
+<div id="footer">
+  <div id="summary"></div>
+
+  <div id="progress-wrap">
+    <div id="progress-bar"><div></div></div>
+    <div id="progress-text"></div>
+  </div>
+
+  <div id="toolbar">
+    <button class="btn on" id="btn-stops">Stops</button>
+    <button class="btn on" id="btn-routes">Routes</button>
+    <button class="btn" id="btn-unassigned">Unassigned</button>
+    <button class="btn" id="btn-long">Long segs</button>
+    <button class="btn" id="btn-fit">Fit</button>
+    <button class="btn" id="btn-all">All on</button>
+    <button class="btn" id="btn-none">All off</button>
+    <button class="btn" id="btn-close-veh" style="display:none">Close detail</button>
+  </div>
+
+  <div id="vehicle-list"></div>
+
+  <div id="stops-panel">
+    <div class="head">
+      <div class="title">
+        <span class="sw" id="sp-sw"></span>
+        <b id="sp-veh">Veh —</b>
+        <span class="meta" id="sp-meta"></span>
+      </div>
+      <div id="stops-pager">
+        <button class="btn" id="btn-stop-prev">‹ prev</button>
+        <span class="page" id="stops-page-label">— / —</span>
+        <button class="btn" id="btn-stop-next">next ›</button>
+      </div>
+    </div>
+    <div id="stops-list"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const PAGE_SIZE = 15;
+
+  const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([51.5, -0.1], 11);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  let depotMarker = null;
+  let vehicleLayers = [];                 // [{ v, stops:LayerGroup, polylines:LayerGroup, visible:bool }]
+  let unassignedGroup = L.layerGroup();
+  let showStops = true, showRoutes = true, showUnassigned = false, showLong = false;
+  let longSegLayer = L.layerGroup();
+  const LONG_SEG_TOP_N = 50;
+  let lastIter = -1, lastCost = Infinity;
+  let bbox = null;
+  let firstRender = true;
+  let selectedVehicleIdx = null;
+  let selectedStopIdx = 0;
+  let pageIdx = 0;
+  let highlightMarker = null;
+  let depotLegLayer = null;   // dashed depot legs for the selected vehicle
+  let pollTimer = null;
+
+  function setStatusPill(state, text) {
+    const pill = $('status-pill');
+    pill.className = '';
+    pill.classList.add(state);
+    $('status-text').textContent = text;
+  }
+  function setProgress(p, txt) {
+    $('progress-wrap').classList.add('show');
+    $('progress-bar').firstElementChild.style.width = `${Math.round(p * 100)}%`;
+    $('progress-text').textContent = txt;
+  }
+
+  function renderDataset(data) {
+    setStatusPill(data.final ? 'done' : 'evolving', data.final ? 'final' : `iter ${data.iter}`);
+    $('region-label').textContent = `· ${data.region}`;
+
+    const costDelta = (lastCost !== Infinity && data.cost < lastCost) ? ' ↓' : '';
+    $('summary').innerHTML = `
+      <div class="kv"><span class="k">Iter</span><span class="v">${data.iter}${data.final ? ' ✓' : ''}</span></div>
+      <div class="kv"><span class="k">Routes</span><span class="v">${data.vehicles.length}</span></div>
+      <div class="kv"><span class="k">Stops</span><span class="v">${data.total_stops.toLocaleString()}</span></div>
+      <div class="kv"><span class="k">Distance</span><span class="v ${data.cost < lastCost ? 'delta-good' : ''}">${data.total_distance_km.toFixed(1)} km${costDelta}</span></div>
+      <div class="kv"><span class="k">Drive time</span><span class="v">${data.total_duration_h.toFixed(1)} h</span></div>
+      <div class="kv"><span class="k">Cost</span><span class="v">${Math.round(data.cost).toLocaleString()}</span></div>
+      <div class="kv"><span class="k">Solve t</span><span class="v">${data.solve_elapsed_s.toFixed(1)} s</span></div>
+      <div class="kv"><span class="k">Unassigned</span><span class="v">${data.unassigned.length}</span></div>
+      <div class="kv"><span class="k">Dropped</span><span class="v">${data.dropped.length}</span></div>
+    `;
+    lastCost = data.cost;
+
+    // Stash depot coords for drawHighlight (used to render depot legs
+    // for the currently-selected vehicle).
+    window._mpe_depot = { lat: data.depot.lat, lon: data.depot.lon };
+    if (!depotMarker) {
+      depotMarker = L.circleMarker([data.depot.lat, data.depot.lon], {
+        radius: 8, color: '#fff', weight: 2, fillColor: '#ffd43b', fillOpacity: 1
+      }).addTo(map).bindPopup('<b>Depot</b>');
+    }
+
+    vehicleLayers.forEach(vl => { vl.stops.remove(); vl.polylines.remove(); });
+    vehicleLayers = [];
+    data.vehicles.forEach((v, i) => {
+      const stops = L.layerGroup();
+      const polylines = L.layerGroup();
+      // Polyline through the customer stops only — drawing the depot
+      // legs would have 50+ routes converging on the depot and turn
+      // the centre into a star. The depot is still rendered as a
+      // separate yellow dot above.
+      if (v.stops.length >= 2) {
+        const path = v.stops.map(s => [s.lat, s.lon]);
+        L.polyline(path, { color: v.color, weight: 2, opacity: 0.7 }).addTo(polylines);
+      }
+
+      v.stops.forEach((s, idx) => {
+        const m = L.circleMarker([s.lat, s.lon], {
+          radius: 5, color: v.color, weight: 1, fillColor: v.color, fillOpacity: 0.9
+        });
+        m.bindPopup(stopPopupHtml(v, s, idx));
+        m.on('click', () => selectVehicle(i, idx));
+        m.addTo(stops);
+      });
+      vehicleLayers.push({ v, stops, polylines, visible: true });
+    });
+
+    unassignedGroup.remove();
+    unassignedGroup = L.layerGroup(
+      data.unassigned.map(u => L.circleMarker([u.lat, u.lon], {
+        radius: 5, color: '#ff6b6b', weight: 1, fillColor: '#ff6b6b', fillOpacity: 0.9
+      }).bindPopup(`<b>Unassigned job #${u.job_id}</b>`))
+    );
+
+    // Compute the top-N longest customer→customer segments across all
+    // routes. order=0 is the depot leg which we skip — depot legs are
+    // structurally necessary and not visually fixable.
+    longSegLayer.remove();
+    const segs = [];
+    data.vehicles.forEach((v, vIdx) => {
+      for (let i = 1; i < v.stops.length; i++) {
+        const prev = v.stops[i - 1], cur = v.stops[i];
+        segs.push({
+          dist: cur.dist_from_prev_m | 0,
+          from: [prev.lat, prev.lon],
+          to:   [cur.lat,  cur.lon],
+          veh_id: v.id,
+          veh_idx: vIdx,
+          from_stop_idx: i - 1,
+          to_stop_idx: i,
+        });
+      }
+    });
+    segs.sort((a, b) => b.dist - a.dist);
+    const top = segs.slice(0, LONG_SEG_TOP_N);
+    longSegLayer = L.layerGroup(top.map(s => {
+      const line = L.polyline([s.from, s.to], {
+        color: '#ff3b3b', weight: 4, opacity: 0.75,
+      }).bindPopup(
+        `<b>${(s.dist/1000).toFixed(2)} km segment</b><br>` +
+        `Vehicle ${s.veh_id}, stops ${s.from_stop_idx + 1} → ${s.to_stop_idx + 1}<br>` +
+        `<small>Tap to open route, tap again to walk through stops</small>`
+      );
+      line.on('click', (e) => {
+        // Open the route's detail drawer at the "from" stop so the user
+        // can immediately use prev/next to step into the long-segment
+        // context and verify it's a single route, not two routes
+        // visually overlapping.
+        selectVehicle(s.veh_idx, s.from_stop_idx);
+        L.DomEvent.stopPropagation(e);
+      });
+      return line;
+    }));
+
+    const list = $('vehicle-list');
+    list.innerHTML = '';
+    vehicleLayers.forEach((vl, i) => {
+      const row = document.createElement('div');
+      row.className = 'veh-row';
+      row.dataset.idx = i;
+      row.innerHTML =
+        `<span class="sw" style="background:${vl.v.color}"></span>` +
+        `<span class="lbl">Veh ${vl.v.id}</span>` +
+        `<span class="n">${vl.v.n_stops} · ${(vl.v.distance_m/1000).toFixed(1)} km</span>`;
+      row.onclick = () => selectVehicle(i, 0);
+      list.appendChild(row);
+    });
+
+    bbox = data.bbox;
+    if (firstRender) {
+      map.fitBounds(L.latLngBounds([[bbox.lat_min, bbox.lon_min], [bbox.lat_max, bbox.lon_max]]).pad(0.05));
+      firstRender = false;
+    }
+    refreshLayers();
+
+    if (selectedVehicleIdx != null && selectedVehicleIdx < vehicleLayers.length) {
+      // Keep the same vehicle selected across iterations, but clamp the stop index.
+      const max = Math.max(0, vehicleLayers[selectedVehicleIdx].v.stops.length - 1);
+      if (selectedStopIdx > max) selectedStopIdx = max;
+      pageIdx = Math.floor(selectedStopIdx / PAGE_SIZE);
+      // Re-apply the row focus.
+      const row = document.querySelector(`.veh-row[data-idx="${selectedVehicleIdx}"]`);
+      if (row) row.classList.add('focus');
+      renderStopsPanel();
+      drawHighlight(false);  // don't fly between iters, keep view
+    }
+    $('empty-state').classList.add('gone');
+  }
+
+  function stopPopupHtml(v, s, idx) {
+    return (
+      `<b>Job #${s.job_id}</b><br>` +
+      `Vehicle: ${v.id}<br>` +
+      `Stop: ${idx + 1} of ${v.n_stops}<br>` +
+      `Load after: ${s.load_after}<br>` +
+      `<small>${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</small>`
+    );
+  }
+
+  function refreshLayers() {
+    map.eachLayer(l => { if (l._mpe_managed) map.removeLayer(l); });
+    vehicleLayers.forEach(vl => {
+      if (!vl.visible) return;
+      if (showStops)  { vl.stops.addTo(map); vl.stops._mpe_managed = true; }
+      if (showRoutes) { vl.polylines.addTo(map); vl.polylines._mpe_managed = true; }
+    });
+    if (showUnassigned) { unassignedGroup.addTo(map); unassignedGroup._mpe_managed = true; }
+    if (showLong)       { longSegLayer.addTo(map); longSegLayer._mpe_managed = true; longSegLayer.bringToFront?.(); }
+    if (highlightMarker) highlightMarker.bringToFront?.();
+  }
+
+  // ---- Selection ----
+  function selectVehicle(i, stopIdx = 0) {
+    selectedVehicleIdx = i;
+    selectedStopIdx = stopIdx;
+    pageIdx = Math.floor(stopIdx / PAGE_SIZE);
+    document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('focus'));
+    const row = document.querySelector(`.veh-row[data-idx="${i}"]`);
+    if (row) { row.classList.add('focus'); row.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    $('btn-close-veh').style.display = '';
+    renderStopsPanel();
+    drawHighlight(true);
+  }
+
+  function selectStop(stopIdx) {
+    if (selectedVehicleIdx == null) return;
+    const max = vehicleLayers[selectedVehicleIdx].v.stops.length - 1;
+    selectedStopIdx = Math.max(0, Math.min(max, stopIdx));
+    pageIdx = Math.floor(selectedStopIdx / PAGE_SIZE);
+    renderStopsPanel();
+    drawHighlight(true);
+  }
+
+  function drawHighlight(fly) {
+    if (highlightMarker) { map.removeLayer(highlightMarker); highlightMarker = null; }
+    if (depotLegLayer)   { map.removeLayer(depotLegLayer);   depotLegLayer = null; }
+    if (selectedVehicleIdx == null) return;
+    const vl = vehicleLayers[selectedVehicleIdx];
+    const s = vl.v.stops[selectedStopIdx];
+    if (!s) return;
+    // Dashed depot legs for the selected vehicle only — keeps the
+    // overall map clean while explaining why an outlier route is
+    // "long": the vehicle still has to start and end at the depot.
+    const first = vl.v.stops[0];
+    const last = vl.v.stops[vl.v.stops.length - 1];
+    if (window._mpe_depot && first && last) {
+      const d = window._mpe_depot;
+      depotLegLayer = L.layerGroup([
+        L.polyline([[d.lat, d.lon], [first.lat, first.lon]], {
+          color: vl.v.color, weight: 2, opacity: 0.65, dashArray: '6,6'
+        }),
+        L.polyline([[last.lat, last.lon], [d.lat, d.lon]], {
+          color: vl.v.color, weight: 2, opacity: 0.65, dashArray: '6,6'
+        }),
+      ]).addTo(map);
+      depotLegLayer._mpe_managed = false;
+    }
+    highlightMarker = L.circleMarker([s.lat, s.lon], {
+      radius: 12, color: '#fff', weight: 3, fillColor: vl.v.color, fillOpacity: 0.0
+    }).addTo(map);
+    highlightMarker._mpe_managed = false;
+    highlightMarker.bindPopup(stopPopupHtml(vl.v, s, selectedStopIdx)).openPopup();
+    if (fly) {
+      map.flyTo([s.lat, s.lon], Math.max(map.getZoom(), 14), { duration: 0.6 });
+    }
+  }
+
+  function closeVehicleDetail() {
+    selectedVehicleIdx = null;
+    selectedStopIdx = 0;
+    pageIdx = 0;
+    if (highlightMarker) { map.removeLayer(highlightMarker); highlightMarker = null; }
+    if (depotLegLayer)   { map.removeLayer(depotLegLayer);   depotLegLayer = null; }
+    document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('focus'));
+    $('stops-panel').classList.remove('show');
+    $('btn-close-veh').style.display = 'none';
+  }
+
+  function renderStopsPanel() {
+    if (selectedVehicleIdx == null) { $('stops-panel').classList.remove('show'); return; }
+    const vl = vehicleLayers[selectedVehicleIdx];
+    const stops = vl.v.stops;
+    const totalPages = Math.max(1, Math.ceil(stops.length / PAGE_SIZE));
+    if (pageIdx < 0) pageIdx = 0;
+    if (pageIdx >= totalPages) pageIdx = totalPages - 1;
+
+    $('sp-sw').style.background = vl.v.color;
+    $('sp-veh').textContent = `Veh ${vl.v.id}`;
+    $('sp-meta').textContent =
+      `· ${vl.v.n_stops} stops · ${(vl.v.distance_m/1000).toFixed(1)} km · ${Math.round(vl.v.duration_s/60)} min`;
+    $('stops-page-label').textContent =
+      `${selectedStopIdx + 1} / ${stops.length}`;
+    $('stops-panel').classList.add('show');
+
+    const start = pageIdx * PAGE_SIZE;
+    const end = Math.min(stops.length, start + PAGE_SIZE);
+    const container = $('stops-list');
+    container.innerHTML = '';
+    for (let i = start; i < end; i++) {
+      const s = stops[i];
+      const row = document.createElement('div');
+      row.className = 'stop-row' + (i === selectedStopIdx ? ' selected' : '');
+      row.dataset.idx = i;
+      row.innerHTML =
+        `<span class="ord">${i + 1}.</span>` +
+        `<span class="id">#${s.job_id}<span class="small">${s.lat.toFixed(4)}, ${s.lon.toFixed(4)}</span></span>` +
+        `<span class="load">load ${s.load_after}</span>`;
+      row.onclick = () => selectStop(i);
+      container.appendChild(row);
+    }
+    const selRow = container.querySelector('.stop-row.selected');
+    if (selRow) selRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  // Toolbar
+  function toggle(id, on) { $(id).classList.toggle('on', on); }
+  $('btn-stops').onclick = () => { showStops = !showStops; toggle('btn-stops', showStops); refreshLayers(); };
+  $('btn-routes').onclick = () => { showRoutes = !showRoutes; toggle('btn-routes', showRoutes); refreshLayers(); };
+  $('btn-unassigned').onclick = () => { showUnassigned = !showUnassigned; toggle('btn-unassigned', showUnassigned); refreshLayers(); };
+  $('btn-long').onclick = () => { showLong = !showLong; toggle('btn-long', showLong); refreshLayers(); };
+  $('btn-fit').onclick = () => { if (bbox) map.fitBounds(L.latLngBounds([[bbox.lat_min, bbox.lon_min], [bbox.lat_max, bbox.lon_max]]).pad(0.05)); };
+  $('btn-all').onclick = () => { vehicleLayers.forEach(vl => vl.visible = true); refreshLayers(); document.querySelectorAll('.veh-row').forEach(r => r.classList.remove('hidden')); };
+  $('btn-none').onclick = () => { vehicleLayers.forEach(vl => vl.visible = false); refreshLayers(); document.querySelectorAll('.veh-row').forEach(r => r.classList.add('hidden')); };
+  $('btn-close-veh').onclick = closeVehicleDetail;
+  $('btn-stop-prev').onclick = () => selectStop(selectedStopIdx - 1);
+  $('btn-stop-next').onclick = () => selectStop(selectedStopIdx + 1);
+
+  document.addEventListener('keydown', (e) => {
+    if (selectedVehicleIdx == null) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); selectStop(selectedStopIdx - 1); }
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); selectStop(selectedStopIdx + 1); }
+    else if (e.key === 'Escape') { closeVehicleDetail(); }
+  });
+
+  async function pollOnce() {
+    let status;
+    try { status = await (await fetch('/api/status', { cache: 'no-store' })).json(); }
+    catch (e) {
+      $('empty-phase').textContent = 'Network error';
+      $('empty-detail').textContent = String(e);
+      return;
+    }
+    setStatusPill(status.state, status.state);
+    setProgress(status.progress || 0, `${status.phase} · ${status.message} (${status.elapsed_s.toFixed(1)}s)`);
+    $('empty-phase').textContent = `${status.phase} (${status.elapsed_s.toFixed(1)}s)`;
+    $('empty-detail').textContent = status.message;
+
+    if (status.state === 'failed') {
+      $('empty-phase').textContent = 'Solver failed';
+      $('empty-detail').textContent = status.error || status.message;
+      return;
+    }
+    if (status.dataset_iter > lastIter) {
+      try {
+        const r = await fetch('/api/dataset', { cache: 'no-store' });
+        if (r.status === 200) {
+          const data = await r.json();
+          if (data.iter > lastIter) { lastIter = data.iter; renderDataset(data); }
+        }
+      } catch {}
+    }
+    if (status.state !== 'done') {
+      pollTimer = setTimeout(pollOnce, 2000);
+    } else {
+      try {
+        const r = await fetch('/api/dataset', { cache: 'no-store' });
+        if (r.status === 200) {
+          const data = await r.json();
+          if (data.iter > lastIter) { lastIter = data.iter; renderDataset(data); }
+        }
+      } catch {}
+      setProgress(1, 'done');
+    }
+  }
+  pollOnce();
+})();
+</script>
+</body>
+</html>

@@ -1,12 +1,12 @@
-# mpe-engine — integration overview
+# mpee — integration overview
 
 This document ties together the contracts already described in each
-crate and explains how **dijkstra** (routing) and **brooom** (VRP solver)
+crate and explains how **dijeng** (routing) and **brooom** (VRP solver)
 are designed to run as **one process with shared memory**.
 
 For the full detail, see:
 
-- [`crates/dijkstra/integration.txt`](crates/dijkstra/integration.txt) — the
+- [`crates/dijeng/integration.txt`](crates/dijeng/integration.txt) — the
   full routing API surface, threading model, binary format (`RTBL0001`),
   Apple-UMA notes.
 - [`crates/brooom/integration.txt`](crates/brooom/integration.txt) — the
@@ -17,7 +17,7 @@ For the full detail, see:
 
 ## What each part does
 
-### dijkstra — Contraction-Hierarchies road-network router
+### dijeng — Contraction-Hierarchies road-network router
 
 Takes an OSM PBF, builds CSR → PP (reordered) → CH (ranked shortcuts)
 and serves:
@@ -43,8 +43,8 @@ It consumes:
 - A **granular K-nearest-neighbour graph** for the local-search moves
   (2-opt, relocate, exchange, swap-star, Or-opt, …).
 
-Those are precisely the two things dijkstra produces. The end result of
-integration is that brooom drops its Haversine fallback and dijkstra
+Those are precisely the two things dijeng produces. The end result of
+integration is that brooom drops its Haversine fallback and dijeng
 drops the binary file format — everything is pointers in the same
 address space.
 
@@ -103,22 +103,22 @@ The VRP solver performs two kinds of distance look-ups:
 
 The full matrix is never needed if K-NN is large enough (K ≥ 80) and
 the depot row is precomputed separately. This is exactly what brooom
-and dijkstra were optimised to do together.
+and dijeng were optimised to do together.
 
 ---
 
 ## What is missing (this commit)
 
-1. **The `mpe-cli` subcommands don't make calls yet** — scaffolding only.
+1. **The `mpee-cli` subcommands don't make calls yet** — scaffolding only.
    Once brooom and sssp_bench are added as path dependencies in
-   `crates/mpe-cli/Cargo.toml` (commented out today), the rest is roughly
+   `crates/mpee-cli/Cargo.toml` (commented out today), the rest is roughly
    50 lines of plumbing.
 2. **brooom does not have an `MmmMatrixSource` impl** that consumes a
-   dijkstra `&ContractionHierarchy`. See
+   dijeng `&ContractionHierarchy`. See
    `crates/brooom/integration.txt` §2 Step 2 for the ~40-line impl.
 3. **The snap layer** (lat/lon → pp node ID) lives in
-   `dijkstra::routing::RoutingService`, but brooom expects customers to
-   already carry node IDs. A small adapter belongs in `mpe-cli`.
+   `dijeng::routing::RoutingService`, but brooom expects customers to
+   already carry node IDs. A small adapter belongs in `mpee-cli`.
 
 Once those three are in place, `mpe pipeline <region> <problem.json>`
 runs end-to-end in a single Rust process without touching disk after
@@ -128,22 +128,22 @@ the cache load.
 
 ## Apple Silicon: unified memory
 
-On the M-series the CPU and GPU share the same physical RAM. dijkstra
+On the M-series the CPU and GPU share the same physical RAM. dijeng
 can write K-NN data directly into a `wgpu::Buffer` mapped with
 `MAP_WRITE | STORAGE`, and brooom's GPU megakernel reads it without a
 copy. That saves ~92 MB of peak RAM at N=50k. See
-`crates/dijkstra/integration.txt` §8 and `crates/brooom/integration.txt`
+`crates/dijeng/integration.txt` §8 and `crates/brooom/integration.txt`
 §5 for the code.
 
 ---
 
 ## Threading model
 
-Both engines use `rayon` over a shared global thread pool. dijkstra
+Both engines use `rayon` over a shared global thread pool. dijeng
 recommends **one `PathScratch` per worker** to avoid allocator
 contention (drops from 51k to 14k queries/s otherwise). brooom's
 local-search is already `Send + Sync` and is happy with the same pool.
-mpe-cli should configure the pool once and let both operate inside
+mpee-cli should configure the pool once and let both operate inside
 `pool.install(|| { … })`.
 
 ---
@@ -151,5 +151,5 @@ mpe-cli should configure the pool once and let both operate inside
 ## Reference implementation
 
 When this integration is finished, the glue code lives in
-`crates/mpe-cli/src/main.rs` (the `solve` and `pipeline` subcommands).
+`crates/mpee-cli/src/main.rs` (the `solve` and `pipeline` subcommands).
 The pattern is already sketched as comments there.
