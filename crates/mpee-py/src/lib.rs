@@ -22,6 +22,7 @@
 
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::types::{PyDict, PyList};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::Serialize;
@@ -241,9 +242,303 @@ impl Engine {
     }
 }
 
+// =========================================================================
+// Router — the standalone routing API. Loads a prebuilt CH + PP cache and
+// answers point-to-point routes, snaps, N×N tables, and multi-stop VRP
+// optimisation entirely offline (no network, no external service).
+// Mirrors the engine calls the iOS C ABI uses (mpe_route / mpe_snap /
+// mpe_solve_vrp / mpe_build_ch).
+// =========================================================================
+
+#[pyclass]
+struct Router {
+    routing: sssp_bench::routing::RoutingService,
+    // Keep the mmap-backed PP cache alive for the Router's lifetime.
+    _pp: sssp_bench::cache_pp::PpFull,
+}
+
+#[pymethods]
+impl Router {
+    /// Open a prebuilt cache pair. `pp_path` is the `.pp` file, `ch_path`
+    /// the `.ch` file (build them once with `Router.build(pbf)` or the
+    /// `mpee build` CLI). Both are mmap'd, so opening is near-instant and
+    /// peak RAM stays low.
+    #[new]
+    fn new(pp_path: &str, ch_path: &str) -> PyResult<Self> {
+        let pp = sssp_bench::cache_pp::load_mmap(pp_path)
+            .map_err(|e| PyRuntimeError::new_err(format!("load PP cache {pp_path}: {e}")))?;
+        let ch = sssp_bench::cache_ch::load_mmap(ch_path)
+            .map_err(|e| PyRuntimeError::new_err(format!("load CH cache {ch_path}: {e}")))?;
+        let coords = sssp_bench::buffer::Buffer::from(pp.coords.as_slice().to_vec());
+        let routing = sssp_bench::routing::RoutingService::new(ch, coords);
+        Ok(Self { routing, _pp: pp })
+    }
+
+    /// Build a `.pp` + `.ch` cache from an OSM `.pbf` extract. This is the
+    /// slow, one-time offline preprocessing step (seconds for a city,
+    /// minutes for a country). `profile` is "car" | "bicycle" | "foot".
+    /// Returns a dict with the output paths and graph size.
+    #[staticmethod]
+    #[pyo3(signature = (pbf, profile = "car"))]
+    fn build<'py>(py: Python<'py>, pbf: &str, profile: &str) -> PyResult<Bound<'py, PyDict>> {
+        use sssp_bench::{cache_ch, cache_pp, ch, osm, osm_profile::Profile, preprocess::preprocess};
+        use std::path::Path;
+
+        let prof = Profile::from_name(profile)
+            .ok_or_else(|| PyRuntimeError::new_err(format!("unknown profile {profile:?} (use car|bicycle|foot)")))?;
+        let suffix = if prof == Profile::Car { String::new() } else { format!(".{}", prof.name()) };
+        let trim = |s: &str| s.trim_start_matches('.').to_string();
+        let pbf_path = Path::new(pbf);
+        let csr_cache = pbf_path.with_extension(format!("{}.csr", trim(&suffix)));
+        let pp_cache = pbf_path.with_extension(format!("{}.pp", trim(&suffix)));
+        let ch_cache = pbf_path.with_extension(format!("{}.ch", trim(&suffix)));
+
+        // Release the GIL for the heavy CPU work so other Python threads run.
+        let result = py.allow_threads(|| -> Result<(usize, usize, f64), String> {
+            let (graph, coords, edge_dist) =
+                osm::load_with_cache(pbf_path, csr_cache.as_path(), prof).map_err(|e| format!("osm load: {e}"))?;
+            // delta = avg edge weight / avg degree (matches the iOS build path).
+            let avg_w = {
+                if graph.edge_w.is_empty() { 1.0 } else {
+                    let stride = (graph.edge_w.len() / 4096).max(1);
+                    let (mut s, mut c, mut i) = (0.0f64, 0u64, 0usize);
+                    while i < graph.edge_w.len() { s += graph.edge_w[i] as f64; c += 1; i += stride; }
+                    (s / c.max(1) as f64) as f32
+                }
+            };
+            let avg_deg = graph.m() as f32 / graph.n.max(1) as f32;
+            let delta = (avg_w / avg_deg).max(1e-4);
+            let pre = preprocess(&graph, Some(delta), edge_dist.as_slice());
+            let (reverse, rev_edge_dist) =
+                sssp_bench::bidir::transpose_with_dist(&pre.graph, pre.edge_dist.as_slice());
+            let mut new_coords = vec![(0.0f32, 0.0f32); graph.n];
+            for old in 0..graph.n { new_coords[pre.new_id[old] as usize] = coords[old]; }
+            cache_pp::save(
+                pp_cache.as_path(), &pre.graph, &reverse, &pre.light_count, &pre.new_id,
+                &new_coords, delta, pre.edge_dist.as_slice(), &rev_edge_dist,
+            ).map_err(|e| format!("pp save: {e}"))?;
+            let t = std::time::Instant::now();
+            let h = ch::build_with_dist(&pre.graph, pre.edge_dist.as_slice());
+            let build_secs = t.elapsed().as_secs_f64();
+            cache_ch::save(ch_cache.as_path(), &h).map_err(|e| format!("ch save: {e}"))?;
+            Ok((pre.graph.n, pre.graph.m(), build_secs))
+        }).map_err(PyRuntimeError::new_err)?;
+
+        let d = PyDict::new_bound(py);
+        d.set_item("pp_path", pp_cache.to_string_lossy().to_string())?;
+        d.set_item("ch_path", ch_cache.to_string_lossy().to_string())?;
+        d.set_item("nodes", result.0)?;
+        d.set_item("edges", result.1)?;
+        d.set_item("build_secs", result.2)?;
+        Ok(d)
+    }
+
+    /// Driving route between two (lat, lon) points. Returns a dict with
+    /// `distance_m` / `distance_km`, `duration_s` / `duration_min`, the
+    /// snapped endpoints, and (if `geometry=True`) the [[lat, lon], …] path.
+    #[pyo3(signature = (from_lat, from_lon, to_lat, to_lon, geometry = false))]
+    fn route<'py>(
+        &self, py: Python<'py>,
+        from_lat: f32, from_lon: f32, to_lat: f32, to_lon: f32, geometry: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let resp = self.routing.route(from_lat, from_lon, to_lat, to_lon)
+            .ok_or_else(|| PyRuntimeError::new_err("no route found between the snapped points"))?;
+        let d = PyDict::new_bound(py);
+        d.set_item("distance_m", resp.distance_m)?;
+        d.set_item("distance_km", resp.distance_m / 1000.0)?;
+        d.set_item("duration_s", resp.duration_s)?;
+        d.set_item("duration_min", resp.duration_s / 60.0)?;
+        d.set_item("source_snapped", (resp.source_snapped.0, resp.source_snapped.1))?;
+        d.set_item("destination_snapped", (resp.destination_snapped.0, resp.destination_snapped.1))?;
+        if geometry {
+            let geo: Vec<(f32, f32)> = resp.geometry;
+            d.set_item("geometry", geo)?;
+        }
+        Ok(d)
+    }
+
+    /// Snap a (lat, lon) to the nearest routable road node. Returns (lat, lon).
+    fn snap(&self, lat: f32, lon: f32) -> (f32, f32) {
+        let csr = self.routing.nearest_node(lat, lon);
+        self.routing.coords[csr as usize]
+    }
+
+    /// Bounding box (min_lat, min_lon, max_lat, max_lon) of the loaded graph.
+    fn bbox<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let (mut mn_la, mut mx_la, mut mn_lo, mut mx_lo) =
+            (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+        for &(la, lo) in self.routing.coords.as_slice() {
+            if la.is_finite() && lo.is_finite() {
+                mn_la = mn_la.min(la); mx_la = mx_la.max(la);
+                mn_lo = mn_lo.min(lo); mx_lo = mx_lo.max(lo);
+            }
+        }
+        if !mn_la.is_finite() { return Err(PyRuntimeError::new_err("empty graph")); }
+        let d = PyDict::new_bound(py);
+        d.set_item("min_lat", mn_la)?; d.set_item("min_lon", mn_lo)?;
+        d.set_item("max_lat", mx_la)?; d.set_item("max_lon", mx_lo)?;
+        Ok(d)
+    }
+
+    /// Full duration+distance table among `points` (list of (lat, lon)).
+    /// Returns {"n", "durations_s": flat n×n, "distances_m": flat n×n}.
+    fn table<'py>(&self, py: Python<'py>, points: Vec<(f32, f32)>) -> PyResult<Bound<'py, PyDict>> {
+        let (durs, dists, _, _) = self.routing.matrix_with_distance(&points, &points);
+        let d = PyDict::new_bound(py);
+        d.set_item("n", points.len())?;
+        d.set_item("durations_s", durs)?;
+        d.set_item("distances_m", dists)?;
+        Ok(d)
+    }
+
+    /// Optimise a multi-stop delivery plan (VRP) over `stops` (list of
+    /// (lat, lon)). Vehicles start and end at `depot` (defaults to the
+    /// centroid of the stops). Returns a dict with one entry per used
+    /// vehicle (ordered stops + leg distances) plus totals and any
+    /// unassigned stops.
+    #[pyo3(signature = (
+        stops, vehicles = 1, capacity = 1_000_000i64, depot = None,
+        time_limit_s = 5.0, use_gpu = false,
+    ))]
+    fn optimize<'py>(
+        &self, py: Python<'py>,
+        stops: Vec<(f32, f32)>, vehicles: usize, capacity: i64,
+        depot: Option<(f32, f32)>, time_limit_s: f64, use_gpu: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if stops.is_empty() { return Err(PyRuntimeError::new_err("no stops given")); }
+        if vehicles == 0 { return Err(PyRuntimeError::new_err("vehicles must be >= 1")); }
+
+        // Depot defaults to the centroid of the stops.
+        let depot = depot.unwrap_or_else(|| {
+            let n = stops.len() as f32;
+            let (sla, slo) = stops.iter().fold((0.0f32, 0.0f32), |(a, b), &(la, lo)| (a + la, b + lo));
+            (sla / n, slo / n)
+        });
+
+        // coords[0] = depot, coords[1..=N] = stops (lat, lon).
+        let mut coords: Vec<(f32, f32)> = Vec::with_capacity(stops.len() + 1);
+        coords.push(depot);
+        coords.extend_from_slice(&stops);
+
+        // Build the matrix + snapped coords off the GIL.
+        let n = coords.len();
+        let (durs_f, dists_f, snapped, sol_routes, unassigned, solve_s) =
+            py.allow_threads(|| {
+                let (durs_f, dists_f, snapped, _) = self.routing.matrix_with_distance(&coords, &coords);
+                let to_i = |v: &[f32]| -> Vec<i32> {
+                    v.iter().map(|&d| if d.is_finite() { d.round().max(0.0) as i32 } else { i32::MAX / 2 }).collect()
+                };
+                let matrix = brooom::Matrix { n, durations: to_i(&durs_f), distances: Some(to_i(&dists_f)) };
+
+                let mut problem = brooom::Problem::default();
+                for v in 0..vehicles {
+                    problem.vehicles.push(brooom::Vehicle {
+                        id: (v + 1) as u64,
+                        start: Some(brooom::Location::from_index(0)),
+                        end: Some(brooom::Location::from_index(0)),
+                        capacity: vec![capacity],
+                        skills: vec![], time_window: None, speed_factor: 1.0,
+                        max_tasks: None, max_travel_time: None, max_distance: None,
+                        fixed: 0.0, per_hour: 3600.0, profile: "car".into(), description: None,
+                    });
+                }
+                for i in 0..stops.len() {
+                    problem.jobs.push(brooom::Job {
+                        id: (i + 1) as u64,
+                        location: brooom::Location::from_index(i + 1),
+                        kind: Default::default(), service: 0, setup: 0,
+                        delivery: vec![1], pickup: vec![], skills: vec![], priority: 0,
+                        time_windows: vec![], description: None,
+                    });
+                }
+                let cfg = brooom::solver::SolverConfig {
+                    multi_start: 4,
+                    granular_k: Some(40),
+                    max_local_search_passes: 50,
+                    time_limit_ms: Some((time_limit_s * 1000.0) as u64),
+                    verbose: false,
+                    use_gpu,
+                    ..Default::default()
+                };
+                let t = std::time::Instant::now();
+                let sol = brooom::solver::solve_with_matrix(&problem, &matrix, &cfg);
+                let elapsed = t.elapsed().as_secs_f64();
+
+                // Flatten routes to (vehicle_id, [(stop_index, leg_dist_m, leg_dur_s)], total_d, total_t).
+                let dist = matrix.distances.as_ref().unwrap();
+                let mut routes_out: Vec<(u64, Vec<(usize, i32, i32)>, i64, i64)> = Vec::new();
+                for r in &sol.routes {
+                    if r.steps.is_empty() { continue; }
+                    let vid = problem.vehicles[r.vehicle_idx].id;
+                    let mut legs: Vec<(usize, i32, i32)> = Vec::with_capacity(r.steps.len());
+                    let (mut td, mut tt) = (0i64, 0i64);
+                    let mut prev = 0usize; // depot index
+                    for step in &r.steps {
+                        let mi = match step { brooom::solution::TaskRef::Job(j) => *j + 1, _ => continue };
+                        let ld = matrix.durations[prev * n + mi];
+                        let dm = dist[prev * n + mi];
+                        td += dm as i64; tt += ld as i64;
+                        legs.push((mi, dm, ld));
+                        prev = mi;
+                    }
+                    // return leg to depot
+                    td += dist[prev * n] as i64; tt += matrix.durations[prev * n] as i64;
+                    routes_out.push((vid, legs, td, tt));
+                }
+                let unassigned: Vec<usize> = sol.unassigned.iter().filter_map(|t| match t {
+                    brooom::solution::TaskRef::Job(j) => Some(*j), _ => None,
+                }).collect();
+                (durs_f, dists_f, snapped, routes_out, unassigned, elapsed)
+            });
+        let _ = (durs_f, dists_f); // matrix already consumed for output
+
+        // Assemble the Python result.
+        let routes_list = PyList::empty_bound(py);
+        let (mut grand_d, mut grand_t, mut grand_stops) = (0i64, 0i64, 0usize);
+        for (vid, legs, td, tt) in &sol_routes {
+            let rd = PyDict::new_bound(py);
+            rd.set_item("vehicle_id", *vid)?;
+            rd.set_item("n_stops", legs.len())?;
+            rd.set_item("distance_m", *td)?;
+            rd.set_item("distance_km", *td as f64 / 1000.0)?;
+            rd.set_item("duration_s", *tt)?;
+            rd.set_item("duration_min", *tt as f64 / 60.0)?;
+            let stops_list = PyList::empty_bound(py);
+            for (order, (mi, leg_d, leg_t)) in legs.iter().enumerate() {
+                let (la, lo) = snapped[*mi];
+                let sd = PyDict::new_bound(py);
+                sd.set_item("order", order)?;
+                sd.set_item("stop_index", *mi - 1)?; // index into the input `stops`
+                sd.set_item("lat", la)?;
+                sd.set_item("lon", lo)?;
+                sd.set_item("leg_distance_m", *leg_d)?;
+                sd.set_item("leg_duration_s", *leg_t)?;
+                stops_list.append(sd)?;
+            }
+            rd.set_item("stops", stops_list)?;
+            routes_list.append(rd)?;
+            grand_d += *td; grand_t += *tt; grand_stops += legs.len();
+        }
+
+        let out = PyDict::new_bound(py);
+        out.set_item("routes", routes_list)?;
+        out.set_item("vehicles_used", sol_routes.len())?;
+        out.set_item("total_stops", grand_stops)?;
+        out.set_item("total_distance_m", grand_d)?;
+        out.set_item("total_distance_km", grand_d as f64 / 1000.0)?;
+        out.set_item("total_duration_s", grand_t)?;
+        out.set_item("total_duration_min", grand_t as f64 / 60.0)?;
+        out.set_item("depot", (depot.0, depot.1))?;
+        out.set_item("unassigned", unassigned)?;
+        out.set_item("solve_s", solve_s)?;
+        Ok(out)
+    }
+}
+
 #[pymodule]
-fn mpee(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _mpee(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
+    m.add_class::<Router>()?;
     Ok(())
 }
 

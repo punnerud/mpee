@@ -1,163 +1,132 @@
-# mpee-py
+# MPEE — Offline route calculations and optimization
 
-> Part of the **[mpee](../../README.md)** workspace.
+`pip install mpee`
 
-PyO3 bindings that expose mpee's in-process VRP pipeline
-(brooom + sssp_bench) as a Python extension module. Drop-in for a
-Flask / FastAPI / Streamlit front-end without dropping the
-shared-memory architecture: Python and Rust live in the same process,
-so the JSON bytes the browser fetches come straight out of the same
-`Arc<String>` that the Rust solver thread just populated.
+A self-contained routing + delivery-optimization engine you drive from
+Python or a command line. Download a map **once**, then compute everything
+**offline** — no API keys, no per-request billing, no data leaving your
+machine:
 
-The headline use-case is the **macOS Application Firewall**: every
-fresh `mpee-serve` binary requires per-build approval before non-
-loopback connections work. Python (Apple-signed system binary) is
-already allowed by default — so `python3 app.py` binds `0.0.0.0:8032`
-without prompts.
+- 🧭 **Point-to-point routes** — driving distance + time between two coordinates.
+- 🚚 **Multi-vehicle optimization (VRP)** — best routes for *N* vehicles over your own stops, with capacities.
+- 🗺️ **Bring your own map** — any OpenStreetMap extract (a city, a country).
+- ⚡ **Fast & small** — a Rust engine (CH routing + `brooom` VRP solver) using CPU **and** GPU, with a footprint under ~50 MB.
 
----
-
-## Architecture
-
-```
-                ┌──── Python process (Flask + mpee) ────────────────┐
-                │                                                     │
-                │  import mpee                                       │
-                │  eng = mpee.Engine()                               │
-                │  eng.start_solve(region="london", n_jobs=500, ...)   │
-                │             │                                        │
-                │             ▼  std::thread::spawn (inside Rust)      │
-                │  ┌────────────────────────────────────────────────┐  │
-                │  │ Rust solver thread:                            │  │
-                │  │   sssp_bench::load_mmap → matrix_with_distance │  │
-                │  │   brooom::solve_with_matrix (iterative)        │  │
-                │  │   publishes Arc<String> after every chunk      │  │
-                │  └────────────────────────────────────────────────┘  │
-                │             │                                        │
-                │             ▼  engine.get_dataset_json() (no copy)   │
-                │  Flask routes: /api/status /api/dataset /            │
-                │             │                                        │
-                └─────────────┼────────────────────────────────────────┘
-                              ▼
-                         📱 phone on the same network
-```
-
-The boundary between Python and Rust is two thin methods:
-`get_status_json()` and `get_dataset_json()`. Both read from the
-shared `Arc<RwLock<AppState>>`. The JSON string is **already
-serialised** in Rust — Python just returns its bytes verbatim.
+The engine is built from two Rust crates — `dijeng` (contraction-hierarchy
+routing) and `brooom` (the VRP solver). Together they solve a
+50,000-customer VRP on a laptop **without ever materialising a full
+distance matrix**, and in head-to-head tests on a Mac they produced
+**shorter routes than [VROOM](https://github.com/VROOM-Project) at equal
+runtime**, using less memory.
 
 ---
 
-## Build & run
+## Install
 
 ```bash
-# From the repo root (or anywhere — venv lives in this crate dir):
-cd crates/mpee-py
-
-# Once: set up a Python venv and install build tools.
-python3 -m venv venv
-source venv/bin/activate
-pip install maturin flask
-
-# Builds the Rust extension and installs it into the venv.
-maturin develop --release
-
-# Starts the Flask server (defaults to London N=500, 0.0.0.0:8032).
-python3 python/app.py
+pip install mpee
 ```
 
-The first `maturin develop --release` takes about 30–60 s (full
-optimised LTO build of brooom + sssp_bench + bindings). Subsequent
-incremental builds are seconds.
-
-On macOS this **avoids the per-binary Application Firewall prompt**
-that `mpee-serve` triggers — Python is already trusted by the firewall.
+Wheels are prebuilt for Linux / macOS / Windows (Python 3.8+). No Rust
+toolchain needed to install.
 
 ---
 
-## Python API
+## 1. Get a map (once)
+
+```bash
+# Download an OpenStreetMap extract from Geofabrik …
+mpee download europe/great-britain/england/greater-london
+
+# … and preprocess it into a routable cache (.pp + .ch).
+# Seconds for a city, a few minutes for a whole country.
+mpee build data/greater-london-latest.osm.pbf
+```
+
+After this you are fully offline. The cache is reusable forever (until you
+want fresher map data).
+
+## 2. Route from A to B
+
+```bash
+mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london.osm.pbf
+```
+```
+distance: 2.38 km
+duration: 4.4 min
+from (snapped): (51.50753, -0.12802)
+to   (snapped): (51.51328, -0.09844)
+```
+
+## 3. Optimize a delivery run over many stops
+
+```bash
+# stops.txt: one "lat,lon" per line (or a JSON [[lat,lon], …])
+mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
+    --cache data/greater-london.osm.pbf
+```
+```
+stops: 50  vehicles used: 3/5  unassigned: 0
+total: 60.0 km, 115 min  (solved in 4.6s)
+  vehicle 1: 14 stops, 17.2 km, 33 min
+  vehicle 2: 16 stops, 19.3 km, 37 min
+  vehicle 4: 20 stops, 23.5 km, 45 min
+```
+
+Tune the fleet with `--vehicles` and `--capacity`; bound the search with
+`--time SECONDS`; pin the depot with `--depot LAT,LON` (defaults to the
+centroid of the stops).
+
+---
+
+## Use it from Python
 
 ```python
 import mpee
-import json, time
 
-eng = mpee.Engine()
-eng.start_solve(
-    region="london",      # "london" / "oslo" / "manhattan" / "paris"
-    n_jobs=500,
-    n_vehicles=20,
-    capacity=200,
-    seed=7,
-    ch="data/greater-london.osm.pbf.ch",
-    pp="data/greater-london.osm.pbf.pp",
-    time_limit_s=45.0,
-    multi_start=1,
-)
+r = mpee.Router("data/greater-london.osm.pbf.pp",
+                "data/greater-london.osm.pbf.ch")
 
-while not eng.is_done():
-    status = json.loads(eng.get_status_json())
-    print(status["state"], status["phase"], status["message"])
-    ds = eng.get_dataset_json()
-    if ds is not None:
-        # Same JSON shape as mpee-serve's /api/dataset bundle.
-        bundle = json.loads(ds)
-        print(f"iter {bundle['iter']}: cost={bundle['cost']:.0f}")
-    time.sleep(1)
+# Distance + time between two points (set geometry=True for the path).
+leg = r.route(51.5080, -0.1281, 51.5138, -0.0984)
+print(f"{leg['distance_km']:.2f} km, {leg['duration_min']:.1f} min")
 
-print("final dataset_iter:", eng.dataset_iter())
+# Optimize 50 deliveries across 5 vehicles.
+stops = [(51.51, -0.12), (51.49, -0.10), ...]   # your (lat, lon) list
+plan = r.optimize(stops, vehicles=5, capacity=20, time_limit_s=5.0)
+print(plan["total_distance_km"], "km over", plan["vehicles_used"], "vehicles")
+for route in plan["routes"]:
+    for stop in route["stops"]:
+        print(route["vehicle_id"], stop["order"], stop["lat"], stop["lon"])
+
+# Other helpers:
+r.snap(51.50, -0.12)          # nearest routable road node
+r.table(stops)                # full N×N duration + distance table
+r.bbox()                      # coverage of the loaded map
 ```
 
-### Method reference
+`Router.build("map.osm.pbf", profile="car")` builds a cache from Python too
+(`profile` is `car` | `bicycle` | `foot`).
 
-| Method | Returns | Notes |
-|--------|---------|-------|
-| `Engine()` | `Engine` | Construct an idle engine. |
-| `start_solve(...)` | `None` | Spawn the background solver thread. |
-| `get_status_json()` | `str` | Status (state, phase, message, progress, elapsed_s, dataset_iter, config). |
-| `get_dataset_json()` | `Optional[str]` | Latest dataset, or `None` until first iter. |
-| `dataset_iter()` | `int` | Current published iteration counter. |
-| `is_done()` | `bool` | True once the solver finished (or failed). |
-| `state()` | `str` | One of `idle` / `solving` / `evolving` / `done` / `failed`. |
+---
 
-`start_solve(...)` arguments mirror the `mpee-serve` CLI:
+## Optional: serve caches on your LAN
 
-```python
-start_solve(
-    region: str,
-    n_jobs: int,
-    n_vehicles: int,
-    capacity: int,
-    seed: int,
-    ch: str,
-    pp: str,
-    time_limit_s: float = 45.0,
-    multi_start: int = 1,
-)
+A side feature for sharing prebuilt caches with another device (e.g. a
+phone) so it can route without rebuilding:
+
+```bash
+mpee serve --data-dir data
 ```
 
 ---
 
-## Endpoints exposed by `python/app.py`
+## How it works
 
-Identical to mpee-serve so the embedded `index.html` works unchanged:
+`pip install mpee` ships a compiled Rust extension (`mpee._mpee`) plus a
+thin Python CLI. All routing and optimization run **in-process** — the map
+cache is memory-mapped, so opening it is near-instant and peak RAM stays
+low. Nothing is sent to a server.
 
-| Method | Path           | Description |
-|--------|----------------|-------------|
-| GET    | `/`            | Embedded Leaflet HTML (mobile UI). |
-| GET    | `/api/status`  | Live status JSON (polled by the UI). |
-| GET    | `/api/dataset` | 200 + dataset, or 202 + status while pre-first-iter. |
-| GET    | `/api/health`  | `{"ok":true}` |
-
-CORS is wide-open. The UI polls `/api/status` every ~2 s and re-renders
-the map whenever `dataset_iter` advances.
-
----
-
-## Why not just disable the firewall?
-
-Doing `socketfilterfw --setglobalstate off` works but turns off all
-incoming protection. Adding `--add ./target/release/mpee-serve` works
-per-binary but every `cargo build` changes the binary's code signature,
-so the rule expires and the firewall blocks the next launch silently.
-Going through Python sidesteps that entirely.
+**MPEE** stands for **Morten Punnerud-Engelstad Engine**. MIT licensed.
+Source: [github.com/punnerud/mpee](https://github.com/punnerud/mpee).

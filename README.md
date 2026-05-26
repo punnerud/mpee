@@ -1,8 +1,50 @@
-# mpee
+# MPEE — Offline route calculations and optimization
 
-An open, unified Rust workbench for routing and vehicle-routing
+An open, unified Rust engine for routing and vehicle-routing
 optimisation — an alternative stack to **OSRM** + **VROOM**, where both
-engines run in the same process and share memory directly.
+engines run in the same process and share memory directly. Everything runs
+**offline** from a downloaded map: no API keys, no per-request billing, no
+data leaving your machine. It uses CPU **and** GPU, less memory than the
+alternatives, and the whole engine fits under ~50 MB.
+
+In head-to-head tests on a Mac, MPEE produced **shorter routes than
+[VROOM](https://github.com/VROOM-Project) at equal runtime**.
+
+## Install (Python / CLI)
+
+The fastest way to use the engine is the `mpee` Python package — a thin CLI
+and library over the same Rust core:
+
+```bash
+pip install mpee
+
+# 1. Get a map once (OpenStreetMap extract → routable cache):
+mpee download europe/great-britain/england/greater-london
+mpee build data/greater-london-latest.osm.pbf
+
+# 2. Route from A to B (offline):
+mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london.osm.pbf
+#   → distance: 2.38 km   duration: 4.4 min
+
+# 3. Optimize a multi-vehicle delivery run over your own stops:
+mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
+    --cache data/greater-london.osm.pbf
+#   → 50 stops, 3 vehicles used, 60.0 km total (solved in 4.6s)
+```
+
+From Python:
+
+```python
+import mpee
+r = mpee.Router("data/greater-london.osm.pbf.pp", "data/greater-london.osm.pbf.ch")
+leg = r.route(51.5080, -0.1281, 51.5138, -0.0984)     # {distance_km, duration_min, ...}
+plan = r.optimize(stops, vehicles=5, capacity=20)      # multi-vehicle VRP
+```
+
+See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
+[pypi.org/project/mpee](https://pypi.org/project/mpee/).
+
+## The Rust workbench
 
 | Layer                       | Crate                                    | Alternative to    |
 |-----------------------------|------------------------------------------|--------------------|
@@ -18,7 +60,7 @@ crate, `mpee-cli`, can use both library APIs in the same address space —
 no IPC, no file hand-off on the hot path.
 
 > Note on the folder name: the routing crate lives in `crates/dijeng/`
-> after Edsger W. Dijeng. The earlier spelling `dikstra` was a typo.
+> after Edsger W. Dijkstra. The earlier spelling `dikstra` was a typo.
 > The Cargo crate name itself is still `sssp_bench` (the original
 > standalone-project name).
 

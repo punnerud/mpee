@@ -1,12 +1,14 @@
 [package]
 name = "mpee-py"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "PyO3 bindings that expose the mpee in-process VRP solver to Python. Build with `maturin develop --release`."
 license = "MIT"
 
 [lib]
-name = "mpee"
+# Compiled module is `mpee._mpee`; the pure-Python `mpee` package
+# (python/mpee/) wraps it and provides the CLI.
+name = "_mpee"
 # `cdylib` is the format Python loads as an extension module.
 crate-type = ["cdylib"]
 

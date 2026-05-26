@@ -4,20 +4,24 @@ build-backend = "maturin"
 
 [project]
 name = "mpee"
-version = "0.1.0"
-description = "MPEE (Morten Punnerud-Engelstad Engine) — Python bindings for the in-process Rust routing (dijeng) + VRP solver (brooom). Load the engine from Python; the solver and the interpreter share one address space."
+version = "0.2.0"
+description = "MPEE — offline route calculations and optimization. A self-contained Rust routing + VRP engine you drive from Python or the `mpee` CLI: point-to-point routes, N×N tables, and multi-vehicle delivery optimization, all offline from a downloaded map."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Morten Punnerud-Engelstad", email = "morten@punnerud.net" }]
-keywords = ["routing", "vrp", "optimization", "dijkstra", "logistics", "pyo3", "rust"]
+keywords = ["routing", "vrp", "optimization", "dijkstra", "logistics", "osm", "offline", "pyo3", "rust"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering",
+    "Intended Audience :: Developers",
 ]
+
+[project.scripts]
+mpee = "mpee.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/punnerud/mpee"
@@ -25,4 +29,5 @@ Repository = "https://github.com/punnerud/mpee"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "mpee"
+python-source = "python"
+module-name = "mpee._mpee"
