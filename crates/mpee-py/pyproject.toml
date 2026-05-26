@@ -3,11 +3,26 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "mpee_py"
+name = "mpee"
 version = "0.1.0"
-description = "PyO3 bindings for mpee — load the Rust VRP solver from Python and serve the result with any Python HTTP framework."
+description = "MPEE (Morten Punnerud-Engelstad Engine) — Python bindings for the in-process Rust routing (dijeng) + VRP solver (brooom). Load the engine from Python; the solver and the interpreter share one address space."
+readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
+authors = [{ name = "Morten Punnerud-Engelstad", email = "morten@punnerud.net" }]
+keywords = ["routing", "vrp", "optimization", "dijkstra", "logistics", "pyo3", "rust"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Homepage = "https://github.com/punnerud/mpee"
+Repository = "https://github.com/punnerud/mpee"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+module-name = "mpee"

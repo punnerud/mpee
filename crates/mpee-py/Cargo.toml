@@ -6,7 +6,7 @@ description = "PyO3 bindings that expose the mpee in-process VRP solver to Pytho
 license = "MIT"
 
 [lib]
-name = "mpee_py"
+name = "mpee"
 # `cdylib` is the format Python loads as an extension module.
 crate-type = ["cdylib"]
 

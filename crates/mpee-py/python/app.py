@@ -1,10 +1,10 @@
-"""mpee_py + Flask — Python serves the HTTP layer, Rust does the solving.
+"""mpee + Flask — Python serves the HTTP layer, Rust does the solving.
 
 Why this exists: macOS Application Firewall asks per-binary permission
 for non-loopback listeners. Python (Apple-signed) is already allowed,
 so Flask can bind 0.0.0.0:8032 freely without prompting for every
 mpee-serve rebuild. The Rust solver runs inside this same Python
-process via `import mpee_py`, so the dataset lives in the same RAM
+process via `import mpee`, so the dataset lives in the same RAM
 that brooom's solve_with_matrix just finished writing.
 
 Run:
@@ -27,7 +27,7 @@ import sys
 
 from flask import Flask, Response, send_file
 
-import mpee_py  # the Rust extension built by `maturin develop`
+import mpee  # the Rust extension built by `maturin develop`
 
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -73,7 +73,7 @@ def main() -> int:
     # Spin up the Rust engine and kick off the solve in a background
     # thread (the Rust side handles the threading). Python keeps a
     # single reference to the Engine; the dataset stays in Rust RAM.
-    engine = mpee_py.Engine()
+    engine = mpee.Engine()
     engine.start_solve(
         region=args.region,
         n_jobs=args.n_jobs,
@@ -89,7 +89,7 @@ def main() -> int:
         max_distance_m=int(args.max_distance_km * 1000),
     )
     print(
-        f"mpee_py started solving: region={args.region} n_jobs={args.n_jobs} "
+        f"mpee started solving: region={args.region} n_jobs={args.n_jobs} "
         f"n_vehicles={args.n_vehicles} budget={args.time_limit_s}s",
         file=sys.stderr,
     )

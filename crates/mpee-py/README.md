@@ -20,10 +20,10 @@ without prompts.
 ## Architecture
 
 ```
-                ┌──── Python process (Flask + mpee_py) ────────────────┐
+                ┌──── Python process (Flask + mpee) ────────────────┐
                 │                                                     │
-                │  import mpee_py                                       │
-                │  eng = mpee_py.Engine()                               │
+                │  import mpee                                       │
+                │  eng = mpee.Engine()                               │
                 │  eng.start_solve(region="london", n_jobs=500, ...)   │
                 │             │                                        │
                 │             ▼  std::thread::spawn (inside Rust)      │
@@ -79,10 +79,10 @@ that `mpee-serve` triggers — Python is already trusted by the firewall.
 ## Python API
 
 ```python
-import mpee_py
+import mpee
 import json, time
 
-eng = mpee_py.Engine()
+eng = mpee.Engine()
 eng.start_solve(
     region="london",      # "london" / "oslo" / "manhattan" / "paris"
     n_jobs=500,

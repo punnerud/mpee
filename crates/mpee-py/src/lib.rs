@@ -1,4 +1,4 @@
-//! PyO3 bindings — `import mpee_py` from Python and drive the in-process
+//! PyO3 bindings — `import mpee` from Python and drive the in-process
 //! VRP solver. The Python interpreter and the Rust solver share one
 //! address space: the JSON bytes returned by `get_dataset_json()` come
 //! straight out of the same `Arc<String>` that the solver thread just
@@ -12,8 +12,8 @@
 //!   python3 python/app.py
 //!
 //! API:
-//!   import mpee_py
-//!   eng = mpee_py.Engine()
+//!   import mpee
+//!   eng = mpee.Engine()
 //!   eng.start_solve(region="london", n_jobs=500, n_vehicles=20, ...)
 //!   while not eng.is_done():
 //!       status = json.loads(eng.get_status_json())
@@ -81,7 +81,7 @@ fn set_phase(state: &Arc<RwLock<AppState>>, phase: &str, message: &str, progress
     s.phase = phase.into();
     s.message = message.into();
     s.progress = progress;
-    eprintln!("[mpee_py {:>10}] {}", phase, message);
+    eprintln!("[mpee {:>10}] {}", phase, message);
 }
 
 // -------------------------------------------------------------------------
@@ -187,7 +187,7 @@ impl Engine {
                 };
                 if let Err(e) = solve_in_process(&args, &solver_state) {
                     let msg = format!("{:#}", e);
-                    eprintln!("[mpee_py] solver failed: {msg}");
+                    eprintln!("[mpee] solver failed: {msg}");
                     let mut s = solver_state.write().unwrap();
                     s.state = "failed";
                     s.error = Some(msg);
@@ -242,7 +242,7 @@ impl Engine {
 }
 
 #[pymodule]
-fn mpee_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn mpee(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     Ok(())
 }
@@ -477,7 +477,7 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
         let n_2opts = intra_route_2opt_pass(&mut pub_sol, &problem, &matrix);
         if n_swaps + n_relocs + n_2opts > 0 {
             eprintln!(
-                "[mpee_py     fixup] iter {iter}: {n_swaps} 2-opt* swap(s) + {n_relocs} cross-route relocate(s) + {n_2opts} intra-route 2-opt(s)"
+                "[mpee     fixup] iter {iter}: {n_swaps} 2-opt* swap(s) + {n_relocs} cross-route relocate(s) + {n_2opts} intra-route 2-opt(s)"
             );
         }
 
