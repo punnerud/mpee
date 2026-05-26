@@ -31,11 +31,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Generate a random Vroom-compatible VRP problem inside a region's bbox.
+    /// Generate a random Vroom-compatible VRP problem (inside a named region's
+    /// bbox, or a disk around an arbitrary --center).
     Gen {
-        /// Region name (currently supports: london, oslo, manhattan, paris).
+        /// Named region shortcut (london, oslo, manhattan, paris).
         #[arg(long, default_value = "london")]
         region: String,
+
+        /// Generate around an ARBITRARY point instead of a named region, e.g.
+        /// `--center 61.115,10.466` (Lillehammer). Overrides --region.
+        #[arg(long)]
+        center: Option<String>,
+
+        /// Disk radius in km when --center is given (default 5).
+        #[arg(long, default_value_t = 0.0)]
+        radius_km: f64,
 
         /// Number of jobs (customers).
         #[arg(long, default_value_t = 500)]
@@ -136,8 +146,12 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Gen { region, n_jobs, n_vehicles, capacity, seed, output } => {
-            cmd_gen(&region, n_jobs, n_vehicles, capacity, seed, &output)
+        Cmd::Gen { region, center, radius_km, n_jobs, n_vehicles, capacity, seed, output } => {
+            let center = match center.as_deref() {
+                Some(s) => Some(parse_lat_lon(s)?),
+                None => None,
+            };
+            cmd_gen(&region, center, radius_km, n_jobs, n_vehicles, capacity, seed, &output)
         }
         Cmd::Download { region, out_dir } => cmd_download(&region, &out_dir),
         Cmd::Build { pbf, profile, quiet, force } => cmd_build(&pbf, &profile, !quiet, force),
@@ -149,7 +163,7 @@ fn main() -> Result<()> {
             time_limit_s, multi_start, output,
         } => {
             let tmp = std::env::temp_dir().join(format!("mpee-pipeline-{}.json", seed));
-            cmd_gen(&region, n_jobs, n_vehicles, capacity, seed, &tmp)?;
+            cmd_gen(&region, None, 0.0, n_jobs, n_vehicles, capacity, seed, &tmp)?;
             cmd_solve(&tmp, &ch, &pp, time_limit_s, multi_start, output.as_deref())
         }
     }
@@ -196,22 +210,53 @@ fn region_depot(region: &str) -> (f64, f64) {
 // gen: random problem inside a region's bbox.
 // -------------------------------------------------------------------------
 
+/// Parse a "lat,lon" string into (lat, lon).
+fn parse_lat_lon(s: &str) -> Result<(f64, f64)> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() != 2 {
+        bail!("expected LAT,LON, got {s:?}");
+    }
+    Ok((parts[0].parse().context("bad lat")?, parts[1].parse().context("bad lon")?))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_gen(
     region: &str,
+    center: Option<(f64, f64)>,
+    radius_km: f64,
     n_jobs: usize,
     n_vehicles: usize,
     capacity: i64,
     seed: u64,
     output: &Path,
 ) -> Result<()> {
-    let (lat_min, lat_max, lon_min, lon_max) = region_bbox(region)?;
-    let (depot_lat, depot_lon) = region_depot(region);
+    // Depot + per-job sampler: either a disk around an arbitrary --center, or
+    // a named region's bbox.
+    let (depot_lat, depot_lon, disk_r_m, bbox) = if let Some((clat, clon)) = center {
+        let r = if radius_km > 0.0 { radius_km } else { 5.0 };
+        (clat, clon, Some(r * 1000.0), None)
+    } else {
+        let (depot_lat, depot_lon) = region_depot(region);
+        (depot_lat, depot_lon, None, Some(region_bbox(region)?))
+    };
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     let mut jobs = Vec::with_capacity(n_jobs);
     for i in 0..n_jobs {
-        let lat = rng.gen_range(lat_min..lat_max);
-        let lon = rng.gen_range(lon_min..lon_max);
+        let (lat, lon) = if let Some(rm) = disk_r_m {
+            // Uniform within a disk of radius `rm` metres around the depot:
+            // r = sqrt(u)·R gives uniform area density; theta uniform.
+            use std::f64::consts::PI;
+            let u: f64 = rng.gen_range(0.0..1.0);
+            let r = u.sqrt() * rm;
+            let theta: f64 = rng.gen_range(0.0..(2.0 * PI));
+            let lat = depot_lat + (r * theta.sin()) / 111_000.0;
+            let lon = depot_lon + (r * theta.cos()) / (111_000.0 * depot_lat.to_radians().cos().max(1e-6));
+            (lat, lon)
+        } else {
+            let (lat_min, lat_max, lon_min, lon_max) = bbox.unwrap();
+            (rng.gen_range(lat_min..lat_max), rng.gen_range(lon_min..lon_max))
+        };
         let delivery = rng.gen_range(1..=10_i64);
         jobs.push(serde_json::json!({
             "id": (i + 1) as u64,
@@ -233,7 +278,13 @@ fn cmd_gen(
     }
 
     let problem = serde_json::json!({
-        "description": format!("mpe gen {region} n_jobs={n_jobs} n_vehicles={n_vehicles} seed={seed}"),
+        "description": match center {
+            Some((clat, clon)) => format!(
+                "mpee gen center={clat},{clon} radius_km={} n_jobs={n_jobs} n_vehicles={n_vehicles} seed={seed}",
+                if radius_km > 0.0 { radius_km } else { 5.0 }
+            ),
+            None => format!("mpee gen {region} n_jobs={n_jobs} n_vehicles={n_vehicles} seed={seed}"),
+        },
         "jobs": jobs,
         "vehicles": vehicles,
     });

@@ -208,6 +208,13 @@ Per-vehicle `capacity` / `skills` / `time_window` / `speed_factor` /
 / `time_windows` / `service` / `priority` are all honoured — see the full
 constraint table in [`crates/mpee-py/`](crates/mpee-py/) (same engine model).
 
+> Don't want to hand-write JSON? `mpee-cli gen` makes a random problem to try —
+> at **any** location, not just the four named regions:
+> ```bash
+> mpee-cli gen --center 61.115,10.466 --radius-km 5 --n-jobs 50 -o problem.json   # Lillehammer
+> mpee-cli gen --region london --n-jobs 50 -o problem.json                        # or a named region
+> ```
+
 ---
 
 ## Status
