@@ -27,7 +27,8 @@ pip install mpee
 
 # 1. Get a map once (OpenStreetMap extract → routable cache):
 mpee download europe/great-britain/england/greater-london
-mpee build data/greater-london-latest.osm.pbf
+mpee build data/greater-london-latest.osm.pbf            # car (default)
+# mpee build data/greater-london-latest.osm.pbf bicycle  # or: car | bicycle | foot
 
 # 2. Route from A to B (offline):
 mpee route 51.5080,-0.1281 51.5138,-0.0984 --cache data/greater-london-latest.osm.pbf

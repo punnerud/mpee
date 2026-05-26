@@ -11,11 +11,20 @@
 use crate::buffer::Buffer;
 use crate::ch::{self, ContractionHierarchy, PathScratch};
 use crate::geo_index::LatLonGrid;
+
+/// Panic message when a routing matrix is requested on a geocoding-only
+/// service (opened via `new_geocoding`, i.e. without a `.ch` cache).
+const CH_REQUIRED: &str =
+    "matrix requires a CH cache — this service was opened for geocoding only (no .ch)";
+
 pub struct RoutingService {
-    pub ch: ContractionHierarchy,
+    /// The contraction hierarchy needed for `route`/`matrix`. `None` when the
+    /// service was opened for **geocoding only** (no `.ch`), which lets a pure
+    /// reverse/forward/intersection service skip loading the largest cache file.
+    ch: Option<ContractionHierarchy>,
     pub coords: Buffer<(f32, f32)>,
     /// `inv_perm[internal_id] = csr_id`. Built at construction time from
-    /// `ch.perm` so we can map a CH-path back to coordinates.
+    /// `ch.perm` so we can map a CH-path back to coordinates (empty without ch).
     inv_perm: Buffer<u32>,
     /// Spatial index over `coords` for sub-100 µs nearest-vertex lookup.
     snap_grid: LatLonGrid,
@@ -58,12 +67,41 @@ impl RoutingService {
         let cell_size_deg = if n > 5_000_000 { 0.01 } else { 0.005 };
         let snap_grid = LatLonGrid::from_coords(coords.as_slice(), cell_size_deg);
         Self {
-            ch,
+            ch: Some(ch),
             coords,
             inv_perm: inv.into(),
             snap_grid,
             names: None,
         }
+    }
+
+    /// Open a **geocoding-only** service from coordinates alone (the `.pp`
+    /// cache) — no contraction hierarchy. `reverse`/`geocode`/`intersection`
+    /// (after `set_names`) and `snap`/`nearest_node` work; `route`/`matrix`
+    /// do not (they need a `.ch`). This avoids loading the largest cache file
+    /// when all you want is street ⇄ coordinate lookups.
+    pub fn new_geocoding(coords: Buffer<(f32, f32)>) -> Self {
+        let n = coords.len();
+        let cell_size_deg = if n > 5_000_000 { 0.01 } else { 0.005 };
+        let snap_grid = LatLonGrid::from_coords(coords.as_slice(), cell_size_deg);
+        Self {
+            ch: None,
+            coords,
+            inv_perm: Buffer::from(Vec::new()),
+            snap_grid,
+            names: None,
+        }
+    }
+
+    /// Whether a CH is loaded — i.e. `route`/`matrix` are available. False for
+    /// a geocoding-only service opened with [`new_geocoding`](Self::new_geocoding).
+    pub fn has_routing(&self) -> bool {
+        self.ch.is_some()
+    }
+
+    /// Node count of the loaded graph.
+    pub fn node_count(&self) -> usize {
+        self.coords.len()
     }
 
     /// Attach a street-name sidecar (built next to the `.pp`/`.ch` caches),
@@ -180,17 +218,18 @@ impl RoutingService {
         srcs: &[(f32, f32)],
         dsts: &[(f32, f32)],
     ) -> (Vec<f32>, Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        let ch = self.ch.as_ref().expect(CH_REQUIRED);
         let snap_srcs: Vec<u32> = srcs.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
         let snap_dsts: Vec<u32> = dsts.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
         let int_srcs: Vec<u32> = snap_srcs
             .iter()
-            .map(|&csr| self.ch.perm[csr as usize])
+            .map(|&csr| ch.perm[csr as usize])
             .collect();
         let int_dsts: Vec<u32> = snap_dsts
             .iter()
-            .map(|&csr| self.ch.perm[csr as usize])
+            .map(|&csr| ch.perm[csr as usize])
             .collect();
-        let durations = ch::matrix(&self.ch, &int_srcs, &int_dsts);
+        let durations = ch::matrix(ch, &int_srcs, &int_dsts);
         let snapped_src_coords = snap_srcs
             .iter()
             .map(|&csr| self.coords[csr as usize])
@@ -211,17 +250,18 @@ impl RoutingService {
         srcs: &[(f32, f32)],
         dsts: &[(f32, f32)],
     ) -> (Vec<f32>, Vec<f32>, Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        let ch = self.ch.as_ref().expect(CH_REQUIRED);
         let snap_srcs: Vec<u32> = srcs.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
         let snap_dsts: Vec<u32> = dsts.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
         let int_srcs: Vec<u32> = snap_srcs
             .iter()
-            .map(|&csr| self.ch.perm[csr as usize])
+            .map(|&csr| ch.perm[csr as usize])
             .collect();
         let int_dsts: Vec<u32> = snap_dsts
             .iter()
-            .map(|&csr| self.ch.perm[csr as usize])
+            .map(|&csr| ch.perm[csr as usize])
             .collect();
-        let (durations, distances) = ch::matrix_with_dist(&self.ch, &int_srcs, &int_dsts);
+        let (durations, distances) = ch::matrix_with_dist(ch, &int_srcs, &int_dsts);
         // matrix_with_dist returns INF where the CH didn't carry a distance
         // channel; clean those up to 0 for downstream consumers.
         let _ = (PathScratch::new(0), &self.inv_perm); // keep imports used
@@ -243,12 +283,14 @@ impl RoutingService {
         dst_lat: f32,
         dst_lon: f32,
     ) -> Option<RouteResponse> {
+        // Geocoding-only service (no CH) → no routing.
+        let ch = self.ch.as_ref()?;
         let src_csr = self.nearest_node(src_lat, src_lon);
         let dst_csr = self.nearest_node(dst_lat, dst_lon);
-        let src_int = self.ch.perm[src_csr as usize];
-        let dst_int = self.ch.perm[dst_csr as usize];
+        let src_int = ch.perm[src_csr as usize];
+        let dst_int = ch.perm[dst_csr as usize];
         // CH weight is duration (seconds). Path is in CH-internal IDs.
-        let (duration_s, path_internal) = ch::query_with_path(&self.ch, src_int, dst_int)?;
+        let (duration_s, path_internal) = ch::query_with_path(ch, src_int, dst_int)?;
         let geometry: Vec<(f32, f32)> = path_internal
             .iter()
             .map(|&iid| {

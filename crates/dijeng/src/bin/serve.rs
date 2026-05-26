@@ -146,7 +146,7 @@ fn build_state(dataset: &str) -> std::io::Result<ServerState> {
         println!(
             "[serve] mounted profile '{name}' ({:.0} ms, n={})",
             t.elapsed().as_secs_f64() * 1000.0,
-            svc.ch.graph_fwd.n
+            svc.node_count()
         );
         profiles.insert(*name, Arc::new(svc));
     }

@@ -116,7 +116,9 @@ A crossing is the road node two streets *share* (no polyline maths), so a
 junction modelled with several nodes returns several points — pick the one you
 want. Street-level only: the name lives on the OSM road, so you get the street
 and its coordinate, not a house number. The sidecar is independently deletable
-if you only need routing.
+if you only need routing — and conversely, **geocoding needs only `.pp` +
+`.names`, not the larger `.ch`**: open `mpee.Router("area.osm.pbf.pp")` with no
+`ch_path` (or pass `--pp` to the CLI) for a lightweight geocoding-only service.
 
 > **Multi-city caches:** street names are unique only within a downloaded area.
 > On a whole-country cache the same name (e.g. *Munkegata*, *Kongens gate*)

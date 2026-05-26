@@ -55,6 +55,25 @@ def _resolve_cache(args) -> tuple[str, str]:
                      "or both --pp and --ch")
 
 
+def _resolve_pp(args) -> str:
+    """Return just the .pp path (geocoding needs no .ch): --cache PREFIX or --pp."""
+    if getattr(args, "pp", None):
+        return args.pp
+    if args.cache:
+        return f"{args.cache}.pp"
+    raise SystemExit("error: give --cache PREFIX (uses PREFIX.pp + PREFIX.names) or --pp")
+
+
+def _open_router(pp: str, ch: str | None = None):
+    """Open a Router, turning load failures into a clean `error:` line instead
+    of a raw traceback. `ch=None` opens a geocoding-only Router (skips .ch)."""
+    from . import Router
+    try:
+        return Router(pp, ch) if ch is not None else Router(pp)
+    except (RuntimeError, OSError, ValueError) as e:
+        raise SystemExit(f"error: {e}")
+
+
 def _load_stops(path: str) -> list[tuple[float, float]]:
     """Read stops from a file: JSON array of [lat, lon], or one 'lat,lon'
     per line (blank lines and # comments ignored)."""
@@ -74,7 +93,8 @@ def _load_stops(path: str) -> list[tuple[float, float]]:
 
 def _add_cache_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cache", metavar="PREFIX",
-                   help="cache prefix; loads PREFIX.pp + PREFIX.ch")
+                   help="cache prefix = the .osm.pbf path; loads PREFIX.pp + "
+                        "PREFIX.ch (+ PREFIX.names for geocoding)")
     p.add_argument("--pp", help="explicit .pp cache path")
     p.add_argument("--ch", help="explicit .ch cache path")
 
@@ -84,9 +104,8 @@ def _add_cache_args(p: argparse.ArgumentParser) -> None:
 # --------------------------------------------------------------------------
 
 def cmd_route(args) -> int:
-    from . import Router
     pp, ch = _resolve_cache(args)
-    r = Router(pp, ch)
+    r = _open_router(pp, ch)
     leg = r.route(args.frm[0], args.frm[1], args.to[0], args.to[1],
                   geometry=args.geometry)
     if args.json:
@@ -107,11 +126,10 @@ def cmd_route(args) -> int:
 
 
 def cmd_optimize(args) -> int:
-    from . import Router
     pp, ch = _resolve_cache(args)
     stops = _load_stops(args.stops)
     depot = _latlon(args.depot) if args.depot else None
-    r = Router(pp, ch)
+    r = _open_router(pp, ch)
     plan = r.optimize(stops, vehicles=args.vehicles, capacity=args.capacity,
                       depot=depot, time_limit_s=args.time)
     if args.json:
@@ -134,9 +152,7 @@ def cmd_optimize(args) -> int:
 
 
 def cmd_reverse(args) -> int:
-    from . import Router
-    pp, ch = _resolve_cache(args)
-    r = Router(pp, ch)
+    r = _open_router(_resolve_pp(args))   # geocoding-only: no .ch loaded
     if not r.has_names():
         raise SystemExit(
             f"error: no .names sidecar next to {pp} — rebuild the cache "
@@ -150,9 +166,7 @@ def cmd_reverse(args) -> int:
 
 
 def cmd_geocode(args) -> int:
-    from . import Router
-    pp, ch = _resolve_cache(args)
-    r = Router(pp, ch)
+    r = _open_router(_resolve_pp(args))   # geocoding-only: no .ch loaded
     if not r.has_names():
         raise SystemExit(
             f"error: no .names sidecar next to {pp} — rebuild the cache "
@@ -170,9 +184,7 @@ def cmd_geocode(args) -> int:
 
 
 def cmd_crossing(args) -> int:
-    from . import Router
-    pp, ch = _resolve_cache(args)
-    r = Router(pp, ch)
+    r = _open_router(_resolve_pp(args))   # geocoding-only: no .ch loaded
     if not r.has_names():
         raise SystemExit(
             f"error: no .names sidecar next to {pp} — rebuild the cache "

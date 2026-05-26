@@ -246,19 +246,21 @@ fn main() -> Result<()> {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             cmd_route(parse_lat_lon(&from)?, parse_lat_lon(&to)?, &ch, &pp)
         }
-        Cmd::Reverse { point, cache, ch, pp } => {
-            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
-            cmd_reverse(parse_lat_lon(&point)?, &ch, &pp)
+        // Geocoding never routes, so it only needs <prefix>.pp + <prefix>.names
+        // (skip the large .ch). `--ch` is accepted but ignored here.
+        Cmd::Reverse { point, cache, ch: _, pp } => {
+            let pp = resolve_pp(cache.as_deref(), pp.as_deref())?;
+            cmd_reverse(parse_lat_lon(&point)?, &pp)
         }
-        Cmd::Geocode { query, near, cache, ch, pp } => {
-            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
+        Cmd::Geocode { query, near, cache, ch: _, pp } => {
+            let pp = resolve_pp(cache.as_deref(), pp.as_deref())?;
             let near = match near.as_deref() { Some(s) => Some(parse_lat_lon(s)?), None => None };
-            cmd_geocode(&query, near, &ch, &pp)
+            cmd_geocode(&query, near, &pp)
         }
-        Cmd::Crossing { a, b, near, radius_km, cache, ch, pp } => {
-            let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
+        Cmd::Crossing { a, b, near, radius_km, cache, ch: _, pp } => {
+            let pp = resolve_pp(cache.as_deref(), pp.as_deref())?;
             let near = match near.as_deref() { Some(s) => Some(parse_lat_lon(s)?), None => None };
-            cmd_crossing(&a, &b, near, radius_km, &ch, &pp)
+            cmd_crossing(&a, &b, near, radius_km, &pp)
         }
         Cmd::Pipeline {
             region, n_jobs, n_vehicles, seed, capacity, cache, ch, pp,
@@ -349,6 +351,18 @@ fn resolve_cache(cache: Option<&Path>, ch: Option<&Path>, pp: Option<&Path>) -> 
         return Ok((PathBuf::from(format!("{b}.ch")), PathBuf::from(format!("{b}.pp"))));
     }
     bail!("give --cache <prefix> (uses <prefix>.ch + <prefix>.pp), or both --ch and --pp");
+}
+
+/// Resolve only the PP cache (for geocoding, which needs no `.ch`): from
+/// `--cache <prefix>` → `<prefix>.pp`, or an explicit `--pp`.
+fn resolve_pp(cache: Option<&Path>, pp: Option<&Path>) -> Result<PathBuf> {
+    if let Some(p) = pp {
+        return Ok(p.to_path_buf());
+    }
+    if let Some(base) = cache {
+        return Ok(PathBuf::from(format!("{}.pp", base.to_string_lossy())));
+    }
+    bail!("give --cache <prefix> (uses <prefix>.pp + <prefix>.names), or --pp");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,15 +545,14 @@ fn cmd_route(from: (f64, f64), to: (f64, f64), ch_path: &Path, pp_path: &Path) -
 // from the `.names` sidecar written by `mpee build`. No separate index.
 // -------------------------------------------------------------------------
 
-/// Open a routing service from a cache pair, attaching the `.names` sidecar
-/// (derived from the PP path) when one is present.
-fn load_service_with_names(ch_path: &Path, pp_path: &Path) -> Result<dijeng::routing::RoutingService> {
+/// Open a **geocoding-only** service from the `.pp` cache (no `.ch` — geocoding
+/// never routes, so we skip the largest file), attaching the `.names` sidecar
+/// derived from the PP path when present.
+fn load_geocoder(pp_path: &Path) -> Result<dijeng::routing::RoutingService> {
     let pp = dijeng::cache_pp::load_mmap(pp_path)
         .with_context(|| format!("load PP cache {}", pp_path.display()))?;
-    let ch = dijeng::cache_ch::load_mmap(ch_path)
-        .with_context(|| format!("load CH cache {}", ch_path.display()))?;
     let n = pp.coords.as_slice().len();
-    let mut svc = dijeng::routing::RoutingService::new(ch, pp.coords);
+    let mut svc = dijeng::routing::RoutingService::new_geocoding(pp.coords);
 
     let pp_str = pp_path.to_string_lossy();
     let names_path = pp_str
@@ -555,8 +568,8 @@ fn load_service_with_names(ch_path: &Path, pp_path: &Path) -> Result<dijeng::rou
     Ok(svc)
 }
 
-fn cmd_reverse(point: (f64, f64), ch_path: &Path, pp_path: &Path) -> Result<()> {
-    let svc = load_service_with_names(ch_path, pp_path)?;
+fn cmd_reverse(point: (f64, f64), pp_path: &Path) -> Result<()> {
+    let svc = load_geocoder(pp_path)?;
     if !svc.has_names() {
         bail!(
             "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \
@@ -578,8 +591,8 @@ fn cmd_reverse(point: (f64, f64), ch_path: &Path, pp_path: &Path) -> Result<()> 
     Ok(())
 }
 
-fn cmd_geocode(query: &str, near: Option<(f64, f64)>, ch_path: &Path, pp_path: &Path) -> Result<()> {
-    let svc = load_service_with_names(ch_path, pp_path)?;
+fn cmd_geocode(query: &str, near: Option<(f64, f64)>, pp_path: &Path) -> Result<()> {
+    let svc = load_geocoder(pp_path)?;
     if !svc.has_names() {
         bail!(
             "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \
@@ -606,10 +619,9 @@ fn cmd_crossing(
     b: &str,
     near: Option<(f64, f64)>,
     radius_km: Option<f64>,
-    ch_path: &Path,
     pp_path: &Path,
 ) -> Result<()> {
-    let svc = load_service_with_names(ch_path, pp_path)?;
+    let svc = load_geocoder(pp_path)?;
     if !svc.has_names() {
         bail!(
             "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \

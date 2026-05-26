@@ -264,14 +264,23 @@ impl Router {
     /// `mpee build` CLI). Both are mmap'd, so opening is near-instant and
     /// peak RAM stays low.
     #[new]
-    fn new(pp_path: &str, ch_path: &str) -> PyResult<Self> {
+    #[pyo3(signature = (pp_path, ch_path = None))]
+    fn new(pp_path: &str, ch_path: Option<&str>) -> PyResult<Self> {
         let pp = dijeng::cache_pp::load_mmap(pp_path)
             .map_err(|e| PyRuntimeError::new_err(format!("load PP cache {pp_path}: {e}")))?;
-        let ch = dijeng::cache_ch::load_mmap(ch_path)
-            .map_err(|e| PyRuntimeError::new_err(format!("load CH cache {ch_path}: {e}")))?;
         let n = pp.coords.as_slice().len();
         let coords = dijeng::buffer::Buffer::from(pp.coords.as_slice().to_vec());
-        let mut routing = dijeng::routing::RoutingService::new(ch, coords);
+        // `ch_path=None` opens a geocoding-only Router (reverse/geocode/
+        // intersection/snap) without loading the large `.ch` — handy for a
+        // pure geocoding service. routing methods then raise a clear error.
+        let mut routing = match ch_path {
+            Some(cp) => {
+                let ch = dijeng::cache_ch::load_mmap(cp)
+                    .map_err(|e| PyRuntimeError::new_err(format!("load CH cache {cp}: {e}")))?;
+                dijeng::routing::RoutingService::new(ch, coords)
+            }
+            None => dijeng::routing::RoutingService::new_geocoding(coords),
+        };
 
         // Auto-attach the street-name sidecar if present (`x.osm.pbf.names`,
         // derived from the `.pp` path), enabling offline geocoding. Absent or
@@ -340,6 +349,7 @@ impl Router {
         &self, py: Python<'py>,
         from_lat: f32, from_lon: f32, to_lat: f32, to_lon: f32, geometry: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
+        self.require_routing()?;
         let resp = self.routing.route(from_lat, from_lon, to_lat, to_lon)
             .ok_or_else(|| PyRuntimeError::new_err("no route found between the snapped points"))?;
         let d = PyDict::new_bound(py);
@@ -431,6 +441,13 @@ impl Router {
         self.routing.has_names()
     }
 
+    /// Whether a `.ch` cache is loaded — i.e. `route`/`optimize`/`solve`/`table`
+    /// are available. False when the Router was opened geocoding-only as
+    /// `Router(pp_path)` (no `ch_path`).
+    fn has_routing(&self) -> bool {
+        self.routing.has_routing()
+    }
+
     /// Bounding box (min_lat, min_lon, max_lat, max_lon) of the loaded graph.
     fn bbox<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let (mut mn_la, mut mx_la, mut mn_lo, mut mx_lo) =
@@ -451,6 +468,7 @@ impl Router {
     /// Full duration+distance table among `points` (list of (lat, lon)).
     /// Returns {"n", "durations_s": flat n×n, "distances_m": flat n×n}.
     fn table<'py>(&self, py: Python<'py>, points: Vec<(f32, f32)>) -> PyResult<Bound<'py, PyDict>> {
+        self.require_routing()?;
         let (durs, dists, _, _) = self.routing.matrix_with_distance(&points, &points);
         let d = PyDict::new_bound(py);
         d.set_item("n", points.len())?;
@@ -473,6 +491,7 @@ impl Router {
         stops: Vec<(f32, f32)>, vehicles: usize, capacity: i64,
         depot: Option<(f32, f32)>, time_limit_s: f64, use_gpu: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
+        self.require_routing()?;
         if stops.is_empty() { return Err(PyRuntimeError::new_err("no stops given")); }
         if vehicles == 0 { return Err(PyRuntimeError::new_err("vehicles must be >= 1")); }
 
@@ -633,6 +652,7 @@ impl Router {
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
+        self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
             .map_err(|e| PyRuntimeError::new_err(format!("problem JSON: {e}")))?;
         problem.validate().map_err(|e| PyRuntimeError::new_err(format!("invalid problem: {e}")))?;
@@ -785,6 +805,21 @@ fn unassigned_reason(
         "exceeds_capacity" // larger than any single capable+reachable vehicle
     } else {
         "no_room" // serviceable alone, but the fleet/time windows had no room left
+    }
+}
+
+impl Router {
+    /// Error out if this Router was opened geocoding-only (no `.ch`), so the
+    /// routing methods give a clear message instead of a confusing failure.
+    fn require_routing(&self) -> PyResult<()> {
+        if self.routing.has_routing() {
+            Ok(())
+        } else {
+            Err(PyRuntimeError::new_err(
+                "this Router was opened without a .ch cache (geocoding-only); \
+                 routing/optimization need it — open Router(pp_path, ch_path)",
+            ))
+        }
     }
 }
 
