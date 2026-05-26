@@ -83,11 +83,16 @@ centroid of the stops).
 
 ## Use it from Python
 
-> ⚠️ **Coordinate order.** The simple helpers take **`(lat, lon)`**:
+> ℹ️ **Coordinate order.** The simple helpers take **`(lat, lon)`**:
 > `route(lat, lon, …)`, `optimize([(lat, lon), …])`, `snap(lat, lon)`,
-> `table([(lat, lon), …])`. The VROOM-style `solve(problem)` uses the GeoJSON
-> convention **`[lon, lat]`** inside each `"coord"`. Mixing them up doesn't
-> error — it just snaps to the wrong place — so keep this straight.
+> `table([(lat, lon), …])`. The VROOM-style `solve(problem)` accepts a
+> coordinate in any of three forms — to avoid the ordering question entirely,
+> use **`{"lat": …, "lon": …}`**:
+> ```python
+> "location": {"lat": 51.5138, "lon": -0.0984}   # explicit (recommended)
+> "location": [-0.0984, 51.5138]                  # or VROOM [lon, lat]
+> "location": {"coord": [-0.0984, 51.5138]}       # or the struct form
+> ```
 
 ```python
 import mpee

@@ -19,14 +19,57 @@ pub type SkillSet = Vec<u32>;
 pub type Capacity = Vec<i64>;
 
 /// A geographic point. At least one of `coord` or `index` must be set.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Deserialization is forgiving so hand-written JSON doesn't have to remember
+/// the coordinate order — all of these parse to the same point:
+///   * `[lon, lat]`              — VROOM's bare array
+///   * `{"lon": .., "lat": ..}`  — explicit keys (unambiguous; recommended)
+///   * `{"coord": [lon, lat]}`   — the struct form
+///   * `{"index": n}`            — a matrix index instead of a coordinate
+/// Always serializes back to `{"coord": [lon, lat]}` / `{"index": n}`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Location {
     /// `[lon, lat]` in WGS84.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub coord: Option<[f64; 2]>,
     /// Index into the routing matrix.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<Idx>,
+}
+
+impl<'de> Deserialize<'de> for Location {
+    fn deserialize<D>(d: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct LocMap {
+            #[serde(default)]
+            coord: Option<[f64; 2]>,
+            #[serde(default)]
+            index: Option<Idx>,
+            #[serde(default)]
+            lat: Option<f64>,
+            #[serde(default)]
+            lon: Option<f64>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Arr([f64; 2]),
+            Map(LocMap),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Arr([lon, lat]) => Location { coord: Some([lon, lat]), index: None },
+            Raw::Map(m) => {
+                let coord = m.coord.or(match (m.lon, m.lat) {
+                    (Some(lon), Some(lat)) => Some([lon, lat]),
+                    _ => None,
+                });
+                Location { coord, index: m.index }
+            }
+        })
+    }
 }
 
 impl Location {
