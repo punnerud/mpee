@@ -151,6 +151,28 @@ export class Engine {
         }
     }
     /**
+     * Stage 2b — GPU-accelerated optimize. Builds the matrix + a quick CPU
+     * construction (greedy insertion, **no** local search), then runs
+     * intra-route **2-opt on the GPU** (WebGPU compute, one workgroup per
+     * route) to improve each route's visiting order. Fully async — nothing
+     * blocks the main thread. Same JSON as `optimize`, plus `solver:"gpu-2opt"`
+     * and `before_distance_km` / `after_distance_km` so the GPU's improvement
+     * over the raw construction is visible.
+     * @param {string} stops_json
+     * @param {string} depot_json
+     * @param {number} vehicles
+     * @param {number} capacity
+     * @returns {Promise<string>}
+     */
+    optimize_gpu(stops_json, depot_json, vehicles, capacity) {
+        const ptr0 = passStringToWasm0(stops_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(depot_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.engine_optimize_gpu(this.__wbg_ptr, ptr0, len0, ptr1, len1, vehicles, capacity);
+        return ret;
+    }
+    /**
      * Reverse-geocode: nearest street name to a point. Returns the name, or an
      * empty string if none / no sidecar.
      * @param {number} lat
@@ -623,12 +645,12 @@ function __wbg_get_imports() {
             arg0.unmap();
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 37, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 42, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h5751a1d6b4564570);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 91, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 96, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__he21e22a18e7c17bf);
             return ret;
         },
