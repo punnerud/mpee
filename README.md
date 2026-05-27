@@ -8,10 +8,11 @@
 vehicle-routing optimization in a single process, sharing memory directly.
 Download one area once, then route, optimize, and geocode it **fully offline**.
 
-⚡ MPEE builds a 50,000 × 50,000 distance matrix in **~500 MB** — the *same*
-matrix is **~10 GB** materialised, the way OSRM + VROOM do it (**≈20× more
-memory**). MPEE streams instead of storing, in **94 s** where OSRM runs out of
-RAM, on **CPU + GPU**.
+⚡ A 50,000-customer fleet needs a 50,000 × 50,000 distance matrix — **~10 GB**
+to hold in memory, which is exactly what OSRM + VROOM do. MPEE **never
+materialises it**: it streams that matrix through a **~500 MB** budget
+(**≈20× less**) yet still solves the whole fleet — in **94 s** where OSRM runs
+out of RAM, on **CPU + GPU**.
 
 > 🌐 **[Live demo → punnerud.github.io/mpee/demo](https://punnerud.github.io/mpee/demo/)** —
 > the whole engine compiled to WebAssembly, running **in your browser** over a
