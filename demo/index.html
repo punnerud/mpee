@@ -124,11 +124,25 @@
   #load .msg{color:var(--muted);font-size:.85rem}
   #load .err{color:#ff6b6b;font-size:.85rem;max-width:480px}
   .pin-num{color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);background:var(--accent)}
+
+  /* first-run hint: just tap the map */
+  #hint{
+    position:absolute;z-index:14;left:50%;transform:translateX(-50%);
+    top:calc(max(10px,env(safe-area-inset-top)) + 56px);
+    background:var(--accent);color:#fff;font-size:.85rem;font-weight:600;
+    padding:8px 16px;border-radius:999px;box-shadow:0 6px 20px rgba(13,148,136,.5);
+    pointer-events:none;white-space:nowrap;max-width:calc(100vw - 24px);
+    animation:hintpulse 1.8s ease-in-out infinite;transition:opacity .3s;
+  }
+  #hint.hide{opacity:0}
+  @keyframes hintpulse{0%,100%{transform:translateX(-50%) translateY(0)}50%{transform:translateX(-50%) translateY(-4px)}}
+  @media (min-width:760px){ #hint{left:392px;transform:none} @keyframes hintpulse{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}} }
 </style>
 </head>
 <body>
 <div id="map"></div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b4</div>
+<div id="hint" hidden>👆 Tap anywhere on the map to add stops</div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b5</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -202,8 +216,8 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b4';
-const BUILD = '2b4';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b5';
+const BUILD = '2b5';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -253,6 +267,9 @@ async function boot() {
     setupMap(); setupUI();
     $('load').style.display = 'none';
     $('searchbar').hidden = false;
+    // First-run nudge: just tap the map. Auto-fades after a while.
+    $('hint').hidden = false;
+    setTimeout(() => $('hint').classList.add('hide'), 9000);
   } catch (e) {
     console.error(e);
     $('load-bar').style.background = '#ff6b6b';
@@ -359,6 +376,7 @@ function renderStopsAndList() {
     row.appendChild(del); list.appendChild(row);
   });
   const c = $('count'); c.textContent = stops.length; c.classList.toggle('show', stops.length>0);
+  if (stops.length) $('hint').classList.add('hide');   // dismiss the tap-the-map nudge
   $('act-route').disabled = stops.length !== 2;
   $('act-opt').disabled = stops.length < 2;
   $('act-route').textContent = stops.length===2 ? 'Route A→B' : `Route (need 2, have ${stops.length})`;
