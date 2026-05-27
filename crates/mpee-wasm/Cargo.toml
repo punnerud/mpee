@@ -25,8 +25,10 @@ serde_json = "1"
 console_error_panic_hook = "0.1"
 # Stage 2a: prove a real WebGPU compute path works in the browser. wgpu's
 # wasm32 target uses the BROWSER_WEBGPU backend; device init + readback are
-# async (no pollster/blocking on the main thread).
-wgpu = "0.20"
+# async (no pollster/blocking on the main thread). v24 — newer than brooom's
+# 0.20 — so it doesn't send limits (maxInterStageShaderComponents) that current
+# Chrome's WebGPU has removed from the spec.
+wgpu = "24"
 
 [profile.release]
 opt-level = "s"   # optimise wasm for size

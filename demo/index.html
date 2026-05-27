@@ -128,7 +128,7 @@
 </head>
 <body>
 <div id="map"></div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2a1</div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2a2</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -201,8 +201,8 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2a1';
-const BUILD = '2a1';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2a2';
+const BUILD = '2a2';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);

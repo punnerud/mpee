@@ -335,7 +335,7 @@ pub async fn webgpu_probe() -> Result<String, JsValue> {
     use wgpu::util::DeviceExt;
     console_error_panic_hook::set_once();
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::BROWSER_WEBGPU,
         ..Default::default()
     });
@@ -346,18 +346,18 @@ pub async fn webgpu_probe() -> Result<String, JsValue> {
             compatible_surface: None,
         })
         .await
-        .ok_or_else(|| JsValue::from_str("no WebGPU adapter (browser exposes navigator.gpu but no usable device)"))?;
+        .ok_or_else(|| JsValue::from_str("no WebGPU adapter (navigator.gpu present but no usable device)"))?;
     let info = adapter.get_info();
 
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("mpee-probe"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits(),
-            },
-            None,
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("mpee-probe"),
+            required_features: wgpu::Features::empty(),
+            // Conservative limits, and (on this wgpu) without the removed
+            // maxInterStageShaderComponents that current Chrome rejects.
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            memory_hints: wgpu::MemoryHints::Performance,
+        }, None)
         .await
         .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
 
@@ -403,8 +403,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         label: Some("square-pipeline"),
         layout: None,
         module: &shader,
-        entry_point: "main",
+        entry_point: Some("main"),
         compilation_options: Default::default(),
+        cache: None,
     });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
