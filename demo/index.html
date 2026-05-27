@@ -128,7 +128,7 @@
 </head>
 <body>
 <div id="map"></div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b3</div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b4</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -150,24 +150,25 @@
 
     <!-- TRIP -->
     <div class="pane on" id="pane-trip">
-      <div id="stoplist"></div>
-      <div class="hint" id="trip-hint">Search an address above, tap the map, or import a CSV to add stops. 2 stops → route; 3+ → optimize.</div>
+      <!-- Primary actions on top so Optimize is visible without scrolling. -->
       <div class="controls">
         <div class="ctl"><label>Vehicles</label><input type="number" id="o-v" value="4" min="1" max="20"></div>
         <div class="ctl"><label>Capacity</label><input type="number" id="o-cap" value="10" min="1"></div>
       </div>
-      <div class="actions">
+      <div class="actions" style="margin-top:8px">
         <button class="btn" id="act-route" disabled>Route A→B</button>
         <button class="btn amber" id="act-opt" disabled>Optimize</button>
       </div>
+      <div class="gpu"><input type="checkbox" id="o-gpu"><label for="o-gpu" style="margin:0" id="o-gpu-l">GPU (WebGPU)</label></div>
+      <div class="result empty" id="trip-out"></div>
+      <div id="stoplist" style="margin-top:12px"></div>
+      <div class="hint" id="trip-hint">Search an address above, tap the map, or import a CSV to add stops. 2 stops → route; 3+ → optimize.</div>
       <div class="actions">
         <button class="btn ghost" id="csv-imp">Import CSV</button>
         <button class="btn ghost" id="csv-exp">Export CSV</button>
         <button class="btn ghost" id="act-clear">Clear</button>
         <input type="file" id="csv-file" accept=".csv,text/csv" hidden>
       </div>
-      <div class="gpu"><input type="checkbox" id="o-gpu"><label for="o-gpu" style="margin:0" id="o-gpu-l">GPU (WebGPU)</label></div>
-      <div class="result empty" id="trip-out"></div>
     </div>
 
     <!-- CROSSING -->
@@ -201,12 +202,14 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b3';
-const BUILD = '2b3';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b4';
+const BUILD = '2b4';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
 const NaNf = Number.NaN;
+// Mobile = bottom-sheet layout (matches the CSS breakpoint).
+const isMobile = () => window.matchMedia('(max-width:759px)').matches;
 // Green first, then red, blue, purple… — orange/yellow pushed to the end since
 // they vanish against OpenFreeMap's orange/yellow road casing.
 const PALETTE = ['#22c55e','#ef4444','#3b82f6','#a855f7','#ec4899','#06b6d4','#14b8a6','#8b5cf6','#84cc16','#f97316'];
@@ -284,6 +287,12 @@ function setupMap() {
       layout:{ 'line-cap':'round', 'line-join':'round' } });
   });
   map.on('click', (e) => {
+    // On mobile, a tap on the map (outside the bottom sheet) dismisses an open
+    // sheet — this tap only closes it, it doesn't also drop a stop.
+    if (isMobile() && $('sheet').classList.contains('open')) {
+      $('sheet').classList.remove('open');
+      return;
+    }
     const lat = e.lngLat.lat, lon = e.lngLat.lng;
     if (!inBounds(lat, lon)) { outOfAreaWarning(); return; }
     if (mode === 'trip') {
@@ -424,6 +433,9 @@ async function doOptimize() {
   });
   html += `</div>`;
   setOutHTML('trip-out', html);
+  // On mobile, close the sheet so the optimised routes are visible on the map
+  // (reopen with ☰ to see the breakdown). On desktop the side panel stays open.
+  if (isMobile()) $('sheet').classList.remove('open');
 }
 function fmtMin(min){ const m=Math.round(min); return m>=60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m} min`; }
 
