@@ -321,3 +321,142 @@ extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = log)]
     fn web_log(s: &str);
 }
+
+// =========================================================================
+// Stage 2a — WebGPU spike. An async probe that initialises a real WebGPU
+// device via wgpu (BROWSER_WEBGPU backend), runs a trivial compute kernel
+// (out[i] = in[i]²) and reads the result back — all async, nothing blocking
+// the browser's main thread. Proves the hardest GPU-on-wasm infrastructure
+// before porting the brooom VRP megakernel (stages 2b/2c). Returns a JSON
+// string `{ok, backend, adapter, sample}` or rejects with the failure reason.
+// =========================================================================
+#[wasm_bindgen]
+pub async fn webgpu_probe() -> Result<String, JsValue> {
+    use wgpu::util::DeviceExt;
+    console_error_panic_hook::set_once();
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::BROWSER_WEBGPU,
+        ..Default::default()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        })
+        .await
+        .ok_or_else(|| JsValue::from_str("no WebGPU adapter (browser exposes navigator.gpu but no usable device)"))?;
+    let info = adapter.get_info();
+
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("mpee-probe"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+            },
+            None,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+
+    // in[i] = i, expect out[i] = i².
+    let n: u32 = 64;
+    let input: Vec<f32> = (0..n).map(|i| i as f32).collect();
+    let bytes = (n as usize * std::mem::size_of::<f32>()) as u64;
+
+    let in_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("in"),
+        contents: bytemuck_cast(&input),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let out_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("out"),
+        size: bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("staging"),
+        size: bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("square"),
+        source: wgpu::ShaderSource::Wgsl(
+            r#"
+@group(0) @binding(0) var<storage, read> inp: array<f32>;
+@group(0) @binding(1) var<storage, read_write> outp: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i < arrayLength(&inp)) { outp[i] = inp[i] * inp[i]; }
+}
+"#
+            .into(),
+        ),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("square-pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: "main",
+        compilation_options: Default::default(),
+    });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: in_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: out_buf.as_entire_binding() },
+        ],
+    });
+
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(1, 1, 1); // n=64 == one workgroup
+    }
+    enc.copy_buffer_to_buffer(&out_buf, 0, &staging, 0, bytes);
+    queue.submit(Some(enc.finish()));
+
+    // Async readback (no device.poll(Wait) on wasm — the browser drives it).
+    let slice = staging.slice(..);
+    let (tx, rx) = futures_channel::oneshot::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
+    device.poll(wgpu::Maintain::Poll);
+    rx.await
+        .map_err(|_| JsValue::from_str("map_async channel dropped"))?
+        .map_err(|e| JsValue::from_str(&format!("buffer map failed: {e:?}")))?;
+    let data = slice.get_mapped_range();
+    let out: Vec<f32> = bytemuck_from(&data);
+    drop(data);
+    staging.unmap();
+
+    // Correctness: out[3] should be 9, out[7] = 49.
+    let ok = (out.get(3).copied().unwrap_or(0.0) - 9.0).abs() < 1e-3
+        && (out.get(7).copied().unwrap_or(0.0) - 49.0).abs() < 1e-3;
+    let sample: Vec<f32> = out.iter().take(8).copied().collect();
+    Ok(serde_json::json!({
+        "ok": ok,
+        "backend": format!("{:?}", info.backend),
+        "adapter": if info.name.is_empty() { "WebGPU".to_string() } else { info.name },
+        "sample": sample,
+    })
+    .to_string())
+}
+
+// Minimal POD casts (avoid pulling bytemuck just for the probe).
+fn bytemuck_cast(v: &[f32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+}
+fn bytemuck_from(b: &[u8]) -> Vec<f32> {
+    let mut out = vec![0f32; b.len() / 4];
+    unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out.as_mut_ptr() as *mut u8, b.len()); }
+    out
+}

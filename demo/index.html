@@ -200,7 +200,7 @@
 </div>
 
 <script type="module">
-import init, { Engine } from './engine/mpee_wasm.js';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -210,7 +210,7 @@ const NaNf = Number.NaN;
 const PALETTE = ['#22c55e','#ef4444','#3b82f6','#a855f7','#ec4899','#06b6d4','#14b8a6','#8b5cf6','#84cc16','#f97316'];
 const GREEN = '#22c55e';
 
-let engine = null, map = null, BBOX = null;
+let engine = null, map = null, BBOX = null, gpuVerified = false;
 const inBounds = (lat, lon) => !BBOX || (lat>=BBOX.min_lat && lat<=BBOX.max_lat && lon>=BBOX.min_lon && lon<=BBOX.max_lon);
 let stops = [];          // [{lat, lon, name}]
 let stopMarkers = [];    // numbered markers for stops
@@ -406,8 +406,8 @@ function doOptimize() {
   let html = `<b>${plan.vehicles_used} vehicles · ${plan.total_stops} stops</b> · depot = stop 1<br>`
     + `total <b>${plan.total_distance_km.toFixed(1)} km</b> · ${fmtMin(plan.total_duration_min)}`
     + ` · unassigned ${plan.unassigned.length}`
-    + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on ${gpuOn?'GPU→CPU fallback':'CPU (WASM)'}</span>`
-    + (gpuOn ? `<br><span class="dim">(WebGPU solver in progress — ran on CPU)</span>` : '')
+    + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on CPU (WASM)</span>`
+    + (gpuOn ? `<br><span class="dim">WebGPU ${gpuVerified?'compute verified ✓':'detected'} — GPU VRP solver port in progress (stage 2b)</span>` : '')
     + `<div class="veh-list">`;
   plan.routes.forEach((rt, vi) => {
     const color = PALETTE[vi % PALETTE.length];
@@ -647,8 +647,24 @@ function setupUI() {
   $('csv-exp').onclick = exportCSV;
 
   const gpu=$('o-gpu'), lbl=$('o-gpu-l');
-  if (navigator.gpu) { gpu.checked = true; lbl.innerHTML = 'GPU (WebGPU) <span class="badge">detected · on</span>'; }
-  else { gpu.disabled=true; lbl.innerHTML='GPU (WebGPU) — not available in this browser'; }
+  if (navigator.gpu) {
+    gpu.checked = true;
+    lbl.innerHTML = 'GPU (WebGPU) <span class="badge">verifying…</span>';
+    // Stage 2a: actually run a compute kernel on the GPU to confirm the path.
+    webgpu_probe().then(r => {
+      const j = JSON.parse(r);
+      gpuVerified = !!j.ok;
+      lbl.innerHTML = j.ok
+        ? `GPU (WebGPU) <span class="badge" title="${j.adapter}">✓ compute verified</span>`
+        : 'GPU (WebGPU) <span class="badge">detected</span>';
+    }).catch(e => {
+      console.warn('WebGPU probe failed:', e);
+      lbl.innerHTML = 'GPU (WebGPU) <span class="badge">detected (no device)</span>';
+    });
+  } else {
+    gpu.disabled = true;
+    lbl.innerHTML = 'GPU (WebGPU) — not available in this browser';
+  }
 }
 
 boot();

@@ -18,9 +18,15 @@ dijeng = { path = "../dijeng", default-features = false }
 # Serial CPU VRP solver — no rayon, no wgpu (a WebGPU path is a later phase).
 brooom = { path = "../brooom", default-features = false }
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+futures-channel = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 console_error_panic_hook = "0.1"
+# Stage 2a: prove a real WebGPU compute path works in the browser. wgpu's
+# wasm32 target uses the BROWSER_WEBGPU backend; device init + readback are
+# async (no pollster/blocking on the main thread).
+wgpu = "0.20"
 
 [profile.release]
 opt-level = "s"   # optimise wasm for size
