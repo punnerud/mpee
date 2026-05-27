@@ -352,80 +352,95 @@ impl Engine {
         let dur_i = to_i(&durs_f);
         let dist_i = to_i(&dists_f);
 
-        // Construction only (max_local_search_passes = 0) — the GPU does the 2-opt.
-        let mut problem = Problem::default();
-        for v in 0..vehicles {
-            problem.vehicles.push(Vehicle {
-                id: (v + 1) as u64,
-                start: Some(Location::from_index(0)),
-                end: Some(Location::from_index(0)),
-                capacity: vec![capacity], skills: vec![], time_window: None, speed_factor: 1.0,
-                max_tasks: None, max_travel_time: None, max_distance: None,
-                fixed: 0.0, per_hour: 3600.0, profile: "car".into(), description: None,
-            });
-        }
-        for i in 0..stops.len() {
-            problem.jobs.push(Job {
-                id: (i + 1) as u64, location: Location::from_index(i + 1), kind: Default::default(),
-                service: 0, setup: 0, delivery: vec![1], pickup: vec![], skills: vec![],
-                priority: 0, time_windows: vec![], description: None,
-            });
-        }
-        let matrix = Matrix { n, durations: dur_i.clone(), distances: Some(dist_i.clone()) };
-        let cfg = SolverConfig {
-            multi_start: 1, granular_k: Some(40), max_local_search_passes: 0,
-            time_limit_ms: Some(50), verbose: false, use_gpu: false, ..Default::default()
-        };
-        let sol = solve_with_matrix(&problem, &matrix, &cfg);
-
-        // Flatten non-empty routes into GPU sequences (matrix indices, depot=0
-        // at both ends): seqs = [0, j+1, …, 0] per route, offsets delimit them.
-        let mut route_vehicle: Vec<u64> = Vec::new();
-        let mut seqs: Vec<u32> = Vec::new();
-        let mut offsets: Vec<u32> = vec![0];
-        // brooom decides the assignment (which stops each vehicle gets); the
-        // GPU's job is the *visiting order*. Start each route from the naive
-        // input order (the order the stops were listed) so the GPU's 2-opt has
-        // real work and its improvement is visible.
-        for r in &sol.routes {
-            if r.steps.is_empty() { continue; }
-            route_vehicle.push(problem.vehicles[r.vehicle_idx].id);
-            let mut jobs_mi: Vec<u32> = r.steps.iter()
-                .filter_map(|s| if let TaskRef::Job(j) = s { Some((*j as u32) + 1) } else { None })
-                .collect();
-            jobs_mi.sort_unstable(); // input order (job id = input index + 1)
-            seqs.push(0);
-            seqs.extend_from_slice(&jobs_mi);
-            seqs.push(0);
-            offsets.push(seqs.len() as u32);
-        }
-        let num_routes = route_vehicle.len() as u32;
-
         let route_dist = |seq: &[u32]| -> i64 {
             seq.windows(2).map(|w| dist_i[w[0] as usize * n + w[1] as usize] as i64).sum()
         };
-        let before: i64 = (0..route_vehicle.len())
-            .map(|ri| route_dist(&seqs[offsets[ri] as usize..offsets[ri + 1] as usize]))
-            .sum();
 
-        // ---- GPU 2-opt over all routes (one workgroup each) ----
-        // Road distances are asymmetric (one-way streets), but a 2-opt edge
-        // swap reverses a segment's travel direction — so feed the kernel a
-        // symmetrised matrix (min of both directions) to keep its delta valid.
+        // Naive round-robin assignment (respecting capacity) — deliberately a
+        // poor start so the GPU local search has real cross-route + intra-route
+        // work to do, and its improvement is clearly visible. Each route is
+        // [depot, stops…, depot] in matrix indices.
+        let cap = capacity.max(1) as usize;
+        let mut routes: Vec<Vec<u32>> = (0..vehicles).map(|_| vec![0u32]).collect();
+        let mut loads = vec![0usize; vehicles];
+        let mut unassigned: Vec<usize> = Vec::new();
+        for i in 0..stops.len() {
+            let mi = (i + 1) as u32;
+            let mut placed = false;
+            for k in 0..vehicles {
+                let v = (i + k) % vehicles;
+                if loads[v] < cap { routes[v].push(mi); loads[v] += 1; placed = true; break; }
+            }
+            if !placed { unassigned.push(i); }
+        }
+        for r in routes.iter_mut() { r.push(0); } // closing depot
+        routes.retain(|r| r.len() > 2);            // drop empty routes
+
+        // Flatten the Vec<Vec> into the GPU layout (seqs + offsets + route_of).
+        let flatten = |routes: &Vec<Vec<u32>>| -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+            let mut seqs = Vec::new();
+            let mut offsets = vec![0u32];
+            let mut route_of = Vec::new();
+            for (ri, r) in routes.iter().enumerate() {
+                for _ in 0..r.len() { route_of.push(ri as u32); }
+                seqs.extend_from_slice(r);
+                offsets.push(seqs.len() as u32);
+            }
+            (seqs, offsets, route_of)
+        };
+        let total_dist = |routes: &Vec<Vec<u32>>| -> i64 { routes.iter().map(|r| route_dist(r)).sum() };
+        let before: i64 = total_dist(&routes);
+
+        // One WebGPU device for the whole solve (the relocate loop dispatches
+        // dozens of kernels — re-creating a device each time would dominate).
+        let (device, queue) = acquire_device().await?;
+
+        // ---- GPU cross-route relocate (steepest descent) ----
+        // The GPU evaluates the whole relocate neighbourhood each round; the CPU
+        // applies the single best improving move. Relocate is exact on the true
+        // asymmetric matrix. Bounded rounds so it always terminates.
+        if routes.len() >= 2 {
+            // Each round is one GPU dispatch + async readback; cap the count so
+            // the latency-bound loop stays fast even on software WebGPU. Steepest
+            // descent converges quickly, so a modest cap keeps most of the gain.
+            let max_rounds = (stops.len() / 3 + 4).min(12);
+            for _ in 0..max_rounds {
+                let (seqs, offsets, route_of) = flatten(&routes);
+                let (delta, src, dr, dp) =
+                    run_relocate_eval(&device, &queue, &dist_i, n as u32, &seqs, &offsets, &route_of, cap as u32).await?;
+                if delta >= 0 { break; } // no improving move
+                // Guard against an out-of-range move (keeps a valid solution).
+                let a = route_of[src] as usize;
+                if a >= routes.len() || dr >= routes.len() || a == dr { break; }
+                let li = src - offsets[a] as usize;
+                if li == 0 || li + 1 >= routes[a].len() { break; }  // must be interior
+                let local_pos = dp - offsets[dr] as usize;
+                if local_pos + 1 >= routes[dr].len() { break; }
+                let s = routes[a][li];
+                routes[a].remove(li);
+                routes[dr].insert(local_pos + 1, s); // insert s after bp
+            }
+            routes.retain(|r| r.len() > 2);
+        }
+
+        // ---- GPU intra-route 2-opt (one workgroup per route) ----
+        // 2-opt reverses a segment → invalid on asymmetric distances, so use a
+        // symmetrised matrix for the kernel + a per-route safety net on the true
+        // distance (never worse than the pre-2-opt order).
         let mut sym = vec![0i32; n * n];
         for a in 0..n {
             for b in 0..n {
                 sym[a * n + b] = dist_i[a * n + b].min(dist_i[b * n + a]);
             }
         }
+        let (mut seqs, offsets, _route_of) = flatten(&routes);
+        let route_vehicle: Vec<u64> = (0..routes.len() as u64).map(|i| i + 1).collect();
+        let num_routes = routes.len() as u32;
         let seqs_before = seqs.clone();
         if num_routes > 0 {
-            run_2opt_gpu(&sym, n as u32, &mut seqs, &offsets, num_routes).await?;
+            run_2opt_gpu(&device, &queue, &sym, n as u32, &mut seqs, &offsets, num_routes).await?;
         }
-        // Safety net: keep, per route, whichever of (construction, GPU result)
-        // is shorter on the TRUE asymmetric distance — so the GPU pass can
-        // never make a route worse, even when the symmetric approximation is off.
-        for ri in 0..route_vehicle.len() {
+        for ri in 0..routes.len() {
             let (a, b) = (offsets[ri] as usize, offsets[ri + 1] as usize);
             if route_dist(&seqs[a..b]) > route_dist(&seqs_before[a..b]) {
                 seqs[a..b].copy_from_slice(&seqs_before[a..b]);
@@ -454,9 +469,7 @@ impl Engine {
                 "distance_km": td as f64 / 1000.0, "duration_min": tt as f64 / 60.0, "stops": steps,
             }));
         }
-        let unassigned: Vec<usize> = sol.unassigned.iter().filter_map(|t| match t {
-            TaskRef::Job(j) => Some(*j), _ => None,
-        }).collect();
+        // `unassigned` was collected during the naive assignment (over-capacity).
 
         let out = serde_json::json!({
             "routes": routes_out,
@@ -628,6 +641,29 @@ fn vec_u32(b: &[u8]) -> Vec<u32> {
     v
 }
 
+// Acquire a WebGPU device + queue once, then reuse across many kernel
+// dispatches (the relocate loop runs dozens of them — re-creating a device each
+// time would dominate the runtime).
+async fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue), JsValue> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::BROWSER_WEBGPU, ..Default::default()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false, compatible_surface: None,
+        })
+        .await
+        .ok_or_else(|| JsValue::from_str("no WebGPU adapter"))?;
+    adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("mpee-gpu"), required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(), memory_hints: wgpu::MemoryHints::Performance,
+        }, None)
+        .await
+        .map_err(|e| JsValue::from_str(&format!("request_device: {e}")))
+}
+
 // GPU intra-route 2-opt: one workgroup per route. Each route's node sequence
 // (matrix indices, depot at both ends) lives in workgroup memory; threads scan
 // edge-pair reversals against the distance matrix, reduce to the single best
@@ -711,6 +747,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 "#;
 
 async fn run_2opt_gpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
     matrix: &[i32],
     n: u32,
     seqs: &mut Vec<u32>,
@@ -718,27 +756,6 @@ async fn run_2opt_gpu(
     num_routes: u32,
 ) -> Result<(), JsValue> {
     use wgpu::util::DeviceExt;
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::BROWSER_WEBGPU,
-        ..Default::default()
-    });
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        })
-        .await
-        .ok_or_else(|| JsValue::from_str("no WebGPU adapter for 2-opt"))?;
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor {
-            label: Some("mpee-2opt"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            memory_hints: wgpu::MemoryHints::Performance,
-        }, None)
-        .await
-        .map_err(|e| JsValue::from_str(&format!("request_device (2opt): {e}")))?;
 
     let mat_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("matrix"), contents: as_bytes(matrix), usage: wgpu::BufferUsages::STORAGE,
@@ -800,4 +817,150 @@ async fn run_2opt_gpu(
     staging.unmap();
     seqs.copy_from_slice(&updated);
     Ok(())
+}
+
+// GPU cross-route relocate: evaluate the WHOLE relocate neighbourhood in
+// parallel (move each interior stop into every position of every other route),
+// reduce to the single best improving move. The CPU applies it (trivial Vec
+// edit) and re-evaluates — so the heavy O(stops × routes × positions) search is
+// on the GPU while in-kernel mutation (the bug-prone part) is avoided. Relocate
+// is *exact* on asymmetric road distances (no segment reversal), so it uses the
+// true matrix. Returns (best_delta, src_pos, dst_route, dst_pos); delta ≥ 0
+// means no improving move.
+const RELOCATE_WGSL: &str = r#"
+struct RP { n: u32, total: u32, num_routes: u32, cap: u32 };
+@group(0) @binding(0) var<storage, read>        matrix:   array<i32>;
+@group(0) @binding(1) var<storage, read>        seqs:     array<u32>;
+@group(0) @binding(2) var<storage, read>        offsets:  array<u32>;
+@group(0) @binding(3) var<storage, read>        route_of: array<u32>;
+@group(0) @binding(4) var<storage, read_write>  outm:     array<i32>;
+@group(0) @binding(5) var<uniform>              P:        RP;
+
+const WGN: u32 = 256u;
+var<workgroup> bD: array<i32, 256>;
+var<workgroup> bS: array<u32, 256>;
+var<workgroup> bR: array<u32, 256>;
+var<workgroup> bP: array<u32, 256>;
+fn d(a: u32, b: u32) -> i32 { return matrix[a * P.n + b]; }
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+    let t = lid.x;
+    var bestD: i32 = 0;
+    var bs: u32 = 0u; var br: u32 = 0u; var bp: u32 = 0u;
+    for (var si = 0u; si < P.total; si = si + 1u) {
+        let a = route_of[si];
+        let aStart = offsets[a];
+        let aEnd = offsets[a + 1u] - 1u;
+        if (si == aStart || si == aEnd) { continue; }   // skip depot ends
+        let prev = seqs[si - 1u];
+        let s = seqs[si];
+        let nxt = seqs[si + 1u];
+        let removal = d(prev, nxt) - d(prev, s) - d(s, nxt);   // saving from A
+        for (var rb = 0u; rb < P.num_routes; rb = rb + 1u) {
+            if (rb == a) { continue; }
+            let loadB = (offsets[rb + 1u] - offsets[rb]) - 2u;
+            if (loadB + 1u > P.cap) { continue; }              // capacity
+            let lo = offsets[rb];
+            let hi = offsets[rb + 1u] - 1u;
+            for (var pos = lo; pos < hi; pos = pos + 1u) {
+                if (((si * 1000003u + rb * 9176u + pos) % WGN) == t) {
+                    let bpn = seqs[pos];
+                    let bp1 = seqs[pos + 1u];
+                    let ins = d(bpn, s) + d(s, bp1) - d(bpn, bp1);  // cost into B
+                    let delta = ins - removal;
+                    if (delta < bestD) { bestD = delta; bs = si; br = rb; bp = pos; }
+                }
+            }
+        }
+    }
+    bD[t] = bestD; bS[t] = bs; bR[t] = br; bP[t] = bp;
+    workgroupBarrier();
+    if (t == 0u) {
+        var best: i32 = 0; var s_: u32 = 0u; var r_: u32 = 0u; var p_: u32 = 0u;
+        for (var k = 0u; k < WGN; k = k + 1u) {
+            if (bD[k] < best) { best = bD[k]; s_ = bS[k]; r_ = bR[k]; p_ = bP[k]; }
+        }
+        outm[0] = best; outm[1] = i32(s_); outm[2] = i32(r_); outm[3] = i32(p_);
+    }
+}
+"#;
+
+async fn run_relocate_eval(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    matrix: &[i32],
+    n: u32,
+    seqs: &[u32],
+    offsets: &[u32],
+    route_of: &[u32],
+    cap: u32,
+) -> Result<(i32, usize, usize, usize), JsValue> {
+    use wgpu::util::DeviceExt;
+    let mk = |label, contents: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label), contents, usage: wgpu::BufferUsages::STORAGE,
+    });
+    let mat_buf = mk("matrix", as_bytes(matrix));
+    let seq_buf = mk("seqs", as_bytes(seqs));
+    let off_buf = mk("offsets", as_bytes(offsets));
+    let rof_buf = mk("route_of", as_bytes(route_of));
+    let out_init: [i32; 4] = [0, 0, 0, 0];
+    let out_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("outm"), contents: as_bytes(&out_init),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    });
+    let params: [u32; 4] = [n, seqs.len() as u32, (offsets.len() - 1) as u32, cap];
+    let par_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("params"), contents: as_bytes(&params), usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("staging"), size: 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("relocate"), source: wgpu::ShaderSource::Wgsl(RELOCATE_WGSL.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("relocate-pipeline"), layout: None, module: &shader,
+        entry_point: Some("main"), compilation_options: Default::default(), cache: None,
+    });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: mat_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: seq_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: off_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: rof_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: par_buf.as_entire_binding() },
+        ],
+    });
+
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    enc.copy_buffer_to_buffer(&out_buf, 0, &staging, 0, 16);
+    queue.submit(Some(enc.finish()));
+
+    let slice = staging.slice(..);
+    let (tx, rx) = futures_channel::oneshot::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+    device.poll(wgpu::Maintain::Poll);
+    rx.await
+        .map_err(|_| JsValue::from_str("relocate map channel dropped"))?
+        .map_err(|e| JsValue::from_str(&format!("relocate buffer map: {e:?}")))?;
+    let data = slice.get_mapped_range();
+    let out: Vec<i32> = {
+        let mut v = vec![0i32; 4];
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), v.as_mut_ptr() as *mut u8, 16); }
+        v
+    };
+    drop(data);
+    staging.unmap();
+    Ok((out[0], out[1] as usize, out[2] as usize, out[3] as usize))
 }

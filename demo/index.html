@@ -128,7 +128,7 @@
 </head>
 <body>
 <div id="map"></div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b2</div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b3</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -201,8 +201,8 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b2';
-const BUILD = '2b2';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b3';
+const BUILD = '2b3';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -414,8 +414,8 @@ async function doOptimize() {
   let html = `<b>${plan.vehicles_used} vehicle${plan.vehicles_used===1?'':'s'} · ${plan.total_stops} stops</b> · depot = stop 1<br>`
     + `total <b>${plan.total_distance_km.toFixed(1)} km</b> · ${fmtMin(plan.total_duration_min)}`
     + ` · unassigned ${plan.unassigned.length}`
-    + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on ${onGpu ? 'GPU (WebGPU 2-opt) ✓' : 'CPU (WASM)'}</span>`
-    + (onGpu ? `<br><span class="dim">GPU 2-opt optimised the visiting order: ${plan.before_distance_km.toFixed(1)} → ${plan.after_distance_km.toFixed(1)} km</span>` : '')
+    + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on ${onGpu ? 'GPU (WebGPU local search) ✓' : 'CPU (WASM)'}</span>`
+    + (onGpu ? `<br><span class="dim">GPU relocate + 2-opt: ${plan.before_distance_km.toFixed(1)} → ${plan.after_distance_km.toFixed(1)} km (naive → optimised)</span>` : '')
     + `<div class="veh-list">`;
   plan.routes.forEach((rt, vi) => {
     const color = PALETTE[vi % PALETTE.length];
