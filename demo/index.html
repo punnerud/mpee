@@ -82,6 +82,10 @@
   .rowmini input[type=text]{flex:1;min-width:120px;background:#0d141a;border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:8px 10px;font-size:.9rem}
   .result{margin-top:12px;padding:10px 12px;background:#0d141a;border:1px solid var(--line);border-radius:9px;font-size:.85rem;white-space:pre-wrap}
   .result.empty{display:none}
+  .result .dim{color:var(--muted)}
+  .veh-list{margin-top:8px;display:flex;flex-direction:column;gap:5px}
+  .veh{display:flex;align-items:center;gap:8px;font-size:.84rem;white-space:normal}
+  .veh .sw{flex:0 0 auto;width:12px;height:12px;border-radius:3px}
   .gpu{display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);margin-top:12px}
   .gpu input{width:auto}
   .badge{display:inline-block;font-size:.68rem;padding:1px 7px;border-radius:999px;background:#0f2a27;color:var(--accent2);border:1px solid var(--line)}
@@ -234,15 +238,18 @@ function setupMap() {
     map.addLayer({ id:'route', type:'line', source:'route',
       paint:{ 'line-color':['get','color'], 'line-width':5, 'line-opacity':.85 },
       layout:{ 'line-cap':'round', 'line-join':'round' } });
+    map.addSource('streets', { type:'geojson', data:fc([]) });
+    map.addLayer({ id:'streets', type:'line', source:'streets',
+      paint:{ 'line-color':['get','color'], 'line-width':6, 'line-opacity':.65 },
+      layout:{ 'line-cap':'round', 'line-join':'round' } });
   });
   map.on('click', (e) => {
     const lat = e.lngLat.lat, lon = e.lngLat.lng;
     if (mode === 'trip') {
       const name = engine.has_names() ? (engine.reverse(lat, lon) || `${lat.toFixed(5)}, ${lon.toFixed(5)}`) : `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
       addStop(lat, lon, name);
-    } else if (engine.has_names()) {
-      const s = engine.reverse(lat, lon);
-      if (s) new maplibregl.Popup().setLngLat([lon, lat]).setHTML(`<b>${s}</b>`).addTo(map);
+    } else if (mode === 'cross') {
+      crossClick(lat, lon);
     }
   });
 }
@@ -252,10 +259,30 @@ function clearResultMarkers(){ resultMarkers.forEach(m=>m.remove()); resultMarke
 function clearRoutes(){ const s=routeSrc(); if (s) s.setData(fc([])); }
 
 // ---------- stops ----------
-function addStop(lat, lon, name) {
+function addStop(lat, lon, name, fly = true) {
   stops.push({ lat, lon, name: name || `${lat.toFixed(5)}, ${lon.toFixed(5)}` });
-  renderStops();
-  map.flyTo({ center:[lon, lat], zoom: Math.max(map.getZoom(), 13), duration:500 });
+  lastPlan = null;            // stops changed → previous optimize result is stale
+  renderStops();              // also auto-routes through the stops in order
+  if (fly) map.flyTo({ center:[lon, lat], zoom: Math.max(map.getZoom(), 13), duration:500 });
+}
+
+// Live route through the current stops, in tap/add order — recomputed on every
+// change so you can tap around the map and watch each leg connect. Replaced by
+// the coloured per-vehicle routes once you hit "Optimize".
+function drawSequentialRoute() {
+  if (stops.length < 2) { clearRoutes(); if (!stops.length) setOut('trip-out',''); return; }
+  const coords = []; let totKm = 0, totMin = 0, ok = 0;
+  for (let i = 0; i < stops.length - 1; i++) {
+    try {
+      const r = JSON.parse(engine.route(stops[i].lat, stops[i].lon, stops[i+1].lat, stops[i+1].lon));
+      r.geometry.forEach(p => coords.push([p[1], p[0]]));
+      totKm += r.distance_km; totMin += r.duration_min; ok++;
+    } catch(_) {}
+  }
+  drawLinesRaw([{ coords, color:'#0d9488' }]);
+  setOut('trip-out', `Route through ${stops.length} stops (tap order)\n`
+    + `${totKm.toFixed(2)} km · ${fmtMin(totMin)}`
+    + (ok < stops.length - 1 ? `\n(${stops.length-1-ok} leg(s) unreachable)` : ''));
 }
 function renderStops() {
   stopMarkers.forEach(m=>m.remove()); stopMarkers=[];
@@ -281,6 +308,9 @@ function renderStops() {
   $('act-route').disabled = stops.length !== 2;
   $('act-opt').disabled = stops.length < 2;
   $('act-route').textContent = stops.length===2 ? 'Route A→B' : `Route (need 2, have ${stops.length})`;
+  // Live route through the stops in order — recomputed on every add/remove so
+  // tapping around the map connects each leg automatically.
+  if (mode === 'trip') drawSequentialRoute();
 }
 
 // ---------- actions ----------
@@ -322,22 +352,82 @@ function doOptimize() {
   drawLinesRaw(lines);
   fit(stops);
   const gpuOn = $('o-gpu').checked && navigator.gpu;
-  setOut('trip-out',
-    `${plan.vehicles_used} vehicles · ${plan.total_stops} stops (depot = stop 1)\n` +
-    `total: ${plan.total_distance_km.toFixed(1)} km · ${plan.total_duration_min.toFixed(0)} min\n` +
-    `unassigned: ${plan.unassigned.length} · solved in ${ms.toFixed(0)} ms on ${gpuOn?'GPU→CPU fallback':'CPU (WASM)'}` +
-    (gpuOn ? '\n(WebGPU solver in progress — ran on CPU)' : ''));
-}
 
+  // Per-vehicle breakdown (colour-matched to the routes on the map).
+  let html = `<b>${plan.vehicles_used} vehicles · ${plan.total_stops} stops</b> · depot = stop 1<br>`
+    + `total <b>${plan.total_distance_km.toFixed(1)} km</b> · ${fmtMin(plan.total_duration_min)}`
+    + ` · unassigned ${plan.unassigned.length}`
+    + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on ${gpuOn?'GPU→CPU fallback':'CPU (WASM)'}</span>`
+    + (gpuOn ? `<br><span class="dim">(WebGPU solver in progress — ran on CPU)</span>` : '')
+    + `<div class="veh-list">`;
+  plan.routes.forEach((rt, vi) => {
+    const color = PALETTE[vi % PALETTE.length];
+    html += `<div class="veh"><span class="sw" style="background:${color}"></span>`
+      + `<b>Vehicle ${rt.vehicle_id}</b> — ${rt.n_stops} stops · ${rt.distance_km.toFixed(1)} km · ${fmtMin(rt.duration_min)}</div>`;
+  });
+  html += `</div>`;
+  setOutHTML('trip-out', html);
+}
+function fmtMin(min){ const m=Math.round(min); return m>=60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m} min`; }
+
+// ----- crossing: highlight whole streets + pin their intersection -----
+let streetFeatures = { a:null, b:null };  // highlighted streets
+let crossClicks = [];                     // street names tapped on the map
+const STREET_A = '#2dd4bf', STREET_B = '#f59e0b';
+function streetsSrc(){ return map && map.getSource && map.getSource('streets'); }
+function clearStreets(){ streetFeatures={a:null,b:null}; const s=streetsSrc(); if(s) s.setData(fc([])); }
+function paintStreets(){ const s=streetsSrc(); if(!s) return; s.setData(fc([streetFeatures.a, streetFeatures.b].filter(Boolean))); }
+function drawStreet(slot, name, color) {
+  const segs = JSON.parse(engine.street_segments(name)); // [[[lat,lon],[lat,lon]],…]
+  const coords = segs.map(seg => [[seg[0][1], seg[0][0]], [seg[1][1], seg[1][0]]]); // → lon,lat
+  streetFeatures[slot] = { type:'Feature', properties:{ color }, geometry:{ type:'MultiLineString', coordinates: coords } };
+  paintStreets();
+  return segs.length;
+}
+function pinCrossings(a, b) {
+  const hits = JSON.parse(engine.intersection(a, b, NaNf, NaNf));
+  clearResultMarkers();
+  hits.forEach((h,i)=> resultMarkers.push(new maplibregl.Marker({color:'#ef4444'})
+    .setLngLat([h.lon,h.lat]).setPopup(new maplibregl.Popup({offset:18}).setHTML(`<b>${a} × ${b}</b>${hits.length>1?` (#${i+1})`:''}`)).addTo(map)));
+  return hits;
+}
+function showCrossing(a, b) {
+  clearStreets(); clearResultMarkers();
+  const na = drawStreet('a', a, STREET_A);
+  const nb = drawStreet('b', b, STREET_B);
+  if (!na && !nb) { setOut('c-out', `Neither "${a}" nor "${b}" found in this area.`); return; }
+  const hits = pinCrossings(a, b);
+  const pts = hits.length ? hits : streetFeatures.a ? streetFeatures.a.geometry.coordinates.flat().map(c=>({lat:c[1],lon:c[0]})) : [];
+  if (pts.length) fit(pts);
+  setOut('c-out', hits.length
+    ? `${a} × ${b}: ${hits.length} crossing(s)\n` + hits.map(h=>`${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n')
+    : `${a} and ${b} don't share a node (no at-grade crossing).`);
+}
 function doCross() {
   const a = $('c-a').value.trim(), b = $('c-b').value.trim();
   if (!a || !b) return;
-  const hits = JSON.parse(engine.intersection(a, b, NaNf, NaNf));
-  clearResultMarkers();
-  if (!hits.length) { setOut('c-out', `No intersection of "${a}" and "${b}" found.`); return; }
-  hits.forEach((h,i)=> resultMarkers.push(new maplibregl.Marker({color:'#f59e0b'}).setLngLat([h.lon,h.lat]).setPopup(new maplibregl.Popup({offset:18}).setHTML(`${a} × ${b} (#${i+1})`)).addTo(map)));
-  fit(hits);
-  setOut('c-out', `${a} × ${b}: ${hits.length} match(es)\n` + hits.map(h=>`${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n'));
+  crossClicks = [];
+  showCrossing(a, b);
+}
+// Map-tap flow: 1st tap → highlight that street; 2nd → highlight + pin crossing.
+function crossClick(lat, lon) {
+  if (!engine.has_names()) return;
+  if (crossClicks.length >= 2) { clearStreets(); clearResultMarkers(); crossClicks = []; }
+  const name = engine.reverse(lat, lon);
+  if (!name) { showToast('No named street at that point — tap directly on a road.'); return; }
+  const slot = crossClicks.length === 0 ? 'a' : 'b';
+  drawStreet(slot, name, slot==='a' ? STREET_A : STREET_B);
+  crossClicks.push(name);
+  if (crossClicks.length === 2) {
+    $('c-a').value = crossClicks[0]; $('c-b').value = crossClicks[1];
+    const hits = pinCrossings(crossClicks[0], crossClicks[1]);
+    setOut('c-out', hits.length
+      ? `${crossClicks[0]} × ${crossClicks[1]}: ${hits.length} crossing(s)\n` + hits.map(h=>`${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n')
+      : `${crossClicks[0]} and ${crossClicks[1]} don't share a node (no crossing).`);
+  } else {
+    $('c-a').value = name; $('c-b').value = '';
+    setOut('c-out', `Street A: ${name}\nTap a crossing street…`);
+  }
 }
 
 // ---------- CSV ----------
@@ -365,11 +455,22 @@ function importCSV(text) {
 function exportCSV() {
   let csv;
   if (lastPlan && lastPlan.routes && lastPlan.routes.length) {
-    csv = 'vehicle,order,lat,lon\n';
-    csv += `0,0,${lastPlan.depot[0]},${lastPlan.depot[1]}\n`; // depot
-    lastPlan.routes.forEach(rt => rt.stops.forEach(s => { csv += `${rt.vehicle_id},${s.order},${s.lat},${s.lon}\n`; }));
+    // One row per stop, carrying that vehicle's totals (km / min / stop count)
+    // so the breakdown is usable straight from the CSV. Order 0 = depot.
+    const hdr = 'vehicle,vehicle_stops,vehicle_km,vehicle_min,order,lat,lon,name';
+    const d = lastPlan.depot;
+    const rows = [];
+    lastPlan.routes.forEach(rt => {
+      const km = rt.distance_km.toFixed(3), min = rt.duration_min.toFixed(1), ns = rt.n_stops;
+      rows.push(`${rt.vehicle_id},${ns},${km},${min},0,${d[0]},${d[1]},Depot`);
+      rt.stops.forEach(s => {
+        const nm = (stops[s.stop_index + 1]?.name || '').replace(/[,\n]/g,' ');
+        rows.push(`${rt.vehicle_id},${ns},${km},${min},${s.order + 1},${s.lat},${s.lon},${nm}`);
+      });
+    });
+    csv = hdr + '\n' + rows.join('\n') + '\n';
   } else {
-    csv = 'lat,lon,name\n' + stops.map(s=>`${s.lat},${s.lon},${(s.name||'').replace(/,/g,' ')}`).join('\n') + '\n';
+    csv = 'lat,lon,name\n' + stops.map(s=>`${s.lat},${s.lon},${(s.name||'').replace(/[,\n]/g,' ')}`).join('\n') + '\n';
   }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type:'text/csv' }));
@@ -382,6 +483,7 @@ function drawLines(items){ drawLinesRaw(items.map(it=>({ coords: it.geom.map(p=>
 function drawLinesRaw(items){ const s=routeSrc(); if(!s) return; s.setData(fc(items.map(it=>({ type:'Feature', properties:{color:it.color}, geometry:{type:'LineString', coordinates:it.coords} })))); }
 function fit(pts){ if(!pts.length) return; const b=new maplibregl.LngLatBounds(); pts.forEach(p=>b.extend([p.lon??p[1], p.lat??p[0]])); map.fitBounds(b,{padding:{top:90,bottom:280,left:40,right:40},maxZoom:16,duration:500}); }
 function setOut(id, text){ const el=$(id); el.textContent=text; el.classList.toggle('empty', !text); }
+function setOutHTML(id, html){ const el=$(id); el.innerHTML=html; el.classList.toggle('empty', !html); }
 
 // ---------- search / suggestions ----------
 function runSearch() {
@@ -414,12 +516,13 @@ function setupUI() {
     mode = ch.dataset.pane;
     document.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on', x===ch));
     document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on', p.id==='pane-'+mode));
-    $('q').placeholder = mode==='trip' ? 'Search an address or street…' : 'Tap the map to read a street name';
+    $('q').placeholder = mode==='trip' ? 'Search an address or street…' : 'Tap a street on the map, then a crossing street';
+    if (mode !== 'cross') { clearStreets(); crossClicks=[]; }
   });
 
   $('act-route').onclick = doRoute;
   $('act-opt').onclick = () => { doOptimize(); };
-  $('act-clear').onclick = () => { stops=[]; lastPlan=null; clearRoutes(); clearResultMarkers(); renderStops(); setOut('trip-out',''); };
+  $('act-clear').onclick = () => { stops=[]; lastPlan=null; crossClicks=[]; clearRoutes(); clearResultMarkers(); clearStreets(); renderStops(); setOut('trip-out',''); setOut('c-out',''); };
   $('c-go').onclick = doCross;
   $('csv-imp').onclick = () => $('csv-file').click();
   $('csv-file').onchange = (e) => { const f=e.target.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>importCSV(r.result); r.readAsText(f); e.target.value=''; };

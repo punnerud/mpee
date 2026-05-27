@@ -34,6 +34,9 @@ pub struct RoutingService {
     /// lookups reuse `snap_grid`; forward lookups scan the distinct names.
     /// `None` when no `.names` sidecar was attached.
     names: Option<crate::names::NameTable>,
+    /// Optional plain road adjacency (the `.pp` forward CSR, same node order as
+    /// `coords`/`names`). Used by `street_segments` to draw a whole street.
+    road_graph: Option<crate::graph::CsrGraph>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +77,7 @@ impl RoutingService {
             inv_perm: inv.into(),
             snap_grid,
             names: None,
+            road_graph: None,
         }
     }
 
@@ -92,7 +96,47 @@ impl RoutingService {
             inv_perm: Buffer::from(Vec::new()),
             snap_grid,
             names: None,
+            road_graph: None,
         }
+    }
+
+    /// Attach the plain road adjacency (`.pp` forward CSR) so `street_segments`
+    /// can return a whole street's geometry. Same node order as `coords`.
+    pub fn set_road_graph(&mut self, g: crate::graph::CsrGraph) {
+        self.road_graph = Some(g);
+    }
+
+    /// All road edges belonging to a named street, as `(lat1,lon1,lat2,lon2)`
+    /// segments — i.e. the street drawn as a polyline set. Resolves the name
+    /// like `geocode`, takes the street's node set, and keeps the graph edges
+    /// whose both endpoints are in that set. Empty without a names sidecar +
+    /// road graph, or if the name doesn't resolve.
+    pub fn street_segments(&self, query: &str) -> Vec<(f32, f32, f32, f32)> {
+        let (names, g) = match (self.names.as_ref(), self.road_graph.as_ref()) {
+            (Some(n), Some(g)) => (n, g),
+            _ => return Vec::new(),
+        };
+        let id = match names.find_id(query) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let nodes = names.street_nodes(id);
+        let set: std::collections::HashSet<u32> = nodes.iter().copied().collect();
+        let head = g.head.as_slice();
+        let edge_to = g.edge_to.as_slice();
+        let coords = self.coords.as_slice();
+        let mut out = Vec::new();
+        for &u in nodes {
+            let (a, b) = (head[u as usize] as usize, head[u as usize + 1] as usize);
+            for &v in &edge_to[a..b] {
+                if u < v && set.contains(&v) {
+                    let (la, lo) = coords[u as usize];
+                    let (lb, lob) = coords[v as usize];
+                    out.push((la, lo, lb, lob));
+                }
+            }
+        }
+        out
     }
 
     /// Whether a CH is loaded — i.e. `route`/`matrix` are available. False for

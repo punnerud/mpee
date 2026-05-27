@@ -35,7 +35,11 @@ impl Engine {
         let ch = dijeng::cache_ch::load_bytes(ch).map_err(err_to_js)?;
         let n = pp.coords.as_slice().len();
         let coords = Buffer::from(pp.coords.as_slice().to_vec());
+        // Keep the plain road adjacency (same node order as coords) so a whole
+        // street can be drawn via `street_segments`.
+        let road_graph = pp.graph;
         let mut routing = RoutingService::new(ch, coords);
+        routing.set_road_graph(road_graph);
         if !names.is_empty() {
             match dijeng::names::NameTable::load_bytes(names, n) {
                 Ok(nt) => routing.set_names(nt),
@@ -137,6 +141,18 @@ impl Engine {
         let arr: Vec<serde_json::Value> = hits
             .into_iter()
             .map(|(la, lo)| serde_json::json!({"lat": la, "lon": lo}))
+            .collect();
+        serde_json::Value::Array(arr).to_string()
+    }
+
+    /// All road segments of a named street, as JSON `[[[lat,lon],[lat,lon]],…]`
+    /// — the whole street drawn as a polyline set. Empty array if the name
+    /// doesn't resolve or no sidecar/road-graph is loaded.
+    pub fn street_segments(&self, query: &str) -> String {
+        let segs = self.routing.street_segments(query);
+        let arr: Vec<serde_json::Value> = segs
+            .into_iter()
+            .map(|(la, lo, lb, lob)| serde_json::json!([[la, lo], [lb, lob]]))
             .collect();
         serde_json::Value::Array(arr).to_string()
     }

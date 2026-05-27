@@ -214,6 +214,27 @@ export class Engine {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
     }
+    /**
+     * All road segments of a named street, as JSON `[[[lat,lon],[lat,lon]],…]`
+     * — the whole street drawn as a polyline set. Empty array if the name
+     * doesn't resolve or no sidecar/road-graph is loaded.
+     * @param {string} query
+     * @returns {string}
+     */
+    street_segments(query) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.engine_street_segments(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
 }
 if (Symbol.dispose) Engine.prototype[Symbol.dispose] = Engine.prototype.free;
 function __wbg_get_imports() {
