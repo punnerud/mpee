@@ -128,7 +128,7 @@
 </head>
 <body>
 <div id="map"></div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a></div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2a1</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -200,7 +200,9 @@
 </div>
 
 <script type="module">
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js';
+// ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2a1';
+const BUILD = '2a1';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -234,7 +236,7 @@ async function fetchGunzip(url, onProgress) {
 async function boot() {
   try {
     if (typeof DecompressionStream === 'undefined') throw new Error('This browser lacks DecompressionStream — try a recent Chrome, Edge, Safari 16.4+ or Firefox 113+.');
-    await init();
+    await init(`./engine/mpee_wasm_bg.wasm?v=${BUILD}`);
     const w = { pp:0.32, ch:0.66, names:0.02 }, p = { pp:0, ch:0, names:0 };
     const paint = () => $('load-bar').style.width = ((p.pp*w.pp + p.ch*w.ch + p.names*w.names)*100).toFixed(0)+'%';
     $('load-msg').textContent = 'Downloading the San Francisco routing cache (~30 MB, one-time)…';
@@ -403,7 +405,7 @@ function doOptimize() {
   const gpuOn = $('o-gpu').checked && navigator.gpu;
 
   // Per-vehicle breakdown (colour-matched to the routes on the map).
-  let html = `<b>${plan.vehicles_used} vehicles · ${plan.total_stops} stops</b> · depot = stop 1<br>`
+  let html = `<b>${plan.vehicles_used} vehicle${plan.vehicles_used===1?'':'s'} · ${plan.total_stops} stops</b> · depot = stop 1<br>`
     + `total <b>${plan.total_distance_km.toFixed(1)} km</b> · ${fmtMin(plan.total_duration_min)}`
     + ` · unassigned ${plan.unassigned.length}`
     + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on CPU (WASM)</span>`
