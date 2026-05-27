@@ -198,6 +198,12 @@ impl RoutingService {
         }
     }
 
+    /// Up to `limit` street-name suggestions for `query` (type-ahead). Empty
+    /// without a names sidecar.
+    pub fn suggest(&self, query: &str, limit: usize) -> Vec<String> {
+        self.names.as_ref().map(|n| n.suggest(query, limit)).unwrap_or_default()
+    }
+
     /// Forward-geocode disambiguated by a reference point: among all road nodes
     /// of the matched street (which, on a multi-city cache, may span several
     /// towns sharing the name), return the one nearest `(ref_lat, ref_lon)`.

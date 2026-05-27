@@ -145,6 +145,12 @@ impl Engine {
         serde_json::Value::Array(arr).to_string()
     }
 
+    /// Type-ahead suggestions: up to `limit` street names matching `query`
+    /// (prefix first, then substring). JSON array of strings.
+    pub fn suggest(&self, query: &str, limit: usize) -> String {
+        serde_json::to_string(&self.routing.suggest(query, limit)).unwrap_or_else(|_| "[]".into())
+    }
+
     /// All road segments of a named street, as JSON `[[[lat,lon],[lat,lon]],…]`
     /// — the whole street drawn as a polyline set. Empty array if the name
     /// doesn't resolve or no sidecar/road-graph is loaded.

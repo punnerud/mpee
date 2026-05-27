@@ -132,6 +132,37 @@ impl NameTable {
         self.find_id(query).map(|id| self.rep_node.as_slice()[id as usize])
     }
 
+    /// Up to `limit` distinct street names matching `query` (case-insensitive),
+    /// prefix matches first then substring matches — for type-ahead suggestions.
+    pub fn suggest(&self, query: &str, limit: usize) -> Vec<String> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let (mut prefix, mut contains): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+        for id in 0..self.len() as u32 {
+            if prefix.len() >= limit {
+                break;
+            }
+            if let Some(name) = self.name_by_id(id) {
+                let l = name.to_lowercase();
+                if l.starts_with(&q) {
+                    prefix.push(name.to_string());
+                } else if contains.len() < limit && l.contains(&q) {
+                    contains.push(name.to_string());
+                }
+            }
+        }
+        let mut out = prefix;
+        for c in contains {
+            if out.len() >= limit {
+                break;
+            }
+            out.push(c);
+        }
+        out
+    }
+
     /// The road nodes a street touches (sorted), by name id.
     pub fn street_nodes(&self, id: u32) -> &[u32] {
         let off = self.sn_offsets.as_slice();

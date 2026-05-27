@@ -93,8 +93,20 @@
   .credit{position:absolute;bottom:6px;left:8px;z-index:5;font-size:.68rem;color:#7e909d;background:rgba(14,20,25,.6);padding:2px 7px;border-radius:7px}
 
   /* suggestions dropdown under search */
-  #sugg{position:absolute;z-index:25;left:50%;transform:translateX(-50%);width:min(560px,calc(100vw - 20px));margin-top:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:none}
+  #sugg{position:absolute;z-index:25;left:50%;transform:translateX(-50%);width:min(560px,calc(100vw - 20px));margin-top:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:none;box-shadow:0 8px 24px rgba(0,0,0,.4)}
   #sugg .toast{padding:10px 14px;font-size:.85rem;color:var(--muted)}
+  #sugg .sg{padding:10px 14px;font-size:.9rem;cursor:pointer;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px}
+  #sugg .sg:last-child{border-bottom:0}
+  #sugg .sg:hover,#sugg .sg.active{background:#0f2a27;color:#fff}
+  #sugg .sg svg{opacity:.6;flex:0 0 auto}
+
+  /* custom confirm dialog (not window.confirm) */
+  #dialog{position:absolute;inset:0;z-index:70;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:24px}
+  #dialog.open{display:flex}
+  #dialog .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:340px;width:100%;padding:18px;box-shadow:0 12px 40px rgba(0,0,0,.55)}
+  #dialog .box h3{margin:0 0 6px;font-size:1.02rem}
+  #dialog .box p{margin:0 0 16px;color:var(--muted);font-size:.88rem}
+  #dialog .box .btns{display:flex;gap:8px}
 
   @media (min-width:760px){
     #sheet{left:12px;right:auto;bottom:auto;top:64px;width:360px;border-radius:14px;max-height:calc(100vh - 84px);transform:none;border:1px solid var(--line);box-shadow:0 8px 30px rgba(0,0,0,.4);display:none}
@@ -169,6 +181,17 @@
   </div>
 </div>
 
+<div id="dialog">
+  <div class="box">
+    <h3 id="dlg-title">Clear everything?</h3>
+    <p id="dlg-msg"></p>
+    <div class="btns">
+      <button class="btn ghost" id="dlg-cancel">Cancel</button>
+      <button class="btn" id="dlg-ok">Clear</button>
+    </div>
+  </div>
+</div>
+
 <div id="load">
   <h2>MPEE live demo</h2>
   <div class="msg" id="load-msg">Loading the San Francisco map into your browser…</div>
@@ -187,7 +210,8 @@ const NaNf = Number.NaN;
 const PALETTE = ['#22c55e','#ef4444','#3b82f6','#a855f7','#ec4899','#06b6d4','#14b8a6','#8b5cf6','#84cc16','#f97316'];
 const GREEN = '#22c55e';
 
-let engine = null, map = null;
+let engine = null, map = null, BBOX = null;
+const inBounds = (lat, lon) => !BBOX || (lat>=BBOX.min_lat && lat<=BBOX.max_lat && lon>=BBOX.min_lon && lon<=BBOX.max_lon);
 let stops = [];          // [{lat, lon, name}]
 let stopMarkers = [];    // numbered markers for stops
 let resultMarkers = [];  // depot / crossing markers
@@ -237,6 +261,17 @@ function setupMap() {
   map = new maplibregl.Map({ container:'map', style:'https://tiles.openfreemap.org/styles/liberty', center:[SF.lng, SF.lat], zoom:12.4 });
   map.addControl(new maplibregl.NavigationControl({ showCompass:false }), 'bottom-right');
   map.on('load', () => {
+    // Coverage mask: dim everything OUTSIDE the downloaded data bbox, and trace
+    // the boundary, so it's obvious where the demo can route.
+    try {
+      BBOX = JSON.parse(engine.bbox());
+      const world = [[-180,-85],[180,-85],[180,85],[-180,85],[-180,-85]];
+      const ring = [[BBOX.min_lon,BBOX.min_lat],[BBOX.max_lon,BBOX.min_lat],[BBOX.max_lon,BBOX.max_lat],[BBOX.min_lon,BBOX.max_lat],[BBOX.min_lon,BBOX.min_lat]];
+      map.addSource('mask', { type:'geojson', data:{ type:'Feature', geometry:{ type:'Polygon', coordinates:[world, ring] } } });
+      map.addLayer({ id:'mask', type:'fill', source:'mask', paint:{ 'fill-color':'#060a0d', 'fill-opacity':0.55 } });
+      map.addSource('bounds', { type:'geojson', data:{ type:'Feature', geometry:{ type:'LineString', coordinates:ring } } });
+      map.addLayer({ id:'bounds', type:'line', source:'bounds', paint:{ 'line-color':'#2dd4bf', 'line-width':2, 'line-dasharray':[3,2], 'line-opacity':0.9 } });
+    } catch(_) {}
     map.addSource('route', { type:'geojson', data:fc([]) });
     map.addLayer({ id:'route', type:'line', source:'route',
       paint:{ 'line-color':['get','color'], 'line-width':5, 'line-opacity':.85 },
@@ -248,6 +283,7 @@ function setupMap() {
   });
   map.on('click', (e) => {
     const lat = e.lngLat.lat, lon = e.lngLat.lng;
+    if (!inBounds(lat, lon)) { outOfAreaWarning(); return; }
     if (mode === 'trip') {
       const name = engine.has_names() ? (engine.reverse(lat, lon) || `${lat.toFixed(5)}, ${lon.toFixed(5)}`) : `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
       addStop(lat, lon, name);
@@ -500,6 +536,7 @@ function setOutHTML(id, html){ const el=$(id); el.innerHTML=html; el.classList.t
 
 // ---------- search / suggestions ----------
 function runSearch() {
+  clearTimeout(suggTimer); hideSugg();   // cancel any pending type-ahead
   const q = $('q').value.trim();
   if (!q) return;
   // direct "lat,lon"
@@ -518,10 +555,71 @@ function runSearch() {
 function showToast(msg){ const s=$('sugg'); s.innerHTML=`<div class="toast">${msg}</div>`; s.style.display='block'; setTimeout(hideSugg, 3500); }
 function hideSugg(){ $('sugg').style.display='none'; }
 
+// Type-ahead suggestions (street names) under the search bar.
+const PIN_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>';
+function renderSuggestions(items){
+  const s=$('sugg');
+  if(!items.length){ hideSugg(); return; }
+  s.innerHTML = items.map(n=>`<div class="sg" data-name="${n.replace(/"/g,'&quot;')}">${PIN_SVG}<span>${n}</span></div>`).join('');
+  s.style.display='block';
+  s.querySelectorAll('.sg').forEach(el => el.onmousedown = (e)=>{ e.preventDefault(); $('q').value = el.dataset.name; hideSugg(); runSearch(); });
+}
+let suggTimer=null;
+function onSearchInput(){
+  if (mode!=='trip'){ hideSugg(); return; }
+  const q=$('q').value.trim();
+  clearTimeout(suggTimer);
+  if (q.length<2 || /,/.test(q)){ hideSugg(); return; }   // skip for "lat,lon"
+  suggTimer=setTimeout(()=>{ try{ renderSuggestions(JSON.parse(engine.suggest(q,7))); }catch(_){ hideSugg(); } }, 110);
+}
+
+// Custom modal (not window.confirm). `cancel:null` → single-button info dialog;
+// `html` allows links/markup in the body. Resolves true (ok) / false (cancel).
+function openDialog({ title, html, ok='OK', cancel=null }){
+  return new Promise(resolve=>{
+    const d=$('dialog');
+    $('dlg-title').textContent = title;
+    $('dlg-msg').innerHTML = html;
+    $('dlg-ok').textContent = ok;
+    $('dlg-cancel').style.display = cancel===null ? 'none' : '';
+    if (cancel) $('dlg-cancel').textContent = cancel;
+    d.classList.add('open');
+    const done=(v)=>{ d.classList.remove('open'); $('dlg-ok').onclick=null; $('dlg-cancel').onclick=null; d.onclick=null; document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey=(e)=>{ if(e.key==='Escape') done(false); if(e.key==='Enter') done(true); };
+    $('dlg-ok').onclick=()=>done(true); $('dlg-cancel').onclick=()=>done(false);
+    d.onclick=(e)=>{ if(e.target===d) done(false); };
+    document.addEventListener('keydown', onKey);
+  });
+}
+function confirmDialog(title, msg, okLabel='Clear'){
+  return openDialog({ title, html: msg.replace(/&/g,'&amp;').replace(/</g,'&lt;'), ok: okLabel, cancel:'Cancel' });
+}
+let outWarned = false;
+function outOfAreaWarning(){
+  if (outWarned) { showToast('Outside the downloaded San Francisco area.'); return; }
+  outWarned = true;
+  openDialog({
+    title: 'Outside the demo area',
+    html: `This point is outside the downloaded <b>San Francisco</b> map, so there's nothing to route here.
+      The demo ships a single area to stay light — but the engine itself scales far beyond it:
+      <ul style="margin:8px 0 8px 18px;padding:0">
+        <li>up to <b>50,000</b> stops</li>
+        <li>up to <b>~1,000</b> vehicles</li>
+        <li><b>low memory</b> — it streams the distance matrix (~500&nbsp;MB for 50k×50k, vs ~10&nbsp;GB)</li>
+        <li>CPU <b>+ GPU</b>, fully offline</li>
+      </ul>
+      Run it on <b>your own area</b>: <code>pip install mpee</code>, download your region, build once.<br>
+      → <a href="https://github.com/punnerud/mpee" target="_blank" rel="noopener">github.com/punnerud/mpee</a>`,
+    ok: 'Got it',
+  });
+}
+
 // ---------- UI wiring ----------
 function setupUI() {
   renderStops();
-  $('q').addEventListener('keydown', e => { if (e.key==='Enter'){ e.preventDefault(); runSearch(); }});
+  $('q').addEventListener('keydown', e => { if (e.key==='Enter'){ e.preventDefault(); hideSugg(); runSearch(); }});
+  $('q').addEventListener('input', onSearchInput);
+  $('q').addEventListener('blur', () => setTimeout(hideSugg, 150));
   $('add').onclick = runSearch;
   $('toggle').onclick = () => $('sheet').classList.toggle('open');
 
@@ -535,7 +633,14 @@ function setupUI() {
 
   $('act-route').onclick = doRoute;
   $('act-opt').onclick = () => { doOptimize(); };
-  $('act-clear').onclick = () => { stops=[]; lastPlan=null; crossClicks=[]; clearRoutes(); clearResultMarkers(); clearStreets(); renderStops(); setOut('trip-out',''); setOut('c-out',''); };
+  $('act-clear').onclick = async () => {
+    if (!stops.length && !lastPlan && !crossClicks.length) return;
+    const n = stops.length;
+    const ok = await confirmDialog('Clear everything?',
+      `This removes ${n} stop${n===1?'':'s'} and any drawn routes or highlighted streets.`);
+    if (!ok) return;
+    stops=[]; lastPlan=null; crossClicks=[]; clearRoutes(); clearResultMarkers(); clearStreets(); renderStops(); setOut('trip-out',''); setOut('c-out','');
+  };
   $('c-go').onclick = doCross;
   $('csv-imp').onclick = () => $('csv-file').click();
   $('csv-file').onchange = (e) => { const f=e.target.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>importCSV(r.result); r.readAsText(f); e.target.value=''; };
