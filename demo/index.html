@@ -149,7 +149,7 @@
 <div id="map"></div>
 <div id="hint" hidden><span class="ring"></span><span class="txt">Click the map to add stops</span></div>
 <div id="opt-hint" hidden>Open ☰ to optimize routes</div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b9</div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2c0</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -223,8 +223,8 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b9';
-const BUILD = '2b9';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2c0';
+const BUILD = '2c0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -233,6 +233,8 @@ const NaNf = Number.NaN;
 const isMobile = () => window.matchMedia('(max-width:759px)').matches;
 // Remove the "tap the map" nudge instantly (no fade) on any interaction.
 const hideHint = () => { const h = document.getElementById('hint'); if (h) h.hidden = true; };
+// Google Analytics custom events — which features get used (CPU vs GPU, etc).
+const track = (name, params = {}) => { try { if (window.gtag) gtag('event', name, params); } catch(_) {} };
 
 // Subtle "open ☰ to optimize" nudge, anchored under the burger button. Shown
 // once there are enough stops (>4) and the sheet is closed.
@@ -445,6 +447,8 @@ async function doOptimize() {
   } catch(e){ setOut('trip-out', 'Optimize failed: '+e.message); return; }
   const ms = performance.now()-t0;
   lastPlan = plan;
+  track('optimize', { solver: useGpu ? 'gpu' : 'cpu', stops: plan.total_stops,
+                      vehicles: plan.vehicles_used, ms: Math.round(ms) });
 
   clearRoutes(); clearResultMarkers();
   const lines = [];
@@ -528,6 +532,7 @@ function doCross() {
   if (!a || !b) return;
   crossClicks = [];
   showCrossing(a, b);
+  track('crossing', { via: 'form' });
 }
 // Map-tap flow: 1st tap → highlight that street; 2nd → highlight + pin crossing.
 function crossClick(lat, lon) {
@@ -539,6 +544,7 @@ function crossClick(lat, lon) {
   drawStreet(slot, name, slot==='a' ? STREET_A : STREET_B);
   crossClicks.push(name);
   if (crossClicks.length === 2) {
+    track('crossing', { via: 'map' });
     $('c-a').value = crossClicks[0]; $('c-b').value = crossClicks[1];
     const hits = pinCrossings(crossClicks[0], crossClicks[1]);
     setOut('c-out', hits.length
@@ -571,8 +577,10 @@ function importCSV(text) {
   renderStops();
   if (stops.length) fit(stops);
   setOut('trip-out', `Imported ${added} stop(s) from CSV.`);
+  track('csv_import', { count: added });
 }
 function exportCSV() {
+  track('csv_export', { kind: (lastPlan && lastPlan.routes && lastPlan.routes.length) ? 'route' : 'stops' });
   let csv;
   if (lastPlan && lastPlan.routes && lastPlan.routes.length) {
     // One row per stop, carrying that vehicle's totals (km / min / stop count)
@@ -612,16 +620,16 @@ function runSearch() {
   if (!q) return;
   // direct "lat,lon"
   const ll = q.split(',').map(x=>parseFloat(x.trim()));
-  if (ll.length===2 && isFinite(ll[0]) && isFinite(ll[1])) { addStop(ll[0], ll[1], `${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}`); $('q').value=''; hideSugg(); return; }
+  if (ll.length===2 && isFinite(ll[0]) && isFinite(ll[1])) { addStop(ll[0], ll[1], `${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}`); $('q').value=''; hideSugg(); track('search',{kind:'coord'}); return; }
   // "A & B" or "A x B" → crossing
   const m = q.split(/\s+(?:&|x|×|and)\s+/i);
   if (m.length===2) {
     const hits = JSON.parse(engine.intersection(m[0].trim(), m[1].trim(), NaNf, NaNf));
-    if (hits.length) { addStop(hits[0].lat, hits[0].lon, `${m[0].trim()} × ${m[1].trim()}`); $('q').value=''; hideSugg(); return; }
+    if (hits.length) { addStop(hits[0].lat, hits[0].lon, `${m[0].trim()} × ${m[1].trim()}`); $('q').value=''; hideSugg(); track('search',{kind:'crossing'}); return; }
   }
   const hit = JSON.parse(engine.geocode(q, NaNf, NaNf));
-  if (hit) { addStop(hit.lat, hit.lon, hit.name); $('q').value=''; hideSugg(); }
-  else showToast(`No street matching "${q}". Tip: try "Market Street", "Market & 5th", or "lat,lon".`);
+  if (hit) { addStop(hit.lat, hit.lon, hit.name); $('q').value=''; hideSugg(); track('search',{kind:'address'}); }
+  else { showToast(`No street matching "${q}". Tip: try "Market Street", "Market & 5th", or "lat,lon".`); track('search',{kind:'miss'}); }
 }
 function showToast(msg){ const s=$('sugg'); s.innerHTML=`<div class="toast">${msg}</div>`; s.style.display='block'; setTimeout(hideSugg, 3500); }
 function hideSugg(){ $('sugg').style.display='none'; }
