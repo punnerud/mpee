@@ -21,9 +21,13 @@ pub mod neural;
 pub mod pattern_db;
 pub mod warm_start;
 pub mod cluster_decompose;
+#[cfg(feature = "gpu")]
 pub mod gpu_sweep;
+#[cfg(feature = "gpu")]
 pub mod gpu_population;
+#[cfg(feature = "gpu")]
 pub mod gpu_polish;
+#[cfg(feature = "gpu")]
 pub mod hgs;
 pub mod route_exact;
 pub mod population;

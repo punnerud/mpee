@@ -17,6 +17,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::eval::{precompute, try_insert_pair, try_insert_single, try_insert_single_with_shift, RoutePrecomp};
@@ -228,6 +229,20 @@ pub fn greedy_insertion_seeded(problem: &Problem, matrix: &Matrix, seed: u64) ->
             .filter(|&s| alive[s] && !(matches!(pending[s], TaskRef::Delivery(_)) && s > 0 && is_pair_head[s - 1]))
             .collect();
 
+        // Serial probe over all live slots (also the wasm path: no rayon).
+        let probe_serial = || -> (Vec<TopK<ProbeSingle>>, Vec<TopK<ProbePair>>) {
+            let mut local_s: TopK<ProbeSingle> = TopK::new(VALIDATE_TOP_K);
+            let mut local_p: TopK<ProbePair> = TopK::new(VALIDATE_TOP_K);
+            for slot in &live_slots {
+                probe_one_slot(
+                    problem, matrix, &routes_steps, &precomps, &pending, &is_pair_head,
+                    *slot, &mut local_s, &mut local_p,
+                );
+            }
+            (vec![local_s], vec![local_p])
+        };
+
+        #[cfg(feature = "parallel")]
         let (probes_single_vec, probes_pair_vec): (Vec<TopK<ProbeSingle>>, Vec<TopK<ProbePair>>) = if go_parallel {
             live_slots
                 .par_iter()
@@ -242,15 +257,12 @@ pub fn greedy_insertion_seeded(problem: &Problem, matrix: &Matrix, seed: u64) ->
                 })
                 .unzip()
         } else {
-            let mut local_s: TopK<ProbeSingle> = TopK::new(VALIDATE_TOP_K);
-            let mut local_p: TopK<ProbePair> = TopK::new(VALIDATE_TOP_K);
-            for slot in &live_slots {
-                probe_one_slot(
-                    problem, matrix, &routes_steps, &precomps, &pending, &is_pair_head,
-                    *slot, &mut local_s, &mut local_p,
-                );
-            }
-            (vec![local_s], vec![local_p])
+            probe_serial()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let (probes_single_vec, probes_pair_vec): (Vec<TopK<ProbeSingle>>, Vec<TopK<ProbePair>>) = {
+            let _ = go_parallel;
+            probe_serial()
         };
 
         let mut probes_single: TopK<ProbeSingle> = TopK::new(VALIDATE_TOP_K);

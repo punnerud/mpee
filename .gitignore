@@ -4,9 +4,10 @@ target/
 *.rlib
 *.rmeta
 
-# OSM input data and engine caches — too large for git, regenerable
-data/
-data
+# OSM input data and engine caches — too large for git, regenerable.
+# Anchored to the repo root so the demo's bundled SF cache (demo/data/*.gz)
+# is still committed for GitHub Pages.
+/data/
 **/*.osm.pbf
 **/*.osm.pbf.csr
 **/*.osm.pbf.pp

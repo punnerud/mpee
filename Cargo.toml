@@ -9,6 +9,9 @@ members = [
     # NB: the iOS FFI crate (mpee-ios) and the SwiftUI demo app live in a
     # separate sibling repo (../mpee-ios) so the engine stays platform-neutral.
 ]
+# The browser/WASM crate is its own workspace (wasm32 target, cdylib) so a
+# native `cargo build --workspace` never pulls it in.
+exclude = ["crates/mpee-wasm"]
 
 # Each subcrate also declares its own `[profile.release]`; cargo prefers
 # these workspace-root settings when the workspace is the build unit and

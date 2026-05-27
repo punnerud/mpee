@@ -9,6 +9,11 @@ matrix is **~10 GB** materialised, the way OSRM + VROOM do it (**≈20× more
 memory**). MPEE streams instead of storing, in **94 s** where OSRM runs out of
 RAM, on **CPU + GPU**.
 
+> 🌐 **[Live demo → punnerud.github.io/mpee/demo](https://punnerud.github.io/mpee/demo/)** —
+> the whole engine compiled to WebAssembly, running **in your browser** over a
+> San Francisco map: address search, street-crossing lookup, point-to-point
+> routing and multi-vehicle optimization, computed locally (no server).
+
 ## How it compares (measured, Apple M3 Pro)
 
 A 50,000-customer fleet implies a 50,000 × 50,000 distance matrix — **~10 GB**

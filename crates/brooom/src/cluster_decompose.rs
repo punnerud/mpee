@@ -18,6 +18,7 @@
 //! coordinates are a derived view. Medoids are also more robust to TW
 //! outliers than means.
 
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -201,14 +202,15 @@ pub fn solve_decomposed(
         }
     }
 
-    // Solve clusters in parallel.
-    let sub_solutions: Vec<Solution> = (0..assn.k)
-        .into_par_iter()
-        .map(|c| {
-            let sub = subproblem(problem, &jobs_by_cluster[c], &veh_by_cluster[c]);
-            solve_with_matrix(&sub, matrix, config)
-        })
-        .collect();
+    // Solve clusters in parallel (native) or serially (wasm, no rayon).
+    let solve_cluster = |c: usize| -> Solution {
+        let sub = subproblem(problem, &jobs_by_cluster[c], &veh_by_cluster[c]);
+        solve_with_matrix(&sub, matrix, config)
+    };
+    #[cfg(feature = "parallel")]
+    let sub_solutions: Vec<Solution> = (0..assn.k).into_par_iter().map(solve_cluster).collect();
+    #[cfg(not(feature = "parallel"))]
+    let sub_solutions: Vec<Solution> = (0..assn.k).map(solve_cluster).collect();
 
     // Reassemble. Each sub-route's TaskRef::Job(idx) is local to its
     // sub-problem; re-map to parent indices.

@@ -2,7 +2,10 @@
 
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+// Browser-safe clock on wasm; std::time on native.
+use web_time::Instant;
 
 use crate::error::{Error, Result};
 use crate::granular::Granular;
@@ -136,7 +139,7 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     let ils_kick = config.ils_kick_size.max(0.0).min(1.0);
     let deadline = config
         .time_limit_ms
-        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        .map(|ms| Instant::now() + std::time::Duration::from_millis(ms));
 
     // For each of K seeds: insertion → LS → ILS-kick loop. Best across all
     // attempts wins. With K=1 and ils_iters=0 this is the original baseline;
@@ -189,7 +192,7 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA5A5));
             for _ in 0..ils_iters {
                 if let Some(d) = deadline {
-                    if std::time::Instant::now() >= d { break; }
+                    if Instant::now() >= d { break; }
                 }
                 let mut perturbed = best_sol.clone();
                 kick(&mut perturbed, ils_kick, &mut rng, problem, matrix);
@@ -207,19 +210,30 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
         sol
     };
 
+    #[allow(unused_mut)]
     let mut best = if k == 1 {
         solve_one(0)
     } else {
-        (0..k as u64)
-            .into_par_iter()
-            .map(solve_one)
-            .min_by(|a, b| {
-                a.summary
-                    .cost
-                    .partial_cmp(&b.summary.cost)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+        // Parallel multi-start on native; serial on wasm (no rayon).
+        #[cfg(feature = "parallel")]
+        {
+            (0..k as u64)
+                .into_par_iter()
+                .map(solve_one)
+                .min_by(|a, b| {
+                    a.summary
+                        .cost
+                        .partial_cmp(&b.summary.cost)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .expect("at least one variant")
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            (1..k as u64).map(solve_one).fold(solve_one(0), |a, b| {
+                if b.summary.cost < a.summary.cost { b } else { a }
             })
-            .expect("at least one variant")
+        }
     };
 
     // GPU megakernel polish pass on the multi-start winner. Falls back
@@ -228,6 +242,7 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     // level after cluster_decompose the routes are too short for batch
     // GPU to find diversity-driven wins. The outer flow in main.rs runs
     // a separate top-level gpu_polish on the merged solution.
+    #[cfg(feature = "gpu")]
     if config.use_gpu && best.routes.len() > 0 && matrix.n >= 500 {
         let t_gpu = std::time::Instant::now();
         let max_iter = if matrix.n >= 5000 { 2000 } else { 1000 };

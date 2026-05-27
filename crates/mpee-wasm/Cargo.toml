@@ -1,0 +1,29 @@
+[package]
+name = "mpee-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for the MPEE engine — offline routing, geocoding and VRP in the browser."
+license = "MIT"
+
+# Standalone workspace so the parent (native) workspace never builds this
+# wasm32 cdylib. Built with: wasm-pack build --target web --release
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Query + geocoding subset of the routing engine (no mmap / threads / OSM).
+dijeng = { path = "../dijeng", default-features = false }
+# Serial CPU VRP solver — no rayon, no wgpu (a WebGPU path is a later phase).
+brooom = { path = "../brooom", default-features = false }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+opt-level = "s"   # optimise wasm for size
+lto = true
+codegen-units = 1
+panic = "abort"

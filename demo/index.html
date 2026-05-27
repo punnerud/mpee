@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>MPEE live demo — offline routing, geocoding &amp; VRP in San Francisco</title>
+<meta name="description" content="Interactive in-browser demo of the MPEE engine: address search, street-crossing lookup, point-to-point routing and multi-vehicle delivery optimization over San Francisco — all computed locally in WebAssembly, no server.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%230d9488' d='M16 2a10 10 0 0 0-10 10c0 7 10 18 10 18s10-11 10-18A10 10 0 0 0 16 2zm0 14a4 4 0 1 1 0-8 4 4 0 0 1 0 8z'/%3E%3C/svg%3E">
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-7CDBC4GP8G"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-7CDBC4GP8G');
+</script>
+<style>
+  :root{
+    --accent:#0d9488; --accent2:#2dd4bf; --bg:#0e1419; --panel:#141d24;
+    --line:#243038; --fg:#dce4ea; --muted:#92a4b1;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+  #map{position:absolute;inset:0}
+  a{color:var(--accent2)}
+  /* Control panel */
+  #panel{
+    position:absolute;top:12px;left:12px;z-index:10;width:330px;max-width:calc(100vw - 24px);
+    background:rgba(20,29,36,.94);backdrop-filter:blur(10px);border:1px solid var(--line);
+    border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.4);overflow:hidden;
+    max-height:calc(100vh - 24px);display:flex;flex-direction:column;
+  }
+  .head{padding:13px 16px;border-bottom:1px solid var(--line)}
+  .head h1{margin:0;font-size:1.05rem;letter-spacing:-.01em}
+  .head h1 b{color:var(--accent2)}
+  .head .sub{color:var(--muted);font-size:.8rem;margin-top:2px}
+  .tabs{display:flex;border-bottom:1px solid var(--line)}
+  .tabs button{
+    flex:1;background:none;border:0;color:var(--muted);padding:10px 4px;font-size:.82rem;
+    cursor:pointer;border-bottom:2px solid transparent;
+  }
+  .tabs button.on{color:var(--fg);border-bottom-color:var(--accent)}
+  .body{padding:14px 16px;overflow:auto}
+  .pane{display:none}
+  .pane.on{display:block}
+  label{display:block;color:var(--muted);font-size:.78rem;margin:8px 0 3px}
+  input[type=text],input[type=number]{
+    width:100%;background:#0b1216;border:1px solid var(--line);border-radius:8px;
+    color:var(--fg);padding:8px 10px;font-size:.9rem;font-family:inherit;
+  }
+  .row{display:flex;gap:8px}
+  .row>*{flex:1}
+  button.go{
+    width:100%;margin-top:12px;background:var(--accent);color:#fff;border:0;border-radius:9px;
+    padding:10px;font-weight:600;font-size:.92rem;cursor:pointer;
+  }
+  button.go:hover{filter:brightness(1.08)}
+  button.ghost{background:#0b1216;border:1px solid var(--line);color:var(--fg);font-weight:500}
+  .hint{color:var(--muted);font-size:.78rem;margin:8px 0 0}
+  .result{margin-top:12px;padding:10px 12px;background:#0b1216;border:1px solid var(--line);border-radius:9px;font-size:.85rem;white-space:pre-wrap}
+  .result.empty{display:none}
+  .gpu{display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);margin-top:10px}
+  .gpu input{width:auto}
+  .badge{display:inline-block;font-size:.7rem;padding:1px 7px;border-radius:999px;background:var(--accent-weak,#10302d);color:var(--accent2);border:1px solid var(--line)}
+  .foot{padding:10px 16px;border-top:1px solid var(--line);font-size:.74rem;color:var(--muted)}
+  /* Loading overlay */
+  #load{position:absolute;inset:0;z-index:50;background:var(--bg);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;text-align:center;padding:24px}
+  #load h2{margin:0;font-weight:700}
+  #load .bar{width:min(360px,80vw);height:8px;background:#0b1216;border:1px solid var(--line);border-radius:999px;overflow:hidden}
+  #load .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .2s}
+  #load .msg{color:var(--muted);font-size:.85rem}
+  #load .err{color:#ff6b6b;font-size:.85rem;max-width:480px}
+  .pin-num{background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel" hidden>
+  <div class="head">
+    <h1><b>MPEE</b> live demo · San Francisco</h1>
+    <div class="sub">Offline routing · geocoding · VRP — all in your browser (<span id="nodecount">…</span> road nodes)</div>
+  </div>
+  <div class="tabs">
+    <button data-tab="route" class="on">Route</button>
+    <button data-tab="search">Address</button>
+    <button data-tab="cross">Crossing</button>
+    <button data-tab="opt">Optimize</button>
+  </div>
+  <div class="body">
+    <!-- ROUTE -->
+    <div class="pane on" id="pane-route">
+      <div class="hint">Click the map to set <b>A</b>, then <b>B</b> — or type <code>lat,lon</code>.</div>
+      <label>From (lat, lon)</label><input type="text" id="r-from" placeholder="click map or 37.7749,-122.4194">
+      <label>To (lat, lon)</label><input type="text" id="r-to" placeholder="click map or 37.8024,-122.4058">
+      <button class="go" id="r-go">Find route</button>
+      <button class="go ghost" id="r-clear" style="margin-top:8px">Clear</button>
+      <div class="result empty" id="r-out"></div>
+    </div>
+    <!-- ADDRESS SEARCH -->
+    <div class="pane" id="pane-search">
+      <div class="hint">Forward geocode: a street name → coordinate (offline, from the <code>.names</code> sidecar).</div>
+      <label>Street name</label><input type="text" id="s-q" placeholder="e.g. Market Street">
+      <button class="go" id="s-go">Search</button>
+      <div class="result empty" id="s-out"></div>
+      <div class="hint" style="margin-top:14px">Reverse geocode: click the map in any mode to see the nearest street name.</div>
+    </div>
+    <!-- CROSSING -->
+    <div class="pane" id="pane-cross">
+      <div class="hint">Intersection search: where two named streets cross.</div>
+      <label>Street A</label><input type="text" id="c-a" placeholder="Market Street">
+      <label>Street B</label><input type="text" id="c-b" placeholder="5th Street">
+      <button class="go" id="c-go">Find crossings</button>
+      <div class="result empty" id="c-out"></div>
+    </div>
+    <!-- OPTIMIZE -->
+    <div class="pane" id="pane-opt">
+      <div class="hint">Multi-vehicle delivery optimization (VRP) over random SF stops.</div>
+      <div class="row">
+        <div><label>Stops</label><input type="number" id="o-n" value="30" min="2" max="120"></div>
+        <div><label>Vehicles</label><input type="number" id="o-v" value="4" min="1" max="20"></div>
+        <div><label>Capacity</label><input type="number" id="o-cap" value="10" min="1"></div>
+      </div>
+      <button class="go ghost" id="o-scatter">Scatter stops</button>
+      <button class="go" id="o-go">Optimize routes</button>
+      <div class="gpu">
+        <input type="checkbox" id="o-gpu"><label for="o-gpu" style="margin:0" id="o-gpu-l">GPU (WebGPU)</label>
+      </div>
+      <div class="result empty" id="o-out"></div>
+    </div>
+  </div>
+  <div class="foot">
+    100% local · no server · <a href="https://github.com/punnerud/mpee">github.com/punnerud/mpee</a>
+  </div>
+</div>
+
+<div id="load">
+  <h2>MPEE live demo</h2>
+  <div class="msg" id="load-msg">Loading the San Francisco map into your browser…</div>
+  <div class="bar"><i id="load-bar"></i></div>
+  <div class="err" id="load-err"></div>
+</div>
+
+<script type="module">
+import init, { Engine } from './engine/mpee_wasm.js';
+
+const SF = { lng: -122.4194, lat: 37.7749 };
+const $ = (id) => document.getElementById(id);
+const NaNf = Number.NaN;
+
+// ---- asset loading with progress -----------------------------------------
+async function fetchGunzip(url, onProgress) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+  const total = +resp.headers.get('content-length') || 0;
+  let loaded = 0;
+  const reader = resp.body.getReader();
+  const chunks = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); loaded += value.length;
+    if (total && onProgress) onProgress(loaded / total);
+  }
+  const gz = new Blob(chunks);
+  // Decompress gzip in the browser.
+  const ds = new DecompressionStream('gzip');
+  const stream = gz.stream().pipeThrough(ds);
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+let engine = null;
+let map = null;
+
+async function boot() {
+  try {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('Your browser lacks DecompressionStream. Try a recent Chrome, Edge, Safari 16.4+ or Firefox 113+.');
+    }
+    await init();  // instantiate the wasm module
+
+    // Three cache files, with a combined progress bar.
+    const weights = { pp: 0.32, ch: 0.66, names: 0.02 };
+    const prog = { pp: 0, ch: 0, names: 0 };
+    const paint = () => {
+      const p = prog.pp * weights.pp + prog.ch * weights.ch + prog.names * weights.names;
+      $('load-bar').style.width = (p * 100).toFixed(0) + '%';
+    };
+    $('load-msg').textContent = 'Downloading the San Francisco routing cache (~30 MB, one-time)…';
+    const [pp, ch, names] = await Promise.all([
+      fetchGunzip('./data/sf.pp.gz',    (x) => { prog.pp = x; paint(); }),
+      fetchGunzip('./data/sf.ch.gz',    (x) => { prog.ch = x; paint(); }),
+      fetchGunzip('./data/sf.names.gz', (x) => { prog.names = x; paint(); }),
+    ]);
+    $('load-msg').textContent = 'Building the in-browser engine…';
+    engine = new Engine(pp, ch, names);
+    $('nodecount').textContent = engine.node_count().toLocaleString();
+
+    setupMap();
+    setupUI();
+    $('load').style.display = 'none';
+    $('panel').hidden = false;
+  } catch (e) {
+    console.error(e);
+    $('load-bar').style.background = '#ff6b6b';
+    $('load-err').textContent = 'Failed to load: ' + (e && e.message ? e.message : e);
+    $('load-msg').textContent = '';
+  }
+}
+
+// ---- map -------------------------------------------------------------------
+function setupMap() {
+  map = new maplibregl.Map({
+    container: 'map',
+    style: 'https://tiles.openfreemap.org/styles/liberty',
+    center: [SF.lng, SF.lat],
+    zoom: 12.4,
+    attributionControl: true,
+  });
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+  map.on('load', () => {
+    map.addSource('route', { type: 'geojson', data: empty() });
+    map.addLayer({ id: 'route', type: 'line', source: 'route',
+      paint: { 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.85 },
+      layout: { 'line-cap': 'round', 'line-join': 'round' } });
+  });
+  map.on('click', onMapClick);
+}
+const empty = () => ({ type: 'FeatureCollection', features: [] });
+
+let markers = [];
+function clearMarkers() { markers.forEach(m => m.remove()); markers = []; }
+function clearRoutes() { if (map.getSource('route')) map.getSource('route').setData(empty()); }
+function clearAll() { clearMarkers(); clearRoutes(); }
+
+function addMarker(lat, lon, opts = {}) {
+  const el = document.createElement('div');
+  if (opts.num !== undefined) { el.className = 'pin-num'; el.textContent = opts.num; if (opts.color) el.style.background = opts.color; }
+  const m = new maplibregl.Marker(opts.num !== undefined ? { element: el } : { color: opts.color || '#0d9488' })
+    .setLngLat([lon, lat]).addTo(map);
+  if (opts.popup) m.setPopup(new maplibregl.Popup({ offset: 18 }).setHTML(opts.popup));
+  markers.push(m);
+  return m;
+}
+
+// ---- UI / modes ------------------------------------------------------------
+let mode = 'route';
+function setupUI() {
+  document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+    mode = b.dataset.tab;
+    document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+    document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === 'pane-' + mode));
+  });
+
+  // ROUTE
+  $('r-go').onclick = doRoute;
+  $('r-clear').onclick = () => { clearAll(); $('r-from').value=''; $('r-to').value=''; setOut('r-out',''); };
+  // ADDRESS
+  $('s-go').onclick = doSearch;
+  $('s-q').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  // CROSSING
+  $('c-go').onclick = doCross;
+  // OPTIMIZE
+  $('o-scatter').onclick = scatter;
+  $('o-go').onclick = doOptimize;
+
+  // GPU toggle: detect WebGPU honestly. The GPU solver path is in progress;
+  // compute currently runs on the CPU (WASM) regardless.
+  const gpu = $('o-gpu'), lbl = $('o-gpu-l');
+  if (navigator.gpu) {
+    lbl.innerHTML = 'GPU (WebGPU) <span class="badge">detected</span>';
+  } else {
+    gpu.disabled = true;
+    lbl.innerHTML = 'GPU (WebGPU) — not available in this browser';
+  }
+}
+
+function setOut(id, text) {
+  const el = $(id);
+  el.textContent = text;
+  el.classList.toggle('empty', !text);
+}
+function parseLatLon(s) {
+  const m = s.split(',').map(x => parseFloat(x.trim()));
+  return (m.length === 2 && isFinite(m[0]) && isFinite(m[1])) ? m : null;
+}
+
+// Reverse-geocode on every map click; in route mode also set A/B.
+function onMapClick(e) {
+  const lat = e.lngLat.lat, lon = e.lngLat.lng;
+  const street = engine.has_names() ? engine.reverse(lat, lon) : '';
+  if (mode === 'route') {
+    if (!$('r-from').value) { $('r-from').value = `${lat.toFixed(5)},${lon.toFixed(5)}`; addMarker(lat, lon, { color: '#2dd4bf', popup: street || 'A' }); }
+    else if (!$('r-to').value) { $('r-to').value = `${lat.toFixed(5)},${lon.toFixed(5)}`; addMarker(lat, lon, { color: '#f59e0b', popup: street || 'B' }); doRoute(); }
+  } else if (mode === 'opt') {
+    optStops.push([lat, lon]); drawOptStops();
+  } else if (street) {
+    new maplibregl.Popup().setLngLat([lon, lat]).setHTML(`<b>${street}</b><br><small>${lat.toFixed(5)}, ${lon.toFixed(5)}</small>`).addTo(map);
+  }
+}
+
+function doRoute() {
+  const a = parseLatLon($('r-from').value), b = parseLatLon($('r-to').value);
+  if (!a || !b) { setOut('r-out', 'Set both A and B (click the map or type lat,lon).'); return; }
+  clearRoutes();
+  try {
+    const r = JSON.parse(engine.route(a[0], a[1], b[0], b[1]));
+    drawLine(r.geometry, '#0d9488');
+    fit(r.geometry);
+    setOut('r-out', `distance: ${r.distance_km.toFixed(2)} km\nduration: ${r.duration_min.toFixed(1)} min\n${r.geometry.length} geometry points`);
+  } catch (e) { setOut('r-out', 'No route: ' + e.message); }
+}
+
+function doSearch() {
+  const q = $('s-q').value.trim();
+  if (!q) return;
+  const hit = JSON.parse(engine.geocode(q, NaNf, NaNf));
+  if (!hit) { setOut('s-out', `No street matching "${q}".`); return; }
+  clearMarkers();
+  addMarker(hit.lat, hit.lon, { color: '#2dd4bf', popup: `<b>${hit.name}</b>` });
+  map.flyTo({ center: [hit.lon, hit.lat], zoom: 15 });
+  setOut('s-out', `${hit.name}\n${hit.lat.toFixed(6)}, ${hit.lon.toFixed(6)}`);
+}
+
+function doCross() {
+  const a = $('c-a').value.trim(), b = $('c-b').value.trim();
+  if (!a || !b) return;
+  const hits = JSON.parse(engine.intersection(a, b, NaNf, NaNf));
+  clearMarkers();
+  if (!hits.length) { setOut('c-out', `No intersection of "${a}" and "${b}" found.`); return; }
+  const pts = hits.map(h => [h.lat, h.lon]);
+  hits.forEach((h, i) => addMarker(h.lat, h.lon, { color: '#f59e0b', popup: `${a} × ${b} (#${i + 1})` }));
+  fit(pts);
+  setOut('c-out', `${a} × ${b}: ${hits.length} match(es)\n` + hits.map(h => `${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n'));
+}
+
+// ---- optimize --------------------------------------------------------------
+let optStops = [];
+const PALETTE = ['#0d9488','#f59e0b','#ef4444','#3b82f6','#a855f7','#10b981','#ec4899','#eab308','#06b6d4','#f97316','#8b5cf6','#14b8a6'];
+
+function scatter() {
+  const n = Math.max(2, Math.min(120, +$('o-n').value || 30));
+  const bb = JSON.parse(engine.bbox());
+  // Sample within a tightened box around SF core for a dense, road-rich demo.
+  const latC = 37.773, lonC = -122.42, dl = 0.045, dn = 0.055;
+  optStops = [];
+  for (let i = 0; i < n; i++) {
+    const lat = (latC - dl/2) + Math.random() * dl;
+    const lon = (lonC - dn/2) + Math.random() * dn;
+    // snap into the loaded area's bbox just in case
+    optStops.push([Math.max(bb.min_lat, Math.min(bb.max_lat, lat)), Math.max(bb.min_lon, Math.min(bb.max_lon, lon))]);
+  }
+  drawOptStops();
+  setOut('o-out', `${optStops.length} stops placed. Click "Optimize routes".`);
+}
+
+function drawOptStops() {
+  clearMarkers(); clearRoutes();
+  optStops.forEach((s, i) => addMarker(s[0], s[1], { num: i + 1 }));
+  if (optStops.length) fit(optStops);
+}
+
+function doOptimize() {
+  if (optStops.length < 2) { setOut('o-out', 'Scatter or click some stops first.'); return; }
+  const vehicles = Math.max(1, +$('o-v').value || 4);
+  const capacity = Math.max(1, +$('o-cap').value || 10);
+  const t0 = performance.now();
+  let plan;
+  try {
+    plan = JSON.parse(engine.optimize(JSON.stringify(optStops), 'null', vehicles, capacity, 2.0));
+  } catch (e) { setOut('o-out', 'Optimize failed: ' + e.message); return; }
+  const solveMs = performance.now() - t0;
+
+  // Draw each vehicle's road-following route in its own colour.
+  clearMarkers(); clearRoutes();
+  const feats = [];
+  const depot = plan.depot; // [lat, lon]
+  addMarker(depot[0], depot[1], { color: '#fff', popup: 'Depot' });
+  plan.routes.forEach((rt, vi) => {
+    const color = PALETTE[vi % PALETTE.length];
+    const seq = [depot, ...rt.stops.map(s => [s.lat, s.lon]), depot];
+    const coords = [];
+    for (let i = 0; i < seq.length - 1; i++) {
+      try {
+        const leg = JSON.parse(engine.route(seq[i][0], seq[i][1], seq[i+1][0], seq[i+1][1]));
+        leg.geometry.forEach(p => coords.push([p[1], p[0]])); // lat,lon → lon,lat
+      } catch (_) { /* skip unreachable leg */ }
+    }
+    if (coords.length) feats.push({ type:'Feature', properties:{ color }, geometry:{ type:'LineString', coordinates: coords } });
+    rt.stops.forEach(s => addMarker(s.lat, s.lon, { num: s.stop_index + 1, color }));
+  });
+  const src = routeSource(); if (src) src.setData({ type:'FeatureCollection', features: feats });
+  fit(optStops.concat([depot]));
+
+  const gpuOn = $('o-gpu').checked && navigator.gpu;
+  setOut('o-out',
+    `${plan.vehicles_used} vehicles · ${plan.total_stops} stops\n` +
+    `total: ${plan.total_distance_km.toFixed(1)} km, ${plan.total_duration_min.toFixed(0)} min\n` +
+    `unassigned: ${plan.unassigned.length}\n` +
+    `solved in ${solveMs.toFixed(0)} ms on ${gpuOn ? 'GPU→CPU fallback' : 'CPU (WASM)'}` +
+    (gpuOn ? '\n(WebGPU solver in progress — ran on CPU)' : ''));
+}
+
+// ---- draw helpers ----------------------------------------------------------
+function routeSource() { return map && map.getSource && map.getSource('route'); }
+function drawLine(geomLatLon, color) {
+  const src = routeSource(); if (!src) return;
+  const coords = geomLatLon.map(p => [p[1], p[0]]); // lat,lon → lon,lat
+  src.setData({ type:'FeatureCollection', features:[
+    { type:'Feature', properties:{ color }, geometry:{ type:'LineString', coordinates: coords } }
+  ]});
+}
+function fit(ptsLatLon) {
+  if (!ptsLatLon.length) return;
+  const b = new maplibregl.LngLatBounds();
+  ptsLatLon.forEach(p => b.extend([p[1], p[0]]));
+  map.fitBounds(b, { padding: 70, maxZoom: 16, duration: 600 });
+}
+
+boot();
+</script>
+</body>
+</html>

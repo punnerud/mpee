@@ -15,9 +15,10 @@
 //! In effect this is the CPU-side cousin of GPU Phase 8: many trajectories
 //! exploring perturbations of one good solution, best-of-K wins.
 
-use std::time::Instant;
+use web_time::Instant;
 
 use rand::SeedableRng;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::granular::Granular;
@@ -89,39 +90,45 @@ pub fn polish_with_population(
     let n = cfg.n_trajectories.max(1);
     let granular = cfg.granular_k.map(|k| Granular::build(matrix, k));
 
-    let trajectories: Vec<(Solution, bool)> = (0..n as u64)
-        .into_par_iter()
-        .map(|seed| {
-            let mut local_best = base.clone();
-            let mut local_best_cost = local_best.summary.cost;
-            let mut rng =
-                rand_chacha::ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_F00D));
-            let mut improved = false;
+    // One ILS trajectory from a seed. Run in parallel on native, serially on
+    // wasm (no rayon) — the result is identical, only the dispatch differs.
+    let run_trajectory = |seed: u64| -> (Solution, bool) {
+        let mut local_best = base.clone();
+        let mut local_best_cost = local_best.summary.cost;
+        let mut rng =
+            rand_chacha::ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_F00D));
+        let mut improved = false;
 
-            for _iter in 0..cfg.ils_iters_per_trajectory {
-                if let Some(d) = cfg.deadline {
-                    if Instant::now() >= d {
-                        break;
-                    }
-                }
-                let mut perturbed = local_best.clone();
-                kick(&mut perturbed, cfg.kick_frac, &mut rng, problem, matrix);
-                local_search(
-                    problem,
-                    matrix,
-                    &mut perturbed,
-                    cfg.max_local_search_passes,
-                    granular.as_ref(),
-                );
-                if perturbed.summary.cost + 1e-9 < local_best_cost {
-                    local_best_cost = perturbed.summary.cost;
-                    local_best = perturbed;
-                    improved = true;
+        for _iter in 0..cfg.ils_iters_per_trajectory {
+            if let Some(d) = cfg.deadline {
+                if Instant::now() >= d {
+                    break;
                 }
             }
-            (local_best, improved)
-        })
-        .collect();
+            let mut perturbed = local_best.clone();
+            kick(&mut perturbed, cfg.kick_frac, &mut rng, problem, matrix);
+            local_search(
+                problem,
+                matrix,
+                &mut perturbed,
+                cfg.max_local_search_passes,
+                granular.as_ref(),
+            );
+            if perturbed.summary.cost + 1e-9 < local_best_cost {
+                local_best_cost = perturbed.summary.cost;
+                local_best = perturbed;
+                improved = true;
+            }
+        }
+        (local_best, improved)
+    };
+
+    #[cfg(feature = "parallel")]
+    let trajectories: Vec<(Solution, bool)> =
+        (0..n as u64).into_par_iter().map(run_trajectory).collect();
+    #[cfg(not(feature = "parallel"))]
+    let trajectories: Vec<(Solution, bool)> =
+        (0..n as u64).map(run_trajectory).collect();
 
     let mut best = base.clone();
     let mut best_cost = best.summary.cost;

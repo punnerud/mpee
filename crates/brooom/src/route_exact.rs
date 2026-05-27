@@ -74,7 +74,7 @@ pub fn polish_solution_with_exact(
     solution: &mut Solution,
 ) -> ExactPolishStats {
     let mut stats = ExactPolishStats::default();
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();  // browser-safe clock on wasm
     for route in &mut solution.routes {
         let len = route.steps.len();
         if len == 0 || len > MAX_EXACT_LEN {

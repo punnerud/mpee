@@ -30,22 +30,29 @@ required-features = ["cli", "osrm"]
 #                         OSRM + the CLI binary. Keeps `wgpu` so the
 #                         Metal-backed GPU local-search still works on
 #                         Apple Silicon.
+# `parallel` (rayon) and `gpu` (wgpu) are on by default for native; the wasm
+# build omits both (serial CPU solver, no wgpu) via --no-default-features.
 [features]
-default = ["cli", "osrm"]
-full    = ["cli", "osrm", "neural"]
-cli     = ["clap", "tracing-subscriber/env-filter"]
-osrm    = ["ureq"]
-neural  = ["ort", "ndarray"]
-mobile  = []
+default  = ["cli", "osrm", "parallel", "gpu"]
+full     = ["cli", "osrm", "neural", "parallel", "gpu"]
+cli      = ["clap", "tracing-subscriber/env-filter", "gpu"]
+osrm     = ["ureq"]
+neural   = ["ort", "ndarray"]
+parallel = ["dep:rayon"]
+gpu      = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+mobile   = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"
-rayon = "1.10"
+rayon = { version = "1.10", optional = true }
 rand = "0.8"
 rand_chacha = "0.3"
+# `Instant` that works in the browser (performance.now()); on native this is a
+# zero-cost re-export of std::time. Lets the solver's deadlines run on wasm.
+web-time = "1"
 ureq = { version = "2", features = ["json"], optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3" }
@@ -54,9 +61,13 @@ ndarray = { version = "0.17", optional = true }
 # GPU compute (cross-platform: Metal on M3, Vulkan on Linux, DX12 on Win).
 # `pollster` blocks on the async device init since we don't bring tokio.
 # `bytemuck` lets us cast `Vec<i32>` straight into a GPU buffer.
-wgpu = "0.20"
-pollster = "0.3"
-bytemuck = { version = "1", features = ["derive"] }
+wgpu = { version = "0.20", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+
+# On wasm, rand's getrandom backend needs the browser crypto ("js") source.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 approx = "0.5"
