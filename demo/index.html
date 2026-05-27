@@ -182,7 +182,10 @@ import init, { Engine } from './engine/mpee_wasm.js';
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
 const NaNf = Number.NaN;
-const PALETTE = ['#0d9488','#f59e0b','#ef4444','#3b82f6','#a855f7','#10b981','#ec4899','#eab308','#06b6d4','#f97316','#8b5cf6','#14b8a6'];
+// Green first, then red, blue, purple… — orange/yellow pushed to the end since
+// they vanish against OpenFreeMap's orange/yellow road casing.
+const PALETTE = ['#22c55e','#ef4444','#3b82f6','#a855f7','#ec4899','#06b6d4','#14b8a6','#8b5cf6','#84cc16','#f97316'];
+const GREEN = '#22c55e';
 
 let engine = null, map = null;
 let stops = [];          // [{lat, lon, name}]
@@ -262,6 +265,7 @@ function clearRoutes(){ const s=routeSrc(); if (s) s.setData(fc([])); }
 function addStop(lat, lon, name, fly = true) {
   stops.push({ lat, lon, name: name || `${lat.toFixed(5)}, ${lon.toFixed(5)}` });
   lastPlan = null;            // stops changed → previous optimize result is stale
+  stops.forEach(s => s.color = null);  // back to default green until next Optimize
   renderStops();              // also auto-routes through the stops in order
   if (fly) map.flyTo({ center:[lon, lat], zoom: Math.max(map.getZoom(), 13), duration:500 });
 }
@@ -284,30 +288,36 @@ function drawSequentialRoute() {
     + `${totKm.toFixed(2)} km · ${fmtMin(totMin)}`
     + (ok < stops.length - 1 ? `\n(${stops.length-1-ok} leg(s) unreachable)` : ''));
 }
-function renderStops() {
+// Markers + list, coloured by stops[i].color (set by Optimize per vehicle;
+// default green). Does NOT touch the route layer, so Optimize can recolour the
+// stops without wiping its coloured vehicle routes.
+function renderStopsAndList() {
   stopMarkers.forEach(m=>m.remove()); stopMarkers=[];
   stops.forEach((s, i) => {
-    const el = document.createElement('div'); el.className='pin-num'; el.textContent = i+1;
+    const color = s.color || GREEN;
+    const el = document.createElement('div'); el.className='pin-num'; el.textContent = i+1; el.style.background = color;
     const m = new maplibregl.Marker({ element: el }).setLngLat([s.lon, s.lat])
       .setPopup(new maplibregl.Popup({ offset:18 }).setHTML(`<b>${i+1}. ${s.name}</b>`)).addTo(map);
     stopMarkers.push(m);
   });
-  // list
   const list = $('stoplist');
   list.innerHTML = '';
   if (!stops.length) { list.innerHTML = '<div class="empty-note">No stops yet.</div>'; }
   stops.forEach((s, i) => {
+    const color = s.color || GREEN;
     const row = document.createElement('div'); row.className='stoprow';
-    row.innerHTML = `<div class="pin">${i+1}</div><div class="nm">${s.name}<br><small>${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</small></div>`;
+    row.innerHTML = `<div class="pin" style="background:${color}">${i+1}</div><div class="nm">${s.name}<br><small>${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</small></div>`;
     const del = document.createElement('button'); del.className='del'; del.textContent='✕';
-    del.onclick = () => { stops.splice(i,1); renderStops(); };
+    del.onclick = () => { stops.splice(i,1); stops.forEach(x=>x.color=null); lastPlan=null; renderStops(); };
     row.appendChild(del); list.appendChild(row);
   });
-  // counts + button states
   const c = $('count'); c.textContent = stops.length; c.classList.toggle('show', stops.length>0);
   $('act-route').disabled = stops.length !== 2;
   $('act-opt').disabled = stops.length < 2;
   $('act-route').textContent = stops.length===2 ? 'Route A→B' : `Route (need 2, have ${stops.length})`;
+}
+function renderStops() {
+  renderStopsAndList();
   // Live route through the stops in order — recomputed on every add/remove so
   // tapping around the map connects each leg automatically.
   if (mode === 'trip') drawSequentialRoute();
@@ -340,16 +350,19 @@ function doOptimize() {
   lastPlan = plan;
 
   clearRoutes(); clearResultMarkers();
-  resultMarkers.push(new maplibregl.Marker({ color:'#ffffff' }).setLngLat([depot[1], depot[0]]).setPopup(new maplibregl.Popup({offset:18}).setHTML('<b>Depot</b>')).addTo(map));
   const lines = [];
+  stops.forEach(s => s.color = null);
+  stops[0].color = '#1f2937';   // depot (stop 1) — dark, clearly the start
   plan.routes.forEach((rt, vi) => {
     const color = PALETTE[vi % PALETTE.length];
+    rt.stops.forEach(s => { if (stops[s.stop_index + 1]) stops[s.stop_index + 1].color = color; });
     const seq = [depot, ...rt.stops.map(s=>[s.lat, s.lon]), depot];
     const coords = [];
     for (let i=0;i<seq.length-1;i++){ try { const leg = JSON.parse(engine.route(seq[i][0],seq[i][1],seq[i+1][0],seq[i+1][1])); leg.geometry.forEach(pt=>coords.push([pt[1],pt[0]])); } catch(_){} }
     if (coords.length) lines.push({ coords, color });
   });
   drawLinesRaw(lines);
+  renderStopsAndList();   // recolour stop pins per vehicle WITHOUT redrawing routes
   fit(stops);
   const gpuOn = $('o-gpu').checked && navigator.gpu;
 
@@ -373,7 +386,7 @@ function fmtMin(min){ const m=Math.round(min); return m>=60 ? `${Math.floor(m/60
 // ----- crossing: highlight whole streets + pin their intersection -----
 let streetFeatures = { a:null, b:null };  // highlighted streets
 let crossClicks = [];                     // street names tapped on the map
-const STREET_A = '#2dd4bf', STREET_B = '#f59e0b';
+const STREET_A = '#22c55e', STREET_B = '#3b82f6', CROSS_PIN = '#ef4444';
 function streetsSrc(){ return map && map.getSource && map.getSource('streets'); }
 function clearStreets(){ streetFeatures={a:null,b:null}; const s=streetsSrc(); if(s) s.setData(fc([])); }
 function paintStreets(){ const s=streetsSrc(); if(!s) return; s.setData(fc([streetFeatures.a, streetFeatures.b].filter(Boolean))); }
@@ -387,7 +400,7 @@ function drawStreet(slot, name, color) {
 function pinCrossings(a, b) {
   const hits = JSON.parse(engine.intersection(a, b, NaNf, NaNf));
   clearResultMarkers();
-  hits.forEach((h,i)=> resultMarkers.push(new maplibregl.Marker({color:'#ef4444'})
+  hits.forEach((h,i)=> resultMarkers.push(new maplibregl.Marker({color:CROSS_PIN})
     .setLngLat([h.lon,h.lat]).setPopup(new maplibregl.Popup({offset:18}).setHTML(`<b>${a} × ${b}</b>${hits.length>1?` (#${i+1})`:''}`)).addTo(map)));
   return hits;
 }
