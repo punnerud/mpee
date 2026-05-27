@@ -125,24 +125,30 @@
   #load .err{color:#ff6b6b;font-size:.85rem;max-width:480px}
   .pin-num{color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);background:var(--accent)}
 
-  /* first-run hint: just tap the map */
+  /* first-run hint: centred, with a pulsing click indicator (no hand emoji) */
   #hint{
-    position:absolute;z-index:14;left:50%;transform:translateX(-50%);
-    top:calc(max(10px,env(safe-area-inset-top)) + 56px);
-    background:var(--accent);color:#fff;font-size:.85rem;font-weight:600;
-    padding:8px 16px;border-radius:999px;box-shadow:0 6px 20px rgba(13,148,136,.5);
-    pointer-events:none;white-space:nowrap;max-width:calc(100vw - 24px);
-    animation:hintpulse 1.8s ease-in-out infinite;transition:opacity .3s;
+    position:absolute;z-index:14;left:50%;top:50%;transform:translate(-50%,-50%);
+    display:flex;flex-direction:column;align-items:center;gap:14px;
+    pointer-events:none;text-align:center;
   }
-  #hint.hide{opacity:0}
-  @keyframes hintpulse{0%,100%{transform:translateX(-50%) translateY(0)}50%{transform:translateX(-50%) translateY(-4px)}}
-  @media (min-width:760px){ #hint{left:392px;transform:none} @keyframes hintpulse{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}} }
+  #hint .ring{position:relative;width:44px;height:44px;border-radius:50%;border:3px solid var(--accent2);box-shadow:0 0 0 4px rgba(45,212,191,.18)}
+  #hint .ring::after{content:'';position:absolute;inset:-3px;border-radius:50%;border:3px solid var(--accent2);animation:clickpulse 1.5s ease-out infinite}
+  @keyframes clickpulse{0%{transform:scale(1);opacity:.85}100%{transform:scale(2.1);opacity:0}}
+  #hint .txt{background:rgba(22,31,39,.94);color:#fff;font-size:16px;font-weight:600;padding:10px 18px;border-radius:12px;box-shadow:0 8px 26px rgba(0,0,0,.45);max-width:calc(100vw - 32px)}
+
+  /* subtle nudge under the ☰ button once there are enough stops to optimize */
+  #opt-hint{
+    position:absolute;z-index:19;background:var(--accent);color:#fff;font-size:.78rem;font-weight:600;
+    padding:6px 11px;border-radius:9px;box-shadow:0 4px 16px rgba(13,148,136,.5);cursor:pointer;white-space:nowrap;
+  }
+  #opt-hint::before{content:'';position:absolute;top:-5px;right:14px;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:5px solid var(--accent)}
 </style>
 </head>
 <body>
 <div id="map"></div>
-<div id="hint" hidden>👆 Tap anywhere on the map to add stops</div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b6</div>
+<div id="hint" hidden><span class="ring"></span><span class="txt">Click the map to add stops</span></div>
+<div id="opt-hint" hidden>Open ☰ to optimize routes</div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b7</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -216,8 +222,8 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b6';
-const BUILD = '2b6';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b7';
+const BUILD = '2b7';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -226,6 +232,18 @@ const NaNf = Number.NaN;
 const isMobile = () => window.matchMedia('(max-width:759px)').matches;
 // Remove the "tap the map" nudge instantly (no fade) on any interaction.
 const hideHint = () => { const h = document.getElementById('hint'); if (h) h.hidden = true; };
+
+// Subtle "open ☰ to optimize" nudge, anchored under the burger button. Shown
+// once there are enough stops (>4) and the sheet is closed.
+function syncOptHint() {
+  const h = $('opt-hint');
+  const show = stops.length > 4 && !$('sheet').classList.contains('open');
+  if (!show) { h.hidden = true; return; }
+  const t = $('toggle').getBoundingClientRect();
+  h.style.top = (t.bottom + 7) + 'px';
+  h.style.right = Math.max(8, window.innerWidth - t.right) + 'px';
+  h.hidden = false;
+}
 // Green first, then red, blue, purple… — orange/yellow pushed to the end since
 // they vanish against OpenFreeMap's orange/yellow road casing.
 const PALETTE = ['#22c55e','#ef4444','#3b82f6','#a855f7','#ec4899','#06b6d4','#14b8a6','#8b5cf6','#84cc16','#f97316'];
@@ -341,18 +359,22 @@ function addStop(lat, lon, name, fly = true) {
 // the coloured per-vehicle routes once you hit "Optimize".
 function drawSequentialRoute() {
   if (stops.length < 2) { clearRoutes(); if (!stops.length) setOut('trip-out',''); return; }
-  const coords = []; let totKm = 0, totMin = 0, ok = 0;
+  // Build one line feature per contiguous routable run — a leg that can't be
+  // routed (unreachable) breaks the line instead of drawing a straight bridge.
+  const segs = []; let seg = []; let totKm = 0, totMin = 0, bad = 0;
   for (let i = 0; i < stops.length - 1; i++) {
     try {
       const r = JSON.parse(engine.route(stops[i].lat, stops[i].lon, stops[i+1].lat, stops[i+1].lon));
-      r.geometry.forEach(p => coords.push([p[1], p[0]]));
-      totKm += r.distance_km; totMin += r.duration_min; ok++;
-    } catch(_) {}
+      if (!seg.length) seg.push([stops[i].lon, stops[i].lat]);
+      r.geometry.forEach(p => seg.push([p[1], p[0]]));
+      totKm += r.distance_km; totMin += r.duration_min;
+    } catch(_) { if (seg.length > 1) segs.push({ coords: seg, color:'#0d9488' }); seg = []; bad++; }
   }
-  drawLinesRaw([{ coords, color:'#0d9488' }]);
+  if (seg.length > 1) segs.push({ coords: seg, color:'#0d9488' });
+  drawLinesRaw(segs);
   setOut('trip-out', `Route through ${stops.length} stops (tap order)\n`
     + `${totKm.toFixed(2)} km · ${fmtMin(totMin)}`
-    + (ok < stops.length - 1 ? `\n(${stops.length-1-ok} leg(s) unreachable)` : ''));
+    + (bad ? `\n(${bad} leg(s) unreachable — skipped)` : ''));
 }
 // Markers + list, coloured by stops[i].color (set by Optimize per vehicle;
 // default green). Does NOT touch the route layer, so Optimize can recolour the
@@ -379,6 +401,7 @@ function renderStopsAndList() {
   });
   const c = $('count'); c.textContent = stops.length; c.classList.toggle('show', stops.length>0);
   if (stops.length) hideHint();   // dismiss the tap-the-map nudge
+  syncOptHint();                  // show/hide the "open ☰ to optimize" nudge
   $('act-route').disabled = stops.length !== 2;
   $('act-opt').disabled = stops.length < 2;
   $('act-route').textContent = stops.length===2 ? 'Route A→B' : `Route (need 2, have ${stops.length})`;
@@ -430,9 +453,16 @@ async function doOptimize() {
     const color = PALETTE[vi % PALETTE.length];
     rt.stops.forEach(s => { if (stops[s.stop_index + 1]) stops[s.stop_index + 1].color = color; });
     const seq = [depot, ...rt.stops.map(s=>[s.lat, s.lon]), depot];
-    const coords = [];
-    for (let i=0;i<seq.length-1;i++){ try { const leg = JSON.parse(engine.route(seq[i][0],seq[i][1],seq[i+1][0],seq[i+1][1])); leg.geometry.forEach(pt=>coords.push([pt[1],pt[0]])); } catch(_){} }
-    if (coords.length) lines.push({ coords, color });
+    // Split into separate features at any unroutable leg (no straight bridges).
+    let seg = [];
+    for (let i=0;i<seq.length-1;i++){
+      try {
+        const leg = JSON.parse(engine.route(seq[i][0],seq[i][1],seq[i+1][0],seq[i+1][1]));
+        if (!seg.length) seg.push([seq[i][1], seq[i][0]]);
+        leg.geometry.forEach(pt=>seg.push([pt[1],pt[0]]));
+      } catch(_){ if (seg.length>1) lines.push({ coords:seg, color }); seg=[]; }
+    }
+    if (seg.length>1) lines.push({ coords:seg, color });
   });
   drawLinesRaw(lines);
   renderStopsAndList();   // recolour stop pins per vehicle WITHOUT redrawing routes
@@ -661,7 +691,8 @@ function setupUI() {
   $('q').addEventListener('input', onSearchInput);
   $('q').addEventListener('blur', () => setTimeout(hideSugg, 150));
   $('add').onclick = runSearch;
-  $('toggle').onclick = () => $('sheet').classList.toggle('open');
+  $('toggle').onclick = () => { $('sheet').classList.toggle('open'); syncOptHint(); };
+  $('opt-hint').onclick = () => { $('sheet').classList.add('open'); syncOptHint(); };
 
   document.querySelectorAll('.chip').forEach(ch => ch.onclick = () => {
     mode = ch.dataset.pane;

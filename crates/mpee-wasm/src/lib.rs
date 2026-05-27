@@ -229,7 +229,19 @@ impl Engine {
                 description: None,
             });
         }
+        // Skip stops unreachable from the depot (disconnected road fragments /
+        // across water) — they'd otherwise be assigned with sentinel-distance
+        // legs (absurd totals + straight-line gaps). `job_mi[j]` maps a brooom
+        // job index back to its matrix index; `dropped` are the unreachable ones.
+        const UNREACH_I: i32 = 100_000_000;
+        let dist0 = matrix.distances.as_ref().unwrap();
+        let mut job_mi: Vec<usize> = Vec::new();
+        let mut dropped: Vec<usize> = Vec::new();
         for i in 0..stops.len() {
+            if dist0[i + 1] >= UNREACH_I || dist0[(i + 1) * n] >= UNREACH_I {
+                dropped.push(i);
+                continue;
+            }
             problem.jobs.push(Job {
                 id: (i + 1) as u64,
                 location: Location::from_index(i + 1),
@@ -243,6 +255,7 @@ impl Engine {
                 time_windows: vec![],
                 description: None,
             });
+            job_mi.push(i + 1);
         }
 
         let cfg = SolverConfig {
@@ -270,7 +283,7 @@ impl Engine {
             let mut prev = 0usize; // depot
             for (order, step) in r.steps.iter().enumerate() {
                 let mi = match step {
-                    TaskRef::Job(j) => *j + 1,
+                    TaskRef::Job(j) => job_mi[*j],
                     _ => continue,
                 };
                 td += dist[prev * n + mi] as i64;
@@ -294,14 +307,17 @@ impl Engine {
                 "stops": steps,
             }));
         }
-        let unassigned: Vec<usize> = sol
+        // Unassigned = brooom's leftovers (mapped back to original stop index)
+        // plus the unreachable stops we dropped up front.
+        let mut unassigned: Vec<usize> = sol
             .unassigned
             .iter()
             .filter_map(|t| match t {
-                TaskRef::Job(j) => Some(*j),
+                TaskRef::Job(j) => Some(job_mi[*j] - 1),
                 _ => None,
             })
             .collect();
+        unassigned.extend(dropped);
 
         let out = serde_json::json!({
             "routes": routes_out,
@@ -364,8 +380,17 @@ impl Engine {
         let mut routes: Vec<Vec<u32>> = (0..vehicles).map(|_| vec![0u32]).collect();
         let mut loads = vec![0usize; vehicles];
         let mut unassigned: Vec<usize> = Vec::new();
+        // A stop that snaps to a road fragment disconnected from the depot (e.g.
+        // across the bay) has a sentinel distance — never route to it, mark it
+        // unassigned. Then every routed stop shares the depot's component, so no
+        // leg is unreachable (no absurd distances, no straight-line gaps).
+        const UNREACH: i32 = 100_000_000;
         for i in 0..stops.len() {
             let mi = (i + 1) as u32;
+            if dist_i[i + 1] >= UNREACH || dist_i[(i + 1) * n] >= UNREACH {
+                unassigned.push(i);
+                continue;
+            }
             let mut placed = false;
             for k in 0..vehicles {
                 let v = (i + k) % vehicles;
