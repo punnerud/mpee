@@ -142,7 +142,7 @@
 <body>
 <div id="map"></div>
 <div id="hint" hidden>👆 Tap anywhere on the map to add stops</div>
-<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b5</div>
+<div class="credit">MPEE · WASM · 100% local · <a href="https://github.com/punnerud/mpee">source</a> · build 2b6</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -216,14 +216,16 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b5';
-const BUILD = '2b5';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2b6';
+const BUILD = '2b6';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
 const NaNf = Number.NaN;
 // Mobile = bottom-sheet layout (matches the CSS breakpoint).
 const isMobile = () => window.matchMedia('(max-width:759px)').matches;
+// Remove the "tap the map" nudge instantly (no fade) on any interaction.
+const hideHint = () => { const h = document.getElementById('hint'); if (h) h.hidden = true; };
 // Green first, then red, blue, purple… — orange/yellow pushed to the end since
 // they vanish against OpenFreeMap's orange/yellow road casing.
 const PALETTE = ['#22c55e','#ef4444','#3b82f6','#a855f7','#ec4899','#06b6d4','#14b8a6','#8b5cf6','#84cc16','#f97316'];
@@ -267,9 +269,7 @@ async function boot() {
     setupMap(); setupUI();
     $('load').style.display = 'none';
     $('searchbar').hidden = false;
-    // First-run nudge: just tap the map. Auto-fades after a while.
-    $('hint').hidden = false;
-    setTimeout(() => $('hint').classList.add('hide'), 9000);
+    $('hint').hidden = false;   // first-run nudge; removed on any map interaction
   } catch (e) {
     console.error(e);
     $('load-bar').style.background = '#ff6b6b';
@@ -303,7 +303,9 @@ function setupMap() {
       paint:{ 'line-color':['get','color'], 'line-width':6, 'line-opacity':.65 },
       layout:{ 'line-cap':'round', 'line-join':'round' } });
   });
+  map.on('movestart', hideHint);   // pan/zoom → remove the nudge
   map.on('click', (e) => {
+    hideHint();
     // On mobile, a tap on the map (outside the bottom sheet) dismisses an open
     // sheet — this tap only closes it, it doesn't also drop a stop.
     if (isMobile() && $('sheet').classList.contains('open')) {
@@ -376,7 +378,7 @@ function renderStopsAndList() {
     row.appendChild(del); list.appendChild(row);
   });
   const c = $('count'); c.textContent = stops.length; c.classList.toggle('show', stops.length>0);
-  if (stops.length) $('hint').classList.add('hide');   // dismiss the tap-the-map nudge
+  if (stops.length) hideHint();   // dismiss the tap-the-map nudge
   $('act-route').disabled = stops.length !== 2;
   $('act-opt').disabled = stops.length < 2;
   $('act-route').textContent = stops.length===2 ? 'Route A→B' : `Route (need 2, have ${stops.length})`;
