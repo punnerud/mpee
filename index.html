@@ -111,7 +111,10 @@
   .install-pill{
     display:inline-flex; align-items:center; gap:10px; background:var(--code-bg); color:var(--code-fg);
     padding:10px 14px; border-radius:9px; font-family:ui-monospace,monospace; font-size:.95rem;
+    border:1px solid #ffffff1f; cursor:pointer;
   }
+  .install-pill:hover{filter:brightness(1.12)}
+  .install-pill .cp{opacity:.55; font-family:inherit}
   .punch{font-size:1.06rem; line-height:1.6; max-width:64ch; margin:0 0 1.4em; color:var(--muted)}
   .punch b{color:var(--fg)}
   .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); gap:14px; margin-top:30px}
@@ -186,7 +189,7 @@
     </div>
     <div class="cta">
       <a class="btn" href="./demo/">▶ Live demo (San Francisco)</a>
-      <span class="install-pill">$ pip install mpee</span>
+      <button class="install-pill" id="copy-pip" type="button" title="Click to copy">$ pip install mpee<span class="cp" id="copy-pip-cp">⧉</span></button>
       <a class="btn ghost" href="#quickstart">Quick start</a>
       <a class="btn ghost" href="https://github.com/punnerud/mpee">GitHub</a>
     </div>
@@ -199,7 +202,7 @@
     <a class="demo-gif" href="./demo/" title="Open the live demo">
       <img src="./demo/mpee-demo1.gif" loading="lazy"
            alt="MPEE live demo: address search, street-crossing lookup, point-to-point routing and multi-vehicle optimization over San Francisco, all running in the browser">
-      <span class="demo-cap">▶ Live demo — address search, street crossings, routing &amp; multi-vehicle optimization, all in your browser (WebAssembly + WebGPU)</span>
+      <span class="demo-cap">▶ Live demo — address search, street crossings, routing &amp; multi-vehicle optimization, all in your browser (WebAssembly + WebGPU).<br><span style="opacity:.8">Recorded at real-time speed — wait for the end: the route optimization over 50+ locations takes ~20 s.</span></span>
     </a>
   </div>
 </header>
@@ -550,6 +553,20 @@ r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
     });
     wrap.appendChild(btn);
   });
+
+  // Click the install pill to copy `pip install mpee`.
+  (function () {
+    var pill = document.getElementById('copy-pip');
+    var cp = document.getElementById('copy-pip-cp');
+    if (!pill) return;
+    pill.addEventListener('click', function () {
+      navigator.clipboard.writeText('pip install mpee').then(function () {
+        var old = cp.textContent;
+        cp.textContent = '✓ copied';
+        setTimeout(function () { cp.textContent = old; }, 1400);
+      });
+    });
+  })();
 </script>
 </body>
 </html>
