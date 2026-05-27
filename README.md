@@ -1,5 +1,9 @@
 # MPEE — Offline route calculations and optimization
 
+[![MPEE live demo — address search, street crossings, routing and multi-vehicle optimization over San Francisco, in the browser](demo/mpee-demo1.gif)](https://punnerud.github.io/mpee/demo/)
+
+<sub>▶ **[Live demo →](https://punnerud.github.io/mpee/demo/)** — the whole engine compiled to WebAssembly (+ WebGPU), running in your browser.</sub>
+
 **One Rust engine that replaces the OSRM + VROOM stack** — routing *and*
 vehicle-routing optimization in a single process, sharing memory directly.
 Download one area once, then route, optimize, and geocode it **fully offline**.
