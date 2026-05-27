@@ -3,16 +3,25 @@ name = "dijeng"
 version = "0.1.0"
 edition = "2024"
 
+# Native deps are optional and behind the default `native` feature, so the
+# query + geocoding subset of the engine compiles to wasm32 with
+# `--no-default-features`. Native builds (CLI, PyPI, benches) are unchanged.
 [dependencies]
-osmpbf = "0.3"
-rayon = "1"
-memmap2 = "0.9"
-flate2 = "1"
-lru = "0.12"
-libc = "0.2"
-petgraph = "0.6"
+osmpbf = { version = "0.3", optional = true }
+rayon = { version = "1", optional = true }
+memmap2 = { version = "0.9", optional = true }
+flate2 = { version = "1", optional = true }
+lru = { version = "0.12", optional = true }
+libc = { version = "0.2", optional = true }
+petgraph = { version = "0.6", optional = true }
 ordered-float = "4"
-ureq = "2"
+ureq = { version = "2", optional = true }
+
+[features]
+default = ["native"]
+# Everything that needs the OS / threads / mmap / OSM parsing — i.e. building
+# caches, the bench binaries, and the parallel matrix. The wasm build omits it.
+native = ["dep:osmpbf", "dep:rayon", "dep:memmap2", "dep:flate2", "dep:lru", "dep:libc", "dep:petgraph", "dep:ureq"]
 
 [profile.release]
 opt-level = 3
@@ -25,62 +34,78 @@ debug = false
 name = "dijeng"
 path = "src/lib.rs"
 
+# All binaries are native-only (they build/serve caches or run benchmarks).
 [[bin]]
 name = "dijeng"
 path = "src/main.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_london"
 path = "src/bin/bench_london.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "duan_repro"
 path = "src/bin/duan_repro.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "parser_bench"
 path = "src/bin/parser_bench.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_extra"
 path = "src/bin/bench_extra.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_petgraph"
 path = "src/bin/bench_petgraph.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "delta_repro"
 path = "src/bin/delta_repro.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_pp"
 path = "src/bin/bench_pp.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_osrm"
 path = "src/bin/bench_osrm.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "ch_test"
 path = "src/bin/ch_test.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_ch"
 path = "src/bin/bench_ch.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_ch_extra"
 path = "src/bin/bench_ch_extra.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "intercity"
 path = "src/bin/intercity.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "bench_paged"
 path = "src/bin/bench_paged.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "serve"
 path = "src/bin/serve.rs"
+required-features = ["native"]

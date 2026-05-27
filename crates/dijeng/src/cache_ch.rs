@@ -39,10 +39,15 @@
 use crate::buffer::Buffer;
 use crate::ch::ContractionHierarchy;
 use crate::graph::CsrGraph;
+#[cfg(feature = "native")]
 use memmap2::Mmap;
+#[cfg(feature = "native")]
 use std::fs::{File, OpenOptions};
+#[cfg(feature = "native")]
 use std::io::{BufWriter, Write};
+#[cfg(feature = "native")]
 use std::path::Path;
+#[cfg(feature = "native")]
 use std::sync::Arc;
 
 /// `SSSPCH1D` — rank-ordered, dual-channel. `edge_w` is duration (seconds);
@@ -51,6 +56,7 @@ use std::sync::Arc;
 const MAGIC: &[u8; 8] = b"SSSPCH1D";
 const HEADER_BYTES: usize = 32;
 
+#[cfg(feature = "native")]
 pub fn save<P: AsRef<Path>>(path: P, h: &ContractionHierarchy) -> std::io::Result<()> {
     let n = h.graph_fwd.n;
     let m_aug = h.graph_fwd.m();
@@ -88,6 +94,73 @@ pub fn save<P: AsRef<Path>>(path: P, h: &ContractionHierarchy) -> std::io::Resul
     Ok(())
 }
 
+/// Load a CH cache from an in-memory byte slice (wasm / no-mmap path). Copies
+/// each array into an owned buffer; same layout as [`load_mmap`].
+pub fn load_bytes(bytes: &[u8]) -> std::io::Result<ContractionHierarchy> {
+    if bytes.len() < HEADER_BYTES || &bytes[..8] != MAGIC {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid magic — CH cache corrupt or wrong version (expected SSSPCH1D)",
+        ));
+    }
+    let n = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+    let m_aug = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+
+    let expected = HEADER_BYTES
+        + 4 * (n + 1) + 4 * m_aug + 4 * m_aug + 4 * m_aug + 4 * n
+        + 4 * (n + 1) + 4 * m_aug + 4 * m_aug + 4 * m_aug + 4 * n
+        + 4 * n + 4 * n + 4 * m_aug + 4 * m_aug;
+    if bytes.len() < expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("CH cache too small: {} bytes, expected {}", bytes.len(), expected),
+        ));
+    }
+
+    let mut off = HEADER_BYTES;
+    let head_fwd = Buffer::<u32>::from_bytes_copy(bytes, off, n + 1);
+    off += 4 * (n + 1);
+    let edge_to_fwd = Buffer::<u32>::from_bytes_copy(bytes, off, m_aug);
+    off += 4 * m_aug;
+    let edge_w_fwd = Buffer::<f32>::from_bytes_copy(bytes, off, m_aug);
+    off += 4 * m_aug;
+    let via_fwd = Buffer::<u32>::from_bytes_copy(bytes, off, m_aug);
+    off += 4 * m_aug;
+    let up_count_fwd = Buffer::<u32>::from_bytes_copy(bytes, off, n);
+    off += 4 * n;
+    let head_bwd = Buffer::<u32>::from_bytes_copy(bytes, off, n + 1);
+    off += 4 * (n + 1);
+    let edge_to_bwd = Buffer::<u32>::from_bytes_copy(bytes, off, m_aug);
+    off += 4 * m_aug;
+    let edge_w_bwd = Buffer::<f32>::from_bytes_copy(bytes, off, m_aug);
+    off += 4 * m_aug;
+    let via_bwd = Buffer::<u32>::from_bytes_copy(bytes, off, m_aug);
+    off += 4 * m_aug;
+    let up_count_bwd = Buffer::<u32>::from_bytes_copy(bytes, off, n);
+    off += 4 * n;
+    let rank = Buffer::<u32>::from_bytes_copy(bytes, off, n);
+    off += 4 * n;
+    let perm = Buffer::<u32>::from_bytes_copy(bytes, off, n);
+    off += 4 * n;
+    let edge_dist_fwd = Buffer::<f32>::from_bytes_copy(bytes, off, m_aug);
+    off += 4 * m_aug;
+    let edge_dist_bwd = Buffer::<f32>::from_bytes_copy(bytes, off, m_aug);
+
+    Ok(ContractionHierarchy {
+        graph_fwd: CsrGraph { n, head: head_fwd, edge_to: edge_to_fwd, edge_w: edge_w_fwd },
+        graph_bwd: CsrGraph { n, head: head_bwd, edge_to: edge_to_bwd, edge_w: edge_w_bwd },
+        up_count_fwd,
+        up_count_bwd,
+        rank,
+        via_fwd,
+        via_bwd,
+        edge_dist_fwd,
+        edge_dist_bwd,
+        perm,
+    })
+}
+
+#[cfg(feature = "native")]
 pub fn load_mmap<P: AsRef<Path>>(path: P) -> std::io::Result<ContractionHierarchy> {
     let f = File::open(path)?;
     let mmap = unsafe { Mmap::map(&f)? };
@@ -181,6 +254,7 @@ pub fn load_mmap<P: AsRef<Path>>(path: P) -> std::io::Result<ContractionHierarch
     })
 }
 
+#[cfg(feature = "native")]
 #[inline]
 fn slice_u8<T>(s: &[T]) -> &[u8] {
     unsafe {

@@ -41,10 +41,15 @@
 //! ```
 
 use crate::buffer::Buffer;
+#[cfg(feature = "native")]
 use memmap2::Mmap;
+#[cfg(feature = "native")]
 use std::fs::OpenOptions;
+#[cfg(feature = "native")]
 use std::io::{BufWriter, Write};
+#[cfg(feature = "native")]
 use std::path::Path;
+#[cfg(feature = "native")]
 use std::sync::Arc;
 
 const MAGIC: &[u8; 8] = b"MPEENAM2";
@@ -161,8 +166,51 @@ impl NameTable {
         out
     }
 
+    /// Load a sidecar from an in-memory byte slice (wasm / no-mmap path).
+    /// Copies arrays into owned buffers; same layout as [`load_mmap`].
+    pub fn load_bytes(bytes: &[u8], expected_n: usize) -> std::io::Result<NameTable> {
+        if bytes.len() < HEADER_BYTES || &bytes[..8] != MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid magic — names sidecar corrupt or wrong version",
+            ));
+        }
+        let n = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+        let k = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+        let pool_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
+        let sn_total = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+        if n != expected_n {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("names sidecar node count {n} != graph {expected_n} — rebuild the cache"),
+            ));
+        }
+        let expected = HEADER_BYTES
+            + 4 * n + 4 * k + 4 * (k + 1) + pool_len + 4 * (k + 1) + 4 * sn_total;
+        if bytes.len() < expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("names sidecar too small: {} bytes, expected {}", bytes.len(), expected),
+            ));
+        }
+        let mut off = HEADER_BYTES;
+        let name_id = Buffer::<u32>::from_bytes_copy(bytes, off, n);
+        off += 4 * n;
+        let rep_node = Buffer::<u32>::from_bytes_copy(bytes, off, k);
+        off += 4 * k;
+        let offsets = Buffer::<u32>::from_bytes_copy(bytes, off, k + 1);
+        off += 4 * (k + 1);
+        let pool = Buffer::<u8>::from_bytes_copy(bytes, off, pool_len);
+        off += pool_len;
+        let sn_offsets = Buffer::<u32>::from_bytes_copy(bytes, off, k + 1);
+        off += 4 * (k + 1);
+        let sn_nodes = Buffer::<u32>::from_bytes_copy(bytes, off, sn_total);
+        Ok(NameTable { name_id, rep_node, offsets, pool, sn_offsets, sn_nodes })
+    }
+
     /// Load a sidecar via mmap. Returns an error on a bad magic / truncated
     /// file or when `n` does not match the expected node count.
+    #[cfg(feature = "native")]
     pub fn load_mmap<P: AsRef<Path>>(path: P, expected_n: usize) -> std::io::Result<NameTable> {
         let f = std::fs::File::open(path)?;
         let mmap = unsafe { Mmap::map(&f)? };
@@ -217,6 +265,7 @@ impl NameTable {
 /// `street_offsets` (len `k+1`) + `street_nodes` are the per-street node CSR
 /// for intersection search (`street_offsets[id]..street_offsets[id+1]` slices
 /// `street_nodes`, sorted).
+#[cfg(feature = "native")]
 pub fn save<P: AsRef<Path>>(
     path: P,
     name_id: &[u32],
@@ -268,6 +317,7 @@ pub fn save<P: AsRef<Path>>(
     Ok(())
 }
 
+#[cfg(feature = "native")]
 #[inline]
 fn slice_u8<T>(s: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }

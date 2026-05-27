@@ -27,10 +27,15 @@
 
 use crate::buffer::Buffer;
 use crate::graph::CsrGraph;
+#[cfg(feature = "native")]
 use memmap2::Mmap;
+#[cfg(feature = "native")]
 use std::fs::{File, OpenOptions};
+#[cfg(feature = "native")]
 use std::io::{BufWriter, Write};
+#[cfg(feature = "native")]
 use std::path::Path;
+#[cfg(feature = "native")]
 use std::sync::Arc;
 
 /// `SSSPP2C\0` — adds a per-edge distance channel (parallel to `edge_w`)
@@ -51,6 +56,7 @@ pub struct PpFull {
     pub delta: f32,
 }
 
+#[cfg(feature = "native")]
 pub fn save<P: AsRef<Path>>(
     path: P,
     g: &CsrGraph,
@@ -99,6 +105,66 @@ pub fn save<P: AsRef<Path>>(
     Ok(())
 }
 
+/// Load a `.pp` cache from an in-memory byte slice (wasm / no-mmap path).
+/// Parses the same layout as [`load_mmap`] but copies each array into an owned
+/// buffer. Errors on a bad magic or a truncated buffer.
+pub fn load_bytes(bytes: &[u8]) -> std::io::Result<PpFull> {
+    if bytes.len() < HEADER_BYTES || &bytes[..8] != MAGIC {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ugyldig magic — preprocessing-cache korrupt eller annen versjon",
+        ));
+    }
+    let n = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+    let m = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+    let delta = f32::from_le_bytes(bytes[24..28].try_into().unwrap());
+
+    let expected = HEADER_BYTES
+        + 4 * (n + 1) + 4 * m + 4 * m + 8 * n + 4 * n + 4 * n
+        + 4 * (n + 1) + 4 * m + 4 * m + 4 * m + 4 * m;
+    if bytes.len() < expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("preprocessing-cache for liten: {} bytes, forventet {}", bytes.len(), expected),
+        ));
+    }
+
+    let mut off = HEADER_BYTES;
+    let head = Buffer::<u32>::from_bytes_copy(bytes, off, n + 1);
+    off += 4 * (n + 1);
+    let edge_to = Buffer::<u32>::from_bytes_copy(bytes, off, m);
+    off += 4 * m;
+    let edge_w = Buffer::<f32>::from_bytes_copy(bytes, off, m);
+    off += 4 * m;
+    let coords = Buffer::<(f32, f32)>::from_bytes_copy(bytes, off, n);
+    off += 8 * n;
+    let light_count = Buffer::<u32>::from_bytes_copy(bytes, off, n);
+    off += 4 * n;
+    let new_id = Buffer::<u32>::from_bytes_copy(bytes, off, n);
+    off += 4 * n;
+    let rev_head = Buffer::<u32>::from_bytes_copy(bytes, off, n + 1);
+    off += 4 * (n + 1);
+    let rev_edge_to = Buffer::<u32>::from_bytes_copy(bytes, off, m);
+    off += 4 * m;
+    let rev_edge_w = Buffer::<f32>::from_bytes_copy(bytes, off, m);
+    off += 4 * m;
+    let edge_dist = Buffer::<f32>::from_bytes_copy(bytes, off, m);
+    off += 4 * m;
+    let rev_edge_dist = Buffer::<f32>::from_bytes_copy(bytes, off, m);
+
+    Ok(PpFull {
+        graph: CsrGraph { n, head, edge_to, edge_w },
+        reverse: CsrGraph { n, head: rev_head, edge_to: rev_edge_to, edge_w: rev_edge_w },
+        edge_dist,
+        rev_edge_dist,
+        light_count,
+        new_id,
+        coords,
+        delta,
+    })
+}
+
+#[cfg(feature = "native")]
 pub fn load_mmap<P: AsRef<Path>>(path: P) -> std::io::Result<PpFull> {
     let f = File::open(path)?;
     let mmap = unsafe { Mmap::map(&f)? };
@@ -178,6 +244,7 @@ pub fn load_mmap<P: AsRef<Path>>(path: P) -> std::io::Result<PpFull> {
     })
 }
 
+#[cfg(feature = "native")]
 #[inline]
 fn slice_u8<T>(s: &[T]) -> &[u8] {
     unsafe {

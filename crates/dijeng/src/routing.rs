@@ -9,7 +9,9 @@
 //! speeds (from OSM `highway=*` and `maxspeed=*`) are a follow-up.
 
 use crate::buffer::Buffer;
-use crate::ch::{self, ContractionHierarchy, PathScratch};
+use crate::ch::{self, ContractionHierarchy};
+#[cfg(feature = "native")]
+use crate::ch::PathScratch;
 use crate::geo_index::LatLonGrid;
 
 /// Panic message when a routing matrix is requested on a geocoding-only
@@ -213,6 +215,7 @@ impl RoutingService {
     /// node before running the bucket-based CH MMM algorithm.
     ///
     /// Returns `(durations, snapped_sources, snapped_destinations)`.
+    #[cfg(feature = "native")]
     pub fn matrix(
         &self,
         srcs: &[(f32, f32)],
@@ -245,6 +248,7 @@ impl RoutingService {
     /// dual-channel CH (`edge_dist_*` populated, SSSPCH1D format), this is
     /// just a single bucket-MMM sweep that accumulates both metrics —
     /// 30–100× faster than per-cell path-unpack on large matrices.
+    #[cfg(feature = "native")]
     pub fn matrix_with_distance(
         &self,
         srcs: &[(f32, f32)],
@@ -273,6 +277,50 @@ impl RoutingService {
             .iter()
             .map(|&csr| self.coords[csr as usize])
             .collect();
+        (durations, distances, snapped_src_coords, snapped_dst_coords)
+    }
+
+    /// Serial (single-threaded) `matrix_with_distance` for the wasm build,
+    /// which has no rayon and no bucket-MMM. Snaps each input, then runs one
+    /// CH path query per (src, dst) cell, summing haversine over the unpacked
+    /// path for the distance. O(N²) path-unpacks — fine for the dozens-of-stops
+    /// demo sizes the browser optimiser handles. Same signature/return shape as
+    /// the native version so callers are identical.
+    #[cfg(not(feature = "native"))]
+    pub fn matrix_with_distance(
+        &self,
+        srcs: &[(f32, f32)],
+        dsts: &[(f32, f32)],
+    ) -> (Vec<f32>, Vec<f32>, Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        let ch = self.ch.as_ref().expect(CH_REQUIRED);
+        let snap_srcs: Vec<u32> = srcs.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
+        let snap_dsts: Vec<u32> = dsts.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
+        let (ns, nd) = (snap_srcs.len(), snap_dsts.len());
+        let mut durations = vec![f32::INFINITY; ns * nd];
+        let mut distances = vec![f32::INFINITY; ns * nd];
+        for (i, &s_csr) in snap_srcs.iter().enumerate() {
+            let s_int = ch.perm[s_csr as usize];
+            for (j, &d_csr) in snap_dsts.iter().enumerate() {
+                if s_csr == d_csr {
+                    durations[i * nd + j] = 0.0;
+                    distances[i * nd + j] = 0.0;
+                    continue;
+                }
+                let d_int = ch.perm[d_csr as usize];
+                if let Some((dur, path)) = ch::query_with_path(ch, s_int, d_int) {
+                    let mut dist = 0.0f32;
+                    for w in path.windows(2) {
+                        let a = self.coords[self.inv_perm[w[0] as usize] as usize];
+                        let b = self.coords[self.inv_perm[w[1] as usize] as usize];
+                        dist += haversine_m(a.0, a.1, b.0, b.1);
+                    }
+                    durations[i * nd + j] = dur;
+                    distances[i * nd + j] = dist;
+                }
+            }
+        }
+        let snapped_src_coords = snap_srcs.iter().map(|&c| self.coords[c as usize]).collect();
+        let snapped_dst_coords = snap_dsts.iter().map(|&c| self.coords[c as usize]).collect();
         (durations, distances, snapped_src_coords, snapped_dst_coords)
     }
 

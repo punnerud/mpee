@@ -19,7 +19,9 @@
 use crate::buffer::Buffer;
 use crate::dijeng::INF;
 use crate::graph::CsrGraph;
+#[cfg(feature = "native")]
 use crate::paged::{ChLayout, PagedMmap, TouchBuf};
+#[cfg(feature = "native")]
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -642,6 +644,7 @@ fn unpack_edge_bwd(
 /// `buf` and commits them once at the end of the query. Use this in hot
 /// loops (especially under rayon parallelism) — it cuts shard-lock
 /// acquisitions from O(touches/query) to O(N_SHARDS/query).
+#[cfg(feature = "native")]
 pub fn query_paged_buf(
     ch: &ContractionHierarchy,
     layout: &ChLayout,
@@ -661,6 +664,7 @@ pub fn query_paged_buf(
 ///
 /// Allocates a fresh `TouchBuf` per call. For batch workloads use
 /// `query_paged_buf` with a reusable buffer.
+#[cfg(feature = "native")]
 pub fn query_paged(
     ch: &ContractionHierarchy,
     layout: &ChLayout,
@@ -672,6 +676,7 @@ pub fn query_paged(
     query_paged_buf(ch, layout, pm, &mut buf, src, dst)
 }
 
+#[cfg(feature = "native")]
 fn run_query_paged(
     ch: &ContractionHierarchy,
     layout: &ChLayout,
@@ -802,6 +807,7 @@ fn run_query_paged(
 /// instead of just `(src_idx, dur)` so we accumulate both metrics in a
 /// single sweep. Result memory: `2 × M × N × f32`. For pure duration use
 /// `matrix` (50 % less memory).
+#[cfg(feature = "native")]
 pub fn matrix_with_dist(
     ch: &ContractionHierarchy,
     srcs: &[u32],
@@ -998,6 +1004,7 @@ pub fn matrix_with_dist(
 /// Cost overhead vs `matrix_with_dist`: each batch re-runs the per-dst
 /// backward Dijeng (cheap on CH, ~1 ms each). Bucket scans are unchanged
 /// in total work.
+#[cfg(feature = "native")]
 pub fn matrix_with_dist_chunked<F>(
     ch: &ContractionHierarchy,
     srcs: &[u32],
@@ -1186,6 +1193,7 @@ pub fn matrix_with_dist_chunked<F>(
 
 /// Inputs are CH-internal vertex IDs (the same numbering `query` uses).
 /// Returns `result[s_idx * dsts.len() + t_idx]`.
+#[cfg(feature = "native")]
 pub fn matrix(ch: &ContractionHierarchy, srcs: &[u32], dsts: &[u32]) -> Vec<f32> {
     let n = ch.graph_fwd.n;
     let n_src = srcs.len();
