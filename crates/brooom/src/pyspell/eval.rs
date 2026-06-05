@@ -222,6 +222,10 @@ fn read_field(fld: Field, view: &RouteView) -> Value {
         Field::VehicleMaxTasks => Value::Int(v.max_tasks.map(|n| n as i64).unwrap_or(i64::MAX)),
         Field::VehicleFixed => Value::Float(v.fixed),
         Field::VehiclePerHour => Value::Float(v.per_hour),
+        // Custom dimension (P5): the bare `route.<dim>` is the whole-route
+        // aggregate — the peak (max) cumul over the route. The cumuls live on the
+        // RouteView, populated by `evaluate_route` when a dimension is registered.
+        Field::CustomDimension(idx) => Value::Int(view.dim_cumuls.aggregate_max(idx as usize)),
     }
 }
 
@@ -236,6 +240,14 @@ fn read_list_field(lf: ListField, view: &RouteView) -> Value {
             let cap: Arc<[Value]> =
                 view.vehicle.capacity.iter().map(|&c| Value::Int(c)).collect();
             Value::List(cap)
+        }
+        // Custom dimension as a list of per-position cumuls (P5), so the indexed
+        // form `route.<dim>[k]` reads the cumul at stop `k` (position 0 = the
+        // start depot). Empty list when the dimension produced no cumuls.
+        ListField::CustomDimension(idx) => {
+            let cumuls: Arc<[Value]> =
+                view.dim_cumuls.cumuls_of(idx as usize).iter().map(|&c| Value::Int(c)).collect();
+            Value::List(cumuls)
         }
     }
 }
@@ -661,7 +673,7 @@ mod tests {
         let veh = vehicle();
         let m = metrics();
         let steps = [TaskRef::Job(0), TaskRef::Job(1)];
-        let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m };
+        let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m, dim_cumuls: crate::constraint::empty_dim_cumuls() };
         run(p, &view).unwrap()
     }
 
@@ -750,7 +762,7 @@ mod tests {
         m.break_count = 2;
         m.break_duration = 1800;
         let steps = [TaskRef::Job(0), TaskRef::Job(1)];
-        let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m };
+        let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m, dim_cumuls: crate::constraint::empty_dim_cumuls() };
 
         // has_break → true → Feasible
         assert_eq!(run(&prog(Expr::Field(Field::RouteHasBreak)), &view).unwrap(), Verdict::Feasible);
@@ -767,7 +779,7 @@ mod tests {
 
         // With no breaks, has_break → false → Infeasible.
         let m0 = metrics();
-        let view0 = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m0 };
+        let view0 = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m0, dim_cumuls: crate::constraint::empty_dim_cumuls() };
         assert_eq!(
             run(&prog(Expr::Field(Field::RouteHasBreak)), &view0).unwrap(),
             Verdict::Infeasible
@@ -821,7 +833,7 @@ mod tests {
         let veh = vehicle();
         let m = metrics();
         let steps = [TaskRef::Job(0)];
-        let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m };
+        let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m, dim_cumuls: crate::constraint::empty_dim_cumuls() };
         assert_eq!(run(&p, &view), Err(DslError::Budget));
     }
 
@@ -912,5 +924,52 @@ mod tests {
             mirror_bound: None,
         };
         assert_eq!(eval_verdict(&p), Verdict::Feasible);
+    }
+
+    #[test]
+    fn custom_dimension_aggregate_and_indexed_reads() {
+        // Build a RouteView carrying a fuel-style cumul [100, 60, 20] for
+        // dimension 0 and check both forms the DSL can read it as:
+        //   route.fuel        → aggregate (max) = 100  (Field::CustomDimension)
+        //   route.fuel[2]     → 20               (ListField::CustomDimension)
+        use crate::dimension::DimensionCumuls;
+        let dims = DimensionCumuls {
+            cumul: vec![vec![100, 60, 20]],
+            max_prefix: vec![vec![100, 100, 100]],
+            bound_violated: false,
+        };
+        let problem = problem();
+        let veh = vehicle();
+        let m = metrics();
+        let steps = [TaskRef::Job(0), TaskRef::Job(1)];
+        let view = RouteView {
+            problem: &problem,
+            vehicle: &veh,
+            steps: &steps,
+            metrics: &m,
+            dim_cumuls: &dims,
+        };
+
+        // Aggregate read: route.fuel == 100 → Penalty(100).
+        assert_eq!(
+            run(&prog(Expr::Field(Field::CustomDimension(0))), &view).unwrap(),
+            Verdict::Penalty(100.0)
+        );
+        // Indexed read: route.fuel[2] == 20 → Penalty(20).
+        let idx2 = Expr::Index(
+            Box::new(Expr::ListField(ListField::CustomDimension(0))),
+            Box::new(Expr::Const(Value::Int(2))),
+        );
+        assert_eq!(run(&prog(idx2), &view).unwrap(), Verdict::Penalty(20.0));
+        // A hard bound on the tail cumul: route.fuel[2] >= 0 → true → Feasible.
+        let bound = Expr::Cmp(
+            CmpOp::Ge,
+            Box::new(Expr::Index(
+                Box::new(Expr::ListField(ListField::CustomDimension(0))),
+                Box::new(Expr::Const(Value::Int(2))),
+            )),
+            Box::new(Expr::Const(Value::Int(0))),
+        );
+        assert_eq!(run(&prog(bound), &view).unwrap(), Verdict::Feasible);
     }
 }

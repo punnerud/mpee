@@ -16,17 +16,33 @@ pub(crate) struct Ctx {
     pub next_slot: u16,
     pub body: Vec<LetBinding>,
     pub reads: Vec<Field>,
+    /// Registered custom-dimension names, in index order (P5). A `route.<name>`
+    /// that is not a built-in route field is resolved against this list at
+    /// compile time → `Field::CustomDimension(index)`. Captured from the global
+    /// dimension registry when the context is created (dimensions are registered
+    /// before constraints are compiled, exactly like the constraint hook).
+    pub dim_names: Vec<String>,
 }
 
 impl Ctx {
     pub fn new() -> Self {
-        Ctx { locals: HashMap::new(), next_slot: 0, body: Vec::new(), reads: Vec::new() }
+        Ctx {
+            locals: HashMap::new(),
+            next_slot: 0,
+            body: Vec::new(),
+            reads: Vec::new(),
+            dim_names: crate::dimension::dimension_names(),
+        }
     }
     pub fn declare(&mut self, name: String) -> u16 {
         let slot = self.next_slot;
         self.next_slot += 1;
         self.locals.insert(name, slot);
         slot
+    }
+    /// Index of a registered custom dimension by name, if any.
+    pub fn dimension_index(&self, name: &str) -> Option<u32> {
+        self.dim_names.iter().position(|n| n == name).map(|i| i as u32)
     }
 }
 
@@ -57,7 +73,15 @@ pub(crate) fn resolve_field(base: &str, field: &str, ctx: &mut Ctx) -> Result<Ex
             "break_count" => scalar(ctx, Field::RouteBreakCount),
             "break_duration" => scalar(ctx, Field::RouteBreakDuration),
             "job_ids" => Ok(Expr::ListField(ListField::RouteJobIds)),
-            _ => Err(DslError::UnknownField { base: "route", field: field.to_string() }),
+            // Custom dimensions (P5): a `route.<name>` that is not a built-in
+            // field is resolved against the registered dimension names. The bare
+            // form reads the whole-route aggregate scalar; `route.<name>[k]` is
+            // rewritten to the cumul list by the index lowering (see the Rust /
+            // Python front-ends' `Index` handling).
+            other => match ctx.dimension_index(other) {
+                Some(idx) => scalar(ctx, Field::CustomDimension(idx)),
+                None => Err(DslError::UnknownField { base: "route", field: field.to_string() }),
+            },
         },
         "vehicle" => match field {
             "id" => scalar(ctx, Field::VehicleId),
@@ -83,6 +107,19 @@ pub(crate) fn resolve_field(base: &str, field: &str, ctx: &mut Ctx) -> Result<Ex
             }
         }
         _ => Err(DslError::UnknownName(base.to_string())),
+    }
+}
+
+/// Rewrite the base of an index expression so a bare custom-dimension aggregate
+/// (`route.<dim>`, lowered to `Field::CustomDimension`) becomes its per-position
+/// cumul list (`ListField::CustomDimension`) when it is being subscripted —
+/// `route.<dim>[k]`. Any other base passes through unchanged. Keeps the indexing
+/// path in both front-ends a single shared call.
+pub(crate) fn index_base(base: Expr) -> Expr {
+    if let Expr::Field(Field::CustomDimension(idx)) = base {
+        Expr::ListField(ListField::CustomDimension(idx))
+    } else {
+        base
     }
 }
 

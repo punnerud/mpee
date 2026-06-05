@@ -6,7 +6,7 @@ use syn::{BinOp as SBin, Expr as SExpr, Lit, Member, Stmt, UnOp as SUn};
 
 use super::error::DslError;
 use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, LetBinding, Program, UnOp, Value};
-use super::lower::{builtin_from, finish, finish_global, resolve_field, Ctx};
+use super::lower::{builtin_from, finish, finish_global, index_base, resolve_field, Ctx};
 
 pub fn compile_rust(src: &str) -> Result<Program, DslError> {
     let (ctx, ret) = compile_body(src)?;
@@ -149,7 +149,9 @@ fn lower(e: &SExpr, ctx: &mut Ctx) -> Result<Expr, DslError> {
         SExpr::Field(f) => lower_field(f, ctx),
 
         SExpr::Index(ix) => Ok(Expr::Index(
-            Box::new(lower(&ix.expr, ctx)?),
+            // A custom-dimension base under `[k]` reads the cumul list, not the
+            // aggregate scalar (P5).
+            Box::new(index_base(lower(&ix.expr, ctx)?)),
             Box::new(lower(&ix.index, ctx)?),
         )),
 

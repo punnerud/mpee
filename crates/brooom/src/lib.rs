@@ -4,6 +4,7 @@
 //! and accepts Vroom-compatible JSON.
 
 pub mod constraint;
+pub mod dimension;
 pub mod global_constraint;
 #[cfg(feature = "pyspell")]
 pub mod pyspell;
@@ -44,6 +45,7 @@ pub use matrix::{Matrix, MatrixSource, HaversineMatrix};
 #[cfg(feature = "osrm")]
 pub use matrix::OsrmClient;
 pub use constraint::{RouteView, Verdict};
+pub use dimension::{CustomDimension, DimensionGuard};
 pub use global_constraint::{FairnessMetric, GlobalConstraintGuard, SolutionView};
 pub use solution::{Route, Solution, Step, StepKind, Summary, TaskRef};
 pub use solver::{solve, solve_full, solve_with_matrix, Solved, SolverConfig};

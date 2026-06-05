@@ -51,6 +51,11 @@ pub enum Field {
     VehicleMaxTasks,
     VehicleFixed,
     VehiclePerHour,
+    /// A user-registered custom dimension (P5), read as a whole-route aggregate
+    /// (the maximum cumul over the route). The `u32` is the dimension's index in
+    /// the registered list, resolved from its name at compile time. The indexed
+    /// form `route.<dim>[k]` lowers to [`ListField::CustomDimension`] instead.
+    CustomDimension(u32),
 }
 
 impl Field {
@@ -91,6 +96,11 @@ pub enum SolutionField {
 pub enum ListField {
     RouteJobIds,
     VehicleCapacity,
+    /// The full per-position cumul list of a custom dimension (P5). Produced when
+    /// `route.<dim>` is indexed (`route.<dim>[k]`); the bare `route.<dim>` reads
+    /// the aggregate scalar [`Field::CustomDimension`] instead. The `u32` is the
+    /// dimension's index in the registered list.
+    CustomDimension(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
