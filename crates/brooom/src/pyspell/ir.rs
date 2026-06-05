@@ -58,6 +58,28 @@ impl Field {
     }
 }
 
+/// Scalar fields readable from the whole candidate solution (`SolutionView`),
+/// used only by global (cross-route) constraint programs. A single expression
+/// reads either `route.*`/`vehicle.*` (per-route context) or `solution.*`
+/// (global context) — never both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolutionField {
+    /// Number of non-empty routes (≈ vehicles used).
+    VehiclesUsed,
+    /// Total route slots, including empty ones.
+    RouteCount,
+    /// Number of unassigned tasks.
+    UnassignedCount,
+    /// Summed cost across all routes.
+    SolutionCost,
+    /// Summed delivery load (dimension 0) across all routes.
+    TotalLoad,
+    /// Largest per-route delivery load (dimension 0); 0 with no routes.
+    MaxRouteLoad,
+    /// Mean route duration over non-empty routes; 0 with none.
+    AverageDuration,
+}
+
 /// List-valued fields (kept separate so they're never read as scalars).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListField {
@@ -125,6 +147,8 @@ pub enum Builtin {
 pub enum Expr {
     Const(Value),
     Field(Field),
+    /// A `solution.*` scalar — only valid inside a global program.
+    SolutionField(SolutionField),
     ListField(ListField),
     Local(u16),
     Bin(BinOp, Box<Expr>, Box<Expr>),
@@ -155,6 +179,19 @@ pub struct Program {
     /// True when the program is a single `field <= const` hard bound on a
     /// probe-safe field — the form that can be mirrored into `eval.rs`.
     pub mirror_bound: Option<(Field, f64)>,
+}
+
+/// A compiled global (cross-route) constraint program. Structurally identical
+/// to [`Program`] but evaluated against a `SolutionView` instead of a
+/// `RouteView` — it reads `solution.*` fields rather than `route.*`/`vehicle.*`.
+/// Globals run only at `recompute_summary` (the cold path), so they carry no
+/// probe-mirroring metadata.
+#[derive(Clone, Debug)]
+pub struct GlobalProgram {
+    pub body: Vec<LetBinding>,
+    pub ret: Expr,
+    pub n_locals: u16,
+    pub max_steps: u32,
 }
 
 /// Default per-evaluation instruction budget (runaway guard).
