@@ -375,6 +375,13 @@ fn evaluate_route_with_buf(
 
     let mut t: Time = vw.start;
     let mut prev_idx: Option<usize> = start_idx;
+    // Custom-dimension arcs (P5): collected only when a dimension is registered
+    // (single relaxed atomic load otherwise → free, behaviour byte-identical).
+    // Each entry is the arc (from_loc, to_loc) with the arrival time at `to`, fed
+    // to `dimension::accumulate` after the walk. The leading start-depot position
+    // has no incoming arc (it is position 0 in the cumul vector).
+    let track_dims = crate::dimension::has_dimensions();
+    let mut dim_arcs: Vec<crate::dimension::Arc2> = Vec::new();
     let mut travel_time: Time = 0;
     let mut service_time: Time = 0;
     let mut waiting_time: Time = 0;
@@ -462,6 +469,21 @@ fn evaluate_route_with_buf(
             t += dur;
             travel_time += dur;
             distance += matrix.distance(p, here);
+        }
+
+        // Custom-dimension arc: from the previous node to `here`, with `t` as the
+        // physical arrival time (after travel, before setup/service). Recorded
+        // for every step so the cumul vector has one entry per route position
+        // (start depot at index 0, then one per visited step), matching how the
+        // DSL indexes `route.<dim>[k]`. Skipped when there is no incoming node.
+        if track_dims {
+            if let Some(p) = prev_idx {
+                dim_arcs.push(crate::dimension::Arc2 { from: p, to: here, arrival: t });
+            } else {
+                // No start location: treat the first stop as a self-arc so the
+                // cumul still has a position-1 entry (callback decides the delta).
+                dim_arcs.push(crate::dimension::Arc2 { from: here, to: here, arrival: t });
+            }
         }
 
         let do_setup = match prev_idx {
@@ -557,6 +579,10 @@ fn evaluate_route_with_buf(
         t += dur;
         travel_time += dur;
         distance += matrix.distance(p, e);
+        // Final custom-dimension arc back to the end depot.
+        if track_dims {
+            dim_arcs.push(crate::dimension::Arc2 { from: p, to: e, arrival: t });
+        }
     }
 
     // Any breaks not yet taken must still fit before the vehicle's day ends;
@@ -628,10 +654,32 @@ fn evaluate_route_with_buf(
         break_duration,
     };
 
+    // Custom dimensions (P5): accumulate every registered dimension along this
+    // route's arcs. Free when none are registered (`track_dims` is the relaxed
+    // atomic load taken once at the top of the walk). A registered hard min/max
+    // cumul bound is honoured HERE, at full route evaluation — NOT in the O(1)
+    // insertion probe (see dimension.rs caveats): an out-of-bounds route is
+    // rejected so it is never committed, but bounded dimensions do not prune in
+    // the fast probe the way travel/distance/duration bounds do.
+    let dim_cumuls = if track_dims {
+        crate::dimension::accumulate(&dim_arcs)
+    } else {
+        crate::dimension::DimensionCumuls::default()
+    };
+    if dim_cumuls.bound_violated {
+        return Err("custom dimension bound exceeded");
+    }
+
     // User-supplied custom constraints (code, from Rust or Python). The flag
     // check is a single relaxed atomic load — free when none are registered.
     if crate::constraint::has_constraints() {
-        let view = crate::constraint::RouteView { problem, vehicle, steps, metrics: &metrics };
+        let view = crate::constraint::RouteView {
+            problem,
+            vehicle,
+            steps,
+            metrics: &metrics,
+            dim_cumuls: &dim_cumuls,
+        };
         match crate::constraint::apply(&view) {
             Ok(penalty) => {
                 metrics.cost_custom += penalty;
@@ -642,6 +690,72 @@ fn evaluate_route_with_buf(
     }
 
     Ok(metrics)
+}
+
+/// Recompute the custom-dimension cumuls (P5) for a finished route, so route
+/// summaries / reports can read per-stop dimension values without re-running the
+/// whole evaluator's cost machinery. Returns an empty [`DimensionCumuls`] when no
+/// dimension is registered (the common case → no work). This walks the same arc
+/// sequence the evaluator threads through `dimension::accumulate`, so it matches
+/// the values the DSL saw during search.
+pub fn dimension_cumuls_for_route(
+    problem: &Problem,
+    matrix: &Matrix,
+    vehicle: &Vehicle,
+    steps: &[TaskRef],
+) -> crate::dimension::DimensionCumuls {
+    if !crate::dimension::has_dimensions() {
+        return crate::dimension::DimensionCumuls::default();
+    }
+    let vw = vehicle.time_window();
+    let speed = vehicle.speed_factor.max(0.01);
+    let start_idx = vehicle.start.as_ref().and_then(|l| l.index)
+        .or_else(|| vehicle.end.as_ref().and_then(|l| l.index));
+    let end_idx = vehicle.end.as_ref().and_then(|l| l.index).or(start_idx);
+
+    let mut t: Time = vw.start;
+    let mut prev_idx: Option<usize> = start_idx;
+    let mut arcs: Vec<crate::dimension::Arc2> = Vec::with_capacity(steps.len() + 1);
+    for s in steps {
+        if let TaskRef::Reload = s {
+            // Reload legs are travel back to the depot; mirror the evaluator's
+            // continuous accumulation (no per-trip reset for custom dims — see
+            // dimension.rs caveats) by simply continuing through the depot.
+            if let (Some(p), Some(d)) = (prev_idx, start_idx) {
+                let dur = ((matrix.duration(p, d) as f64) * speed).round() as i64;
+                t += dur;
+                arcs.push(crate::dimension::Arc2 { from: p, to: d, arrival: t });
+                prev_idx = start_idx;
+            }
+            continue;
+        }
+        let here = match s.description(problem).location.index {
+            Some(i) => i,
+            None => continue,
+        };
+        let arrival;
+        if let Some(p) = prev_idx {
+            let dur = ((matrix.duration(p, here) as f64) * speed).round() as i64;
+            t += dur;
+            arrival = t;
+            arcs.push(crate::dimension::Arc2 { from: p, to: here, arrival });
+        } else {
+            arrival = t;
+            arcs.push(crate::dimension::Arc2 { from: here, to: here, arrival });
+        }
+        // Advance the clock through this stop's service so downstream arrival
+        // times stay in step with the evaluator (release/TW waits are not
+        // modelled here — this is the report path, kept simple and deterministic).
+        let job = s.description(problem);
+        t += job.service;
+        prev_idx = Some(here);
+    }
+    if let (Some(p), Some(e)) = (prev_idx, end_idx) {
+        let dur = ((matrix.duration(p, e) as f64) * speed).round() as i64;
+        t += dur;
+        arcs.push(crate::dimension::Arc2 { from: p, to: e, arrival: t });
+    }
+    crate::dimension::accumulate(&arcs)
 }
 
 /// Return the first time window in `tws` whose end is ≥ `arrival`. If `tws`

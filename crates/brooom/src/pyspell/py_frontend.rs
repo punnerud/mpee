@@ -10,7 +10,7 @@ use rustpython_parser::{ast, Parse};
 
 use super::error::DslError;
 use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, UnOp, Value};
-use super::lower::{builtin_from, finish, finish_global, resolve_field, Ctx};
+use super::lower::{builtin_from, finish, finish_global, index_base, resolve_field, Ctx};
 
 pub fn compile_python(src: &str) -> Result<super::ir::Program, DslError> {
     let expr = ast::Expr::parse(src, "<constraint>").map_err(|e| DslError::Parse(e.to_string()))?;
@@ -106,7 +106,8 @@ fn lower(e: &ast::Expr, ctx: &mut Ctx) -> Result<Expr, DslError> {
                 return Err(DslError::Forbidden("slice".into()));
             }
             Ok(Expr::Index(
-                Box::new(lower(&s.value, ctx)?),
+                // A custom-dimension base under `[k]` reads the cumul list (P5).
+                Box::new(index_base(lower(&s.value, ctx)?)),
                 Box::new(lower(&s.slice, ctx)?),
             ))
         }

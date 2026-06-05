@@ -42,6 +42,11 @@ pub struct RouteView<'a> {
     pub vehicle: &'a Vehicle,
     pub steps: &'a [TaskRef],
     pub metrics: &'a RouteMetrics,
+    /// Per-route cumuls for any registered custom dimensions (P5). Empty unless
+    /// a dimension is registered AND this view was built by `evaluate_route`
+    /// (the full route walk that has the arrival times needed to accumulate).
+    /// The pyspell evaluator reads `route.<dim>` / `route.<dim>[k]` from here.
+    pub dim_cumuls: &'a crate::dimension::DimensionCumuls,
 }
 
 impl RouteView<'_> {
@@ -50,6 +55,14 @@ impl RouteView<'_> {
     pub fn stop_ids(&self) -> Vec<u64> {
         self.steps.iter().map(|s| s.description(self.problem).id).collect()
     }
+}
+
+/// A shared empty `DimensionCumuls` for `RouteView`s built where no custom
+/// dimension state is available (probe paths, unit tests, callers that don't run
+/// `evaluate_route`). Avoids forcing every construction site to allocate.
+pub fn empty_dim_cumuls() -> &'static crate::dimension::DimensionCumuls {
+    static EMPTY: std::sync::OnceLock<crate::dimension::DimensionCumuls> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(crate::dimension::DimensionCumuls::default)
 }
 
 /// A custom constraint: any `Send + Sync` closure from a route to a verdict.
