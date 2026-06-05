@@ -317,6 +317,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         verbose: cli.verbose,
         warm_start: None,
         use_gpu: cli.gpu,
+        ..Default::default()
     };
 
     // --find-similar: short-circuit solve, just print top-K nearest cached

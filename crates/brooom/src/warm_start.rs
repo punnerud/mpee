@@ -117,6 +117,6 @@ pub fn load_warm_start(
         unassigned,
         summary: Default::default(),
     };
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
     Ok(sol)
 }

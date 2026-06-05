@@ -276,7 +276,7 @@ fn best_feasible_from_tours(
             unassigned: base.unassigned.clone(),
             summary: Default::default(),
         };
-        s.recompute_summary();
+        s.recompute_summary(problem);
         match best.as_ref() {
             None => best = Some(s),
             Some(cur) if s.summary.cost < cur.summary.cost => best = Some(s),

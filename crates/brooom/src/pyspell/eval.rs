@@ -350,6 +350,50 @@ fn call_builtin(b: Builtin, args: &[Expr], f: &mut Frame) -> Result<Value, DslEr
             }
             Ok(Value::Bool(false))
         }
+        Builtin::IndexOf => {
+            if vals.len() != 2 {
+                return Err(arity_err(vals.len()));
+            }
+            let items = list_of(&vals[0], "index")?;
+            let needle = as_f64(&vals[1])?;
+            Ok(Value::Int(
+                position_of(&items, needle).map(|i| i as i64).unwrap_or(-1),
+            ))
+        }
+        Builtin::Before => {
+            if vals.len() != 3 {
+                return Err(arity_err(vals.len()));
+            }
+            let items = list_of(&vals[0], "before")?;
+            let a = as_f64(&vals[1])?;
+            let b = as_f64(&vals[2])?;
+            // Vacuous (false) when either stop is not on this route.
+            let verdict = match (position_of(&items, a), position_of(&items, b)) {
+                (Some(ia), Some(ib)) => ia < ib,
+                _ => false,
+            };
+            Ok(Value::Bool(verdict))
+        }
+        Builtin::First => {
+            let items = single_list(&vals, "first")?;
+            Ok(items.first().cloned().unwrap_or(Value::Int(-1)))
+        }
+        Builtin::Last => {
+            let items = single_list(&vals, "last")?;
+            Ok(items.last().cloned().unwrap_or(Value::Int(-1)))
+        }
+    }
+}
+
+/// First element of `items` numerically equal to `needle`, by position.
+fn position_of(items: &[Value], needle: f64) -> Option<usize> {
+    items.iter().position(|v| as_f64(v).map(|x| x == needle).unwrap_or(false))
+}
+
+fn list_of(v: &Value, name: &'static str) -> Result<Arc<[Value]>, DslError> {
+    match v {
+        Value::List(l) => Ok(l.clone()),
+        _ => Err(DslError::Type(format!("{name}() expects a list as its first argument"))),
     }
 }
 
@@ -408,6 +452,10 @@ fn builtin_name(b: Builtin) -> &'static str {
         Builtin::Float => "float",
         Builtin::Bool => "bool",
         Builtin::Contains => "contains",
+        Builtin::IndexOf => "index",
+        Builtin::Before => "before",
+        Builtin::First => "first",
+        Builtin::Last => "last",
     }
 }
 
@@ -426,11 +474,14 @@ mod tests {
             kind: Default::default(),
             service: 0,
             setup: 0,
+            release: 0,
             delivery: vec![1],
             pickup: vec![],
             skills: vec![],
             priority: 0,
             time_windows: vec![],
+            prize: crate::problem::DEFAULT_PRIZE,
+            group: None,
             description: None,
         };
         let mut p = Problem::default();
@@ -508,6 +559,55 @@ mod tests {
         assert_eq!(eval_verdict(&prog(Expr::Const(Value::Int(250)))), Verdict::Penalty(250.0));
         assert_eq!(eval_verdict(&prog(Expr::Const(Value::Int(0)))), Verdict::Feasible);
         assert_eq!(eval_verdict(&prog(Expr::Const(Value::Float(-3.0)))), Verdict::Feasible);
+    }
+
+    #[test]
+    fn sequencing_builtins() {
+        // route job ids are [10, 20] in visiting order.
+        let jobids = || Expr::ListField(ListField::RouteJobIds);
+        // index(job_ids, 20) == 1 → Penalty(1)
+        assert_eq!(
+            eval_verdict(&prog(Expr::Call(Builtin::IndexOf, vec![jobids(), Expr::Const(Value::Int(20))]))),
+            Verdict::Penalty(1.0)
+        );
+        // index of absent (99) → -1 → Feasible
+        assert_eq!(
+            eval_verdict(&prog(Expr::Call(Builtin::IndexOf, vec![jobids(), Expr::Const(Value::Int(99))]))),
+            Verdict::Feasible
+        );
+        // before(job_ids, 10, 20) → true → Feasible
+        assert_eq!(
+            eval_verdict(&prog(Expr::Call(Builtin::Before, vec![jobids(), Expr::Const(Value::Int(10)), Expr::Const(Value::Int(20))]))),
+            Verdict::Feasible
+        );
+        // before reversed → false → Infeasible
+        assert_eq!(
+            eval_verdict(&prog(Expr::Call(Builtin::Before, vec![jobids(), Expr::Const(Value::Int(20)), Expr::Const(Value::Int(10))]))),
+            Verdict::Infeasible
+        );
+        // before with an absent stop → false (vacuous) → Infeasible
+        assert_eq!(
+            eval_verdict(&prog(Expr::Call(Builtin::Before, vec![jobids(), Expr::Const(Value::Int(10)), Expr::Const(Value::Int(99))]))),
+            Verdict::Infeasible
+        );
+        // last(job_ids) == 20 → true
+        assert_eq!(
+            eval_verdict(&prog(Expr::Cmp(
+                CmpOp::Eq,
+                Box::new(Expr::Call(Builtin::Last, vec![jobids()])),
+                Box::new(Expr::Const(Value::Int(20))),
+            ))),
+            Verdict::Feasible
+        );
+        // first(job_ids) == 10 → true
+        assert_eq!(
+            eval_verdict(&prog(Expr::Cmp(
+                CmpOp::Eq,
+                Box::new(Expr::Call(Builtin::First, vec![jobids()])),
+                Box::new(Expr::Const(Value::Int(10))),
+            ))),
+            Verdict::Feasible
+        );
     }
 
     #[test]

@@ -356,6 +356,13 @@ fn evaluate_route_with_buf(
             setup_time += job.setup;
         }
 
+        // Release time: service may not begin before `release`; wait if early.
+        // Default 0 ⇒ this branch never fires (no behavior change).
+        if t < job.release {
+            waiting_time += job.release - t;
+            t = job.release;
+        }
+
         let chosen_tw = pick_time_window(&job.time_windows, t).ok_or("time window missed")?;
         if t < chosen_tw.start {
             waiting_time += chosen_tw.start - t;
@@ -503,7 +510,7 @@ pub fn pick_time_window(tws: &[TimeWindow], arrival: Time) -> Option<TimeWindow>
 }
 
 impl Solution {
-    pub fn recompute_summary(&mut self) {
+    pub fn recompute_summary(&mut self, problem: &Problem) {
         let mut s = Summary { routes: self.routes.len(), unassigned: self.unassigned.len(), ..Default::default() };
         for r in &self.routes {
             s.cost += r.metrics.cost;
@@ -512,8 +519,22 @@ impl Solution {
             s.waiting_time += r.metrics.waiting_time;
             s.distance += r.metrics.distance;
         }
-        // Heavy penalty per unassigned task so optimization prefers feasibility.
-        s.cost += self.unassigned.len() as f64 * 1e9;
+        // Prize-collecting: charge each unassigned task its prize. A job's prize
+        // defaults to a large sentinel (problem::DEFAULT_PRIZE), so this matches
+        // the historical flat `count * 1e9` unless a finite prize was set. Only
+        // single jobs are optional; shipment halves keep the sentinel.
+        for t in &self.unassigned {
+            s.cost += t.description(problem).prize;
+        }
+        // Solution-level (cross-route) penalty term, behind a lock-free fast path.
+        if crate::global_constraint::has_global() {
+            let view = crate::global_constraint::SolutionView {
+                problem,
+                routes: &self.routes,
+                unassigned: &self.unassigned,
+            };
+            s.cost += crate::global_constraint::apply(&view);
+        }
         self.summary = s;
     }
 }

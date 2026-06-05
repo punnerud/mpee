@@ -74,6 +74,10 @@ pub(crate) fn builtin_from(name: &str) -> Result<Builtin, DslError> {
         "int" => Builtin::Int,
         "float" => Builtin::Float,
         "bool" => Builtin::Bool,
+        "index" => Builtin::IndexOf,
+        "before" => Builtin::Before,
+        "first" => Builtin::First,
+        "last" => Builtin::Last,
         _ => return Err(DslError::Forbidden(format!("function `{name}()`"))),
     })
 }

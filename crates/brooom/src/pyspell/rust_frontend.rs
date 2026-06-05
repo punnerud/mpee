@@ -265,6 +265,11 @@ mod tests {
         ok("route.stop_count <= vehicle.max_tasks && route.distance < 50000");
         ok("vehicle.capacity[0] >= 1");
         ok("sum(vehicle.capacity) > 0");
+        // precedence / sequencing builtins
+        ok("before(route.job_ids, 10, 20)");
+        ok("index(route.job_ids, 10) >= 0");
+        ok("!route.job_ids.contains(99) || last(route.job_ids) == 99");
+        ok("first(route.job_ids) == 10");
     }
 
     #[test]

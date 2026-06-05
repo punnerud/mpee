@@ -53,6 +53,15 @@ pub struct SolverConfig {
     /// feasible result. Useful for N≥500 where GPU LS iters cost far
     /// less than CPU iters.
     pub use_gpu: bool,
+    /// Cap on the number of vehicles/routes used. `None` = unlimited. Enforced
+    /// as a (large) solution-level penalty so jobs that don't fit within the
+    /// cap land in `unassigned` (and are charged their prize).
+    pub max_vehicles: Option<usize>,
+    /// If > 0, add a fairness penalty proportional to the spread of the chosen
+    /// metric across used routes (balances workload). 0 disables it.
+    pub fairness_weight: f64,
+    /// Which per-route quantity fairness balances (duration or load).
+    pub fairness_metric: crate::global_constraint::FairnessMetric,
 }
 
 impl Default for SolverConfig {
@@ -75,6 +84,9 @@ impl Default for SolverConfig {
             verbose: false,
             warm_start: None,
             use_gpu: false,
+            max_vehicles: None,
+            fairness_weight: 0.0,
+            fairness_metric: crate::global_constraint::FairnessMetric::Duration,
         }
     }
 }
@@ -127,6 +139,23 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     // Drop any stale eval cache from a previous solve. Worker threads each
     // have their own thread-local cache; rayon will warm them as it spawns.
     crate::solution::eval_cache_invalidate();
+
+    // Register solution-level (cross-route) constraints for this solve: a
+    // max-vehicles cap, fairness balancing, and exactly-one-per-group whenever
+    // any job declares a group. The guard clears them when the solve returns.
+    let mut globals: Vec<std::sync::Arc<crate::global_constraint::GlobalConstraintFn>> = Vec::new();
+    if let Some(cap) = config.max_vehicles {
+        globals.push(crate::global_constraint::max_vehicles(cap));
+    }
+    if config.fairness_weight > 0.0 {
+        globals.push(crate::global_constraint::fairness(config.fairness_weight, config.fairness_metric));
+    }
+    if problem.jobs.iter().any(|j| j.group.is_some()) {
+        globals.push(crate::global_constraint::exactly_one_per_group());
+    }
+    let _global_guard = (!globals.is_empty())
+        .then(|| crate::global_constraint::GlobalConstraintGuard::install(globals));
+
     let granular = config.granular_k.map(|k| Granular::build(matrix, k));
     if config.verbose {
         if let Some(g) = &granular {
@@ -247,6 +276,7 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     #[cfg(feature = "gpu")]
     if config.use_gpu && best.routes.len() > 0 && matrix.n >= 500
         && !crate::constraint::has_constraints()
+        && !crate::global_constraint::has_global()
     {
         let t_gpu = std::time::Instant::now();
         let max_iter = if matrix.n >= 5000 { 2000 } else { 1000 };
@@ -299,6 +329,24 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
         );
     }
 
+    // Prize-collecting: the cost-greedy insertion fills scarce capacity with the
+    // cheapest-to-reach jobs, ignoring value. Swap a served low-prize job for an
+    // unassigned higher-prize one whenever that lowers the objective. No-op when
+    // every job keeps the default sentinel prize.
+    if problem.jobs.iter().any(|j| j.prize < crate::problem::DEFAULT_PRIZE) {
+        prize_swap_pass(&mut best, problem, matrix);
+    }
+
+    // Hard-enforce the solution-level caps the search only soft-penalized:
+    // trim to the vehicle cap and to one served member per client group, moving
+    // any surplus to `unassigned`. No-ops unless configured / groups present.
+    if let Some(cap) = config.max_vehicles {
+        enforce_max_vehicles(&mut best, problem, cap);
+    }
+    if problem.jobs.iter().any(|j| j.group.is_some()) {
+        enforce_groups(&mut best, problem, matrix);
+    }
+
     if config.verbose {
         eprintln!(
             "brooom: multi_start={} best — routes={} unassigned={} cost={:.2}",
@@ -309,6 +357,117 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
         );
     }
     best
+}
+
+/// Prize-collecting improvement: replace a served job with an unassigned
+/// higher-prize job when doing so lowers the objective (route-cost delta plus
+/// the swapped prizes). Greedy, applied to convergence; O(unassigned × stops)
+/// per round, only when finite prizes exist.
+fn prize_swap_pass(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
+    loop {
+        let mut applied = false;
+        'search: for ui in 0..sol.unassigned.len() {
+            let u = sol.unassigned[ui];
+            if !matches!(u, TaskRef::Job(_)) {
+                continue;
+            }
+            let u_prize = u.description(problem).prize;
+            for ri in 0..sol.routes.len() {
+                for pos in 0..sol.routes[ri].steps.len() {
+                    let s = sol.routes[ri].steps[pos];
+                    if !matches!(s, TaskRef::Job(_)) {
+                        continue;
+                    }
+                    let s_prize = s.description(problem).prize;
+                    if s_prize >= u_prize {
+                        continue; // only swap in a strictly more valuable job
+                    }
+                    let mut cand = sol.routes[ri].steps.clone();
+                    cand[pos] = u;
+                    let veh = &problem.vehicles[sol.routes[ri].vehicle_idx];
+                    if let Ok(m) = crate::solution::evaluate_route(problem, matrix, veh, &cand) {
+                        // Δobjective = route-cost change + (s now unassigned) − (u no longer unassigned).
+                        let delta = (m.cost - sol.routes[ri].metrics.cost) + s_prize - u_prize;
+                        if delta < -1e-6 {
+                            sol.routes[ri].steps = cand;
+                            sol.routes[ri].metrics = m;
+                            sol.unassigned[ui] = s;
+                            applied = true;
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        if !applied {
+            break;
+        }
+    }
+    sol.recompute_summary(problem);
+}
+
+/// Hard-enforce a max-vehicles cap: while more than `cap` routes are non-empty,
+/// drop the smallest route (fewest stops) and move its tasks to `unassigned`.
+fn enforce_max_vehicles(sol: &mut Solution, problem: &Problem, cap: usize) {
+    loop {
+        let nonempty: Vec<usize> = sol.routes.iter().enumerate()
+            .filter(|(_, r)| !r.steps.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        if nonempty.len() <= cap {
+            break;
+        }
+        let victim = *nonempty
+            .iter()
+            .min_by_key(|&&i| sol.routes[i].steps.len())
+            .unwrap();
+        let removed = std::mem::take(&mut sol.routes[victim].steps);
+        sol.unassigned.extend(removed);
+    }
+    sol.routes.retain(|r| !r.steps.is_empty());
+    sol.recompute_summary(problem);
+}
+
+/// Hard-enforce "exactly one served member per client group": keep the
+/// lowest-index served member of each group, evict the rest to `unassigned`.
+fn enforce_groups(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
+    use std::collections::{HashMap, HashSet};
+    let mut served_by_group: HashMap<u32, Vec<usize>> = HashMap::new();
+    for r in &sol.routes {
+        for s in &r.steps {
+            if let TaskRef::Job(ji) = s {
+                if let Some(g) = problem.jobs[*ji].group {
+                    served_by_group.entry(g).or_default().push(*ji);
+                }
+            }
+        }
+    }
+    let mut to_remove: HashSet<usize> = HashSet::new();
+    for (_g, mut js) in served_by_group {
+        if js.len() > 1 {
+            js.sort_unstable();
+            for &ji in js.iter().skip(1) {
+                to_remove.insert(ji);
+            }
+        }
+    }
+    if to_remove.is_empty() {
+        return;
+    }
+    for r in &mut sol.routes {
+        let before = r.steps.len();
+        r.steps.retain(|s| !matches!(s, TaskRef::Job(ji) if to_remove.contains(ji)));
+        if r.steps.len() != before {
+            let veh = &problem.vehicles[r.vehicle_idx];
+            r.metrics = crate::solution::evaluate_route(problem, matrix, veh, &r.steps)
+                .unwrap_or_default();
+        }
+    }
+    for ji in to_remove {
+        sol.unassigned.push(TaskRef::Job(ji));
+    }
+    sol.routes.retain(|r| !r.steps.is_empty());
+    sol.recompute_summary(problem);
 }
 
 /// Final guaranteed-assignment pass: greedily place any still-unassigned
@@ -417,7 +576,7 @@ fn repair_unassigned(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
         break;
     }
     }
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
 }
 
 /// Build a matrix from whatever the problem provides.
@@ -581,6 +740,6 @@ pub fn kick<R: rand::Rng>(
         }
     }
 
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
 }
 

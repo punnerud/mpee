@@ -74,6 +74,28 @@ fn dsl_probe_mirrored_bound_solves() {
 }
 
 #[test]
+fn dsl_precedence_before_orders_stops() {
+    let _lock = guard();
+    // Require job 20 before job 10 on any route serving both (guarded so routes
+    // lacking either job are unaffected). No route may then have 10 before 20.
+    let _g = brooom::pyspell::install_rust(&[
+        "!route.job_ids.contains(10) || !route.job_ids.contains(20) || before(route.job_ids, 20, 10)",
+    ])
+    .unwrap();
+
+    let mut problem = parse_input(TWO_JOBS).unwrap();
+    let sol = solve(&mut problem, Some(&HaversineMatrix::default()), SolverConfig::default()).unwrap();
+    for r in &sol.routes {
+        let ids: Vec<u64> = r.steps.iter().map(|s| s.description(&problem).id).collect();
+        let p10 = ids.iter().position(|&x| x == 10);
+        let p20 = ids.iter().position(|&x| x == 20);
+        if let (Some(a), Some(b)) = (p10, p20) {
+            assert!(b < a, "constraint requires job 20 before job 10 on a shared route");
+        }
+    }
+}
+
+#[test]
 fn dsl_compile_error_is_returned_not_panicked() {
     let _lock = guard();
     assert!(brooom::pyspell::install_rust(&["route.nonsense_field > 1"]).is_err());

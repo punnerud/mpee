@@ -158,7 +158,7 @@ pub fn solve_hgs(
                 while population.len() < pop_size {
                     let seed = rng.gen::<u64>();
                     let mut sol = crate::insertion::greedy_insertion_seeded(problem, matrix, seed);
-                    sol.recompute_summary();
+                    sol.recompute_summary(problem);
                     population.push(sol);
                 }
                 // Educate the new ones.
@@ -198,7 +198,7 @@ fn build_initial_population(
     while pop.len() < pop_size {
         let seed: u64 = rng.gen();
         let mut sol = crate::insertion::greedy_insertion_seeded(problem, matrix, seed);
-        sol.recompute_summary();
+        sol.recompute_summary(problem);
         pop.push(sol);
     }
     // Educate everyone with one LS pass on GPU.
@@ -430,7 +430,7 @@ fn srex_crossover(
             }
         }
     }
-    child.recompute_summary();
+    child.recompute_summary(problem);
     child
 }
 
@@ -649,7 +649,7 @@ fn educate_batch(
                 unassigned: ind.unassigned.clone(),
                 summary: Default::default(),
             };
-            s.recompute_summary();
+            s.recompute_summary(problem);
             // Verify all tasks present (no leak).
             let n_assigned: usize = s.routes.iter().map(|r| r.steps.len()).sum();
             let n_orig_assigned: usize = ind.routes.iter().map(|r| r.steps.len()).sum();

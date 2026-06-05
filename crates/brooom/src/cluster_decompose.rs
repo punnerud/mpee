@@ -277,7 +277,7 @@ pub fn solve_decomposed(
         unassigned,
         summary: Default::default(),
     };
-    combined.recompute_summary();
+    combined.recompute_summary(problem);
 
     // Polish pass: cross-cluster moves were forbidden during the parallel
     // sub-solves; recover them now with a full-LS pass on the assembled

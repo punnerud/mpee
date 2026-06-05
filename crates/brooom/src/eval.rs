@@ -158,6 +158,11 @@ pub fn precompute(
         };
         if do_setup { t += job.setup; }
 
+        // Mirror solution.rs release-time lower bound (probe folds the wait into
+        // the timeline). Release only delays, so the backward latest_arrival
+        // pass needs no change (conservative-safe).
+        if t < job.release { t = job.release; }
+
         let chosen_tw = pick_time_window(&job.time_windows, t)?;
         if t < chosen_tw.start { t = chosen_tw.start; }
         if t > chosen_tw.end { return None; }

@@ -89,7 +89,7 @@ pub fn local_search(
     }
 
     sol.routes.retain(|r| !r.steps.is_empty());
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
 }
 
 /// Full LS pass without don't-look bits. Every task is reconsidered every
@@ -131,7 +131,7 @@ pub fn local_search_full(
     }
 
     sol.routes.retain(|r| !r.steps.is_empty());
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
 }
 
 fn locate(sol: &Solution, task: TaskRef) -> Option<(usize, usize)> {
@@ -722,5 +722,5 @@ pub fn route_split_pass(
             break;
         }
     }
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
 }

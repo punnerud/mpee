@@ -249,11 +249,14 @@ impl Engine {
                 kind: Default::default(),
                 service: 0,
                 setup: 0,
+                release: 0,
                 delivery: vec![1],
                 pickup: vec![],
                 skills: vec![],
                 priority: 0,
                 time_windows: vec![],
+                prize: brooom::problem::DEFAULT_PRIZE,
+                group: None,
                 description: None,
             });
             job_mi.push(i + 1);

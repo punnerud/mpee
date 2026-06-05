@@ -84,6 +84,8 @@ pub struct JobIn {
     #[serde(default)]
     pub setup: Time,
     #[serde(default)]
+    pub release: Time,
+    #[serde(default)]
     pub delivery: Capacity,
     #[serde(default)]
     pub pickup: Capacity,
@@ -93,6 +95,10 @@ pub struct JobIn {
     pub priority: u8,
     #[serde(default)]
     pub time_windows: Vec<[Time; 2]>,
+    #[serde(default = "default_prize")]
+    pub prize: Cost,
+    #[serde(default)]
+    pub group: Option<u32>,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -169,6 +175,8 @@ fn tw_from(arr: [Time; 2]) -> TimeWindow {
     TimeWindow { start: arr[0], end: arr[1] }
 }
 
+fn default_prize() -> Cost { crate::problem::DEFAULT_PRIZE }
+
 fn job_from(j: &JobIn) -> Job {
     Job {
         id: j.id,
@@ -177,11 +185,14 @@ fn job_from(j: &JobIn) -> Job {
         kind: JobKindOpt::Single,
         service: j.service,
         setup: j.setup,
+        release: j.release,
         delivery: j.delivery.clone(),
         pickup: j.pickup.clone(),
         skills: j.skills.clone(),
         priority: j.priority,
         time_windows: j.time_windows.iter().copied().map(tw_from).collect(),
+        prize: j.prize,
+        group: j.group,
         description: j.description.clone(),
     }
 }
@@ -419,6 +430,11 @@ fn route_steps(
         let setup = if do_setup { j.setup } else { 0 };
         t += setup;
         total_setup += setup;
+
+        // Release-time wait (mirror of the evaluator) before window selection.
+        let rel_wait = if t < j.release { j.release - t } else { 0 };
+        t += rel_wait;
+        total_wait += rel_wait;
 
         let chosen = crate::solution::pick_time_window(&j.time_windows, t)
             .unwrap_or(TimeWindow::FOREVER);

@@ -575,9 +575,10 @@ impl Router {
                     problem.jobs.push(brooom::Job {
                         id: (i + 1) as u64,
                         location: brooom::Location::from_index(i + 1),
-                        kind: Default::default(), service: 0, setup: 0,
+                        kind: Default::default(), service: 0, setup: 0, release: 0,
                         delivery: vec![1], pickup: vec![], skills: vec![], priority: 0,
-                        time_windows: vec![], description: None,
+                        time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
+                        description: None,
                     });
                 }
                 let cfg = brooom::solver::SolverConfig {
@@ -976,10 +977,11 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
             id: (i + 1) as u64,
             location: brooom::Location::from_coord(lon, lat),
             kind: Default::default(),
-            service: 60, setup: 0,
+            service: 60, setup: 0, release: 0,
             delivery: vec![delivery], pickup: vec![],
             skills: vec![], priority: 0,
-            time_windows: vec![], description: None,
+            time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
+            description: None,
         });
     }
     let max_tt = if args.max_travel_time_s > 0 { Some(args.max_travel_time_s) } else { None };

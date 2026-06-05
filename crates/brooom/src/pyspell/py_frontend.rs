@@ -223,6 +223,11 @@ mod tests {
         ok("vehicle.capacity[0] >= 1");
         ok("0 < route.travel_time < 28800"); // chained
         ok("sum(vehicle.capacity) > 0");
+        // precedence / sequencing builtins
+        ok("before(route.job_ids, 10, 20)");
+        ok("99 not in route.job_ids or last(route.job_ids) == 99");
+        ok("first(route.job_ids) == 10");
+        ok("index(route.job_ids, 20) == 1");
     }
 
     #[test]

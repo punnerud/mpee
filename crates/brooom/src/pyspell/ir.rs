@@ -102,6 +102,14 @@ pub enum Builtin {
     Bool,
     /// `list.contains(x)` / `x in list` → Bool.
     Contains,
+    /// `index(list, x)` → position of first x in visiting order, or -1 if absent.
+    IndexOf,
+    /// `before(list, a, b)` → true iff a occurs before b; false if either absent.
+    Before,
+    /// `first(list)` → list[0], or -1 if empty.
+    First,
+    /// `last(list)` → last element, or -1 if empty.
+    Last,
 }
 
 #[derive(Clone, Debug)]

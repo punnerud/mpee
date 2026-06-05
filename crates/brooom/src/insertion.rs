@@ -159,25 +159,37 @@ pub fn greedy_insertion_seeded(problem: &Problem, matrix: &Matrix, seed: u64) ->
     let mut is_pair_head: Vec<bool> = Vec::new();
 
     let mut singles: Vec<TaskRef> = (0..problem.jobs.len()).map(TaskRef::Job).collect();
+    // Prize-collecting: insert by prize (high-value first, so scarce capacity
+    // goes to the most valuable jobs), then priority. Every job's prize defaults
+    // to the same large sentinel, so this is identical to the old priority-only
+    // order unless finite prizes were set.
+    let prize_of = |t: &TaskRef| t.description(problem).prize;
     if seed == 0 {
-        singles.sort_by_key(|t| {
-            let p = t.priority(problem);
-            let j = t.description(problem);
-            let earliest = j.time_windows.first().map(|w| w.start).unwrap_or(0);
-            (std::cmp::Reverse(p), earliest, j.id)
+        singles.sort_by(|a, b| {
+            prize_of(b).partial_cmp(&prize_of(a)).unwrap_or(Ordering::Equal)
+                .then_with(|| b.priority(problem).cmp(&a.priority(problem)))
+                .then_with(|| {
+                    let ea = a.description(problem).time_windows.first().map(|w| w.start).unwrap_or(0);
+                    let eb = b.description(problem).time_windows.first().map(|w| w.start).unwrap_or(0);
+                    ea.cmp(&eb)
+                })
+                .then_with(|| a.description(problem).id.cmp(&b.description(problem).id))
         });
     } else {
-        // Shuffle within priority class, deterministically per seed.
+        // Shuffle within equal (prize, priority) class, deterministically per seed.
         use rand::seq::SliceRandom;
         use rand::SeedableRng;
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        singles.sort_by_key(|t| std::cmp::Reverse(t.priority(problem)));
-        // Shuffle tasks of equal priority among themselves.
+        singles.sort_by(|a, b| {
+            prize_of(b).partial_cmp(&prize_of(a)).unwrap_or(Ordering::Equal)
+                .then_with(|| b.priority(problem).cmp(&a.priority(problem)))
+        });
+        let key = |t: &TaskRef| (prize_of(t).to_bits(), t.priority(problem));
         let mut start = 0;
         while start < singles.len() {
-            let p = singles[start].priority(problem);
+            let k = key(&singles[start]);
             let mut end = start + 1;
-            while end < singles.len() && singles[end].priority(problem) == p { end += 1; }
+            while end < singles.len() && key(&singles[end]) == k { end += 1; }
             singles[start..end].shuffle(&mut rng);
             start = end;
         }
@@ -342,7 +354,7 @@ pub fn greedy_insertion_seeded(problem: &Problem, matrix: &Matrix, seed: u64) ->
         .filter_map(|(i, &ok)| if ok { Some(pending[i]) } else { None })
         .collect();
     let mut sol = Solution { routes, unassigned, summary: Default::default() };
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
     sol
 }
 
@@ -449,7 +461,7 @@ pub fn solomon_i1_insertion(problem: &Problem, matrix: &Matrix, lambda: f64) -> 
     }
 
     let mut sol = Solution { routes, unassigned, summary: Default::default() };
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
     sol
 }
 
@@ -588,6 +600,6 @@ pub fn solomon_i1_full(
     }
 
     let mut sol = Solution { routes, unassigned, summary: Default::default() };
-    sol.recompute_summary();
+    sol.recompute_summary(problem);
     sol
 }

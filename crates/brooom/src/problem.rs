@@ -121,6 +121,10 @@ pub struct Job {
     /// Setup time when arriving from a *different* location, in seconds.
     #[serde(default)]
     pub setup: Time,
+    /// Earliest time service may begin here, regardless of time windows; the
+    /// vehicle waits if it arrives earlier. Default 0 (no effect).
+    #[serde(default)]
+    pub release: Time,
 
     /// Goods delivered (subtracted from vehicle load on arrival).
     #[serde(default)]
@@ -136,9 +140,24 @@ pub struct Job {
     pub priority: u8,
     #[serde(default)]
     pub time_windows: Vec<TimeWindow>,
+    /// Prize collected for serving this job (prize-collecting VRP). A finite
+    /// value makes the job optional, worth this much; if left unserved the
+    /// objective is charged `prize`. Defaults to a large sentinel so unset jobs
+    /// stay effectively mandatory (dropping one costs the same as before).
+    #[serde(default = "default_prize")]
+    pub prize: Cost,
+    /// Client-group id. The "exactly one per group" global constraint serves
+    /// exactly one member of each non-None group. None = ungrouped.
+    #[serde(default)]
+    pub group: Option<u32>,
     #[serde(default)]
     pub description: Option<String>,
 }
+
+/// Sentinel prize that keeps an unset job effectively mandatory (matches the
+/// historical flat unassigned penalty).
+pub const DEFAULT_PRIZE: Cost = 1e9;
+fn default_prize() -> Cost { DEFAULT_PRIZE }
 
 /// Default kind when only `Job` is present in input is `Single`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

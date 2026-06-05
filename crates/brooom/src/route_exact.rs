@@ -93,7 +93,7 @@ pub fn polish_solution_with_exact(
     }
     stats.solver_us = t0.elapsed().as_secs_f64() * 1e6;
     if stats.improved > 0 {
-        solution.recompute_summary();
+        solution.recompute_summary(problem);
     }
     stats
 }

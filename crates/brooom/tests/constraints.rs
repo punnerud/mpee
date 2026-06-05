@@ -23,6 +23,34 @@ fn prep(json: &str) -> (brooom::Problem, brooom::Matrix) {
 }
 
 // ---------------------------------------------------------------------------
+// Release times: service may not begin before a job's release; the vehicle
+// waits. release=0 (default) is a no-op.
+// ---------------------------------------------------------------------------
+#[test]
+fn release_time_delays_service() {
+    let with_release = r#"{
+        "vehicles": [{"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10],
+                      "time_window": [0, 100000]}],
+        "jobs": [{"id": 1, "location": [10.05, 60.0], "delivery": [1], "release": 5000}]
+    }"#;
+    let no_release = r#"{
+        "vehicles": [{"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10],
+                      "time_window": [0, 100000]}],
+        "jobs": [{"id": 1, "location": [10.05, 60.0], "delivery": [1]}]
+    }"#;
+    let (pr, mr) = prep(with_release);
+    let m_rel = evaluate_route(&pr, &mr, &pr.vehicles[0], &[TaskRef::Job(0)]).unwrap();
+    let (pn, mn) = prep(no_release);
+    let m_no = evaluate_route(&pn, &mn, &pn.vehicles[0], &[TaskRef::Job(0)]).unwrap();
+
+    // The job's arrival without release is well under 5000s, so the release
+    // forces a wait until 5000 before the (instant) service + return leg.
+    assert!(m_rel.waiting_time >= 4000, "release should add a long wait: {}", m_rel.waiting_time);
+    assert!(m_rel.end_time > m_no.end_time, "release pushes the route end out");
+    assert_eq!(m_no.waiting_time, 0, "no release ⇒ no wait (regression guard)");
+}
+
+// ---------------------------------------------------------------------------
 // Backhaul: every linehaul (delivery) stop must precede any backhaul (pickup-
 // only) stop on the same route.
 // ---------------------------------------------------------------------------
