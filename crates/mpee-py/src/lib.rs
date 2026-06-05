@@ -489,7 +489,8 @@ impl Router {
         self.routing.has_routing()
     }
 
-    /// Bounding box (min_lat, min_lon, max_lat, max_lon) of the loaded graph.
+    /// Bounding box of the loaded graph as a dict
+    /// `{"min_lat", "min_lon", "max_lat", "max_lon"}`.
     fn bbox<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let (mut mn_la, mut mx_la, mut mn_lo, mut mx_lo) =
             (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
@@ -682,12 +683,22 @@ impl Router {
     }
 
     /// Solve a full VROOM-compatible problem given as a JSON string. Unlike
-    /// `optimize()`, this exposes the engine's whole constraint model:
-    /// per-vehicle capacities (multi-dimensional), skills, time windows,
-    /// `speed_factor` (mixed fleets), `max_travel_time` / `max_distance`,
-    /// and distinct start/end locations; per-job multi-dimensional
-    /// `delivery` / `pickup` (package sizes), `skills`, `time_windows`,
-    /// `service`, and `priority`. Locations carry `[lon, lat]` coords and
+    /// `optimize()`, this exposes the engine's whole constraint model.
+    ///
+    /// Per vehicle: capacity (multi-dim), `skills`, `time_window`, `speed_factor`
+    /// (mixed fleets), `max_travel_time`/`max_distance`/`max_tasks`, distinct
+    /// `start`/`end`, `breaks` (`{id, service, time_windows:[[s,e]]}`), and
+    /// `max_trips` (>1 = multi-trip/reloading). Per job: `delivery`/`pickup`
+    /// (multi-dim; a pickup-only job is a backhaul), `skills`, `time_windows`,
+    /// `service`, `setup`, `priority`, `release` (earliest service, s), `prize`
+    /// (finite ⇒ optional/prize-collecting), and `group` (visit exactly one).
+    ///
+    /// Keyword args: `constraints=[...]` (DSL strings and/or Python callables),
+    /// `max_vehicles`, `fairness_weight` + `fairness_metric` ("duration"/"load"),
+    /// `use_gpu`, `time_limit_s`. (Top-level `shipments` are not yet routed by
+    /// this binding — model each half as a job, or use the Rust API.)
+    ///
+    /// Locations carry `[lon, lat]` coords and
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
@@ -701,6 +712,18 @@ impl Router {
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
             .map_err(|e| PyRuntimeError::new_err(format!("problem JSON: {e}")))?;
         problem.validate().map_err(|e| PyRuntimeError::new_err(format!("invalid problem: {e}")))?;
+
+        // The Python binding routes only `jobs` (it snaps/indexes jobs + vehicle
+        // depots, and the result builder surfaces job stops). Top-level VROOM
+        // `shipments` are supported by the Rust core but not yet wired through
+        // this binding — error loudly rather than silently dropping them.
+        if !problem.shipments.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "shipments (paired pickup→delivery) aren't yet routed by the Python solve(); \
+                 model each half as a job for now, or use the brooom Rust API which supports \
+                 shipments natively",
+            ));
+        }
 
         let fairness_metric = match fairness_metric {
             "load" => brooom::FairnessMetric::Load,

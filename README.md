@@ -213,6 +213,20 @@ on a solution-level hook (`brooom::global_constraint`); a custom Rust/Python
 global is the escape hatch for anything else. Multi-trip and any global keep the
 solve on the CPU evaluator.
 
+**JSON field shapes & notes.** Per-job `time_windows` is a list of `[start,end]`
+(seconds), e.g. `"time_windows": [[0,3600],[7200,9000]]`; a vehicle's shift is
+the singular `"time_window": [start,end]`. A break is
+`{"id":1, "service":1800, "time_windows":[[s,e]]}`. `prize` defaults to a large
+sentinel (1e9) so unset jobs are mandatory — an *optional* job needs a finite
+prize well below that. Declaring any job `group` auto-enforces "exactly one per
+group" (no manual hook). When reading a `Solution` in Rust, a route exposes
+`vehicle_idx` (index into `problem.vehicles`), not the id — use
+`problem.vehicles[r.vehicle_idx].id`; per-stop arrival/waiting times come from
+`brooom::io::to_output(&problem, &solution, Some(&matrix))`. Native paired
+`shipments` (PDPTW) work in the Rust core; the Python `Router.solve` binding
+currently needs each half modelled as a job (it errors rather than dropping a
+shipment).
+
 ## Install (Python / CLI)
 
 The fastest way to use the engine is the `mpee` Python package — a thin CLI
