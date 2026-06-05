@@ -18,7 +18,7 @@ crate-type = ["cdylib"]
 # solver share one address space; the JSON bytes returned by
 # get_dataset_json() come straight out of the same Arc<String> that the
 # solver thread populated.
-brooom     = { path = "../brooom", default-features = false, features = ["parallel", "gpu"] }  # no ONNX/OSRM/clap — but keep rayon (parallel) + wgpu (GPU)
+brooom     = { path = "../brooom", default-features = false, features = ["parallel", "gpu", "pyspell-python"] }  # no ONNX/OSRM/clap — keep rayon + wgpu + the constraint DSL
 dijeng = { path = "../dijeng" }
 
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }

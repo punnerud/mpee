@@ -4,6 +4,8 @@
 //! and accepts Vroom-compatible JSON.
 
 pub mod constraint;
+#[cfg(feature = "pyspell")]
+pub mod pyspell;
 pub mod error;
 pub mod problem;
 pub mod matrix;

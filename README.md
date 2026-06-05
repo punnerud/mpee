@@ -97,14 +97,30 @@ evaluator, your rule genuinely shapes the search — not just a post-hoc filter.
 ```rust
 // Rust — forbid any route that visits job 20, and softly discourage night work.
 use brooom::constraint::{ConstraintGuard, Verdict};
+use brooom::matrix::HaversineMatrix;
+use brooom::solver::{solve, SolverConfig};
 use std::sync::Arc;
 
 let _guard = ConstraintGuard::install(vec![Arc::new(|r: &brooom::RouteView| {
     if r.stop_ids().contains(&20) { return Verdict::Infeasible; }
     if r.metrics.end_time > 18 * 3600 { Verdict::Penalty(500.0) } else { Verdict::Feasible }
 })]);
-let solution = brooom::solve(&mut problem, Some(&matrix), cfg);
+
+// `solve` takes a MatrixSource (not a prebuilt matrix), mutates the problem to
+// intern coordinates, and returns a Result.
+let mut problem = brooom::io::parse_input(problem_json)?;
+let solution = solve(&mut problem, Some(&HaversineMatrix::default()), SolverConfig::default())?;
+
+// Read the result: which jobs were served vs dropped. A route's `steps` are
+// `TaskRef`s; `TaskRef::description(&problem)` resolves one back to its `Job`.
+let served: Vec<u64> = solution.routes.iter()
+    .flat_map(|r| r.steps.iter().map(|s| s.description(&problem).id)).collect();
+let dropped: Vec<u64> = solution.unassigned.iter().map(|t| t.description(&problem).id).collect();
 ```
+
+> Constraints live in a process-global registry, so they're scoped to one solve
+> at a time. The `ConstraintGuard` clears them on drop; if you run solves
+> concurrently in one process (or across tests), serialize them.
 
 ```python
 # Python — same idea, passed straight to Router.solve(...).
@@ -120,6 +136,51 @@ The callback returns `False`/`Infeasible` (reject), a number (penalty added to t
 route's cost), or `None`/`True`/`Feasible` (ok). Registering any custom
 constraint keeps the solve on the CPU evaluator (the GPU megakernel can't run
 arbitrary code). Proven by [`crates/brooom/tests/custom_constraints.rs`](crates/brooom/tests/custom_constraints.rs).
+
+#### …or as a sandboxed DSL string (compiled to native code)
+
+A Python callback re-acquires the GIL on every route, so it only runs at the
+*end* of each evaluation. Write the rule as a **string** instead and it is
+parsed (Rust **or** Python expression syntax), lowered once to a tiny IR, and
+run **natively in the optimization loop** — no GIL, deterministic, sandboxed (no
+I/O, no imports, just a fixed route schema + pure builtins, with an instruction
+budget). Field-only hard bounds are even mirrored into the O(1) insertion probe,
+so they prune candidates *before* full evaluation.
+
+```rust
+// Rust syntax → compiled to native IR, installed via the same hook.
+let _g = brooom::pyspell::install_rust(&[
+    "route.travel_time <= 28800",                       // hard bound (mirrored into the probe)
+    "if route.distance > 50000 { 500 } else { 0 }",     // soft penalty
+    "!route.job_ids.contains(20)",                      // forbid a job
+])?;
+```
+
+```python
+# Python syntax string — the fast path, no per-route GIL callback.
+plan = router.solve(problem_json, constraints=[
+    "route.travel_time <= 28800",
+    "250 if route.distance > 50000 else 0",
+    "20 not in route.job_ids",
+])
+```
+
+Schema (all times in **seconds**, distances in **metres**):
+`route.{travel_time, service_time, waiting_time, setup_time, start_time,
+end_time, distance, cost, duration, stop_count, job_ids}`,
+`vehicle.{id, capacity, max_tasks, fixed, per_hour}`; builtins `len, abs, min,
+max, sum, any, all, round, int, float, bool` (+ `contains` / `in`) — no other
+calls, imports, or I/O are allowed. A `bool` result is feasible/infeasible; a
+number `> 0` is a soft penalty (`<= 0` is feasible). Python chained comparisons
+(`0 < route.travel_time < 28800`) work; the Rust form also accepts `let`
+bindings before the final expression (`let d = route.end_time - route.start_time; d <= 3600`).
+A bad string is reported as a compile error **before** any solve — never a panic
+(in Python it's raised as `RuntimeError`). Feature-gated
+(`pyspell` for Rust syntax, `pyspell-python` adds Python); the default build pulls no new
+crates. The genuinely remaining gap vs Timefold is *cross-route / global*
+constraints — this hook is per route. Proven by
+[`crates/brooom/tests/pyspell_constraints.rs`](crates/brooom/tests/pyspell_constraints.rs);
+design in [`crates/brooom/docs/constraint-dsl-design.md`](crates/brooom/docs/constraint-dsl-design.md).
 
 ## Install (Python / CLI)
 

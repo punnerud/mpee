@@ -70,9 +70,63 @@ pub fn set_constraints(list: Vec<Arc<CustomConstraintFn>>) {
     crate::solution::eval_cache_invalidate();
 }
 
-/// Remove all custom constraints.
+/// Remove all custom constraints (and any probe bounds they registered).
 pub fn clear_constraints() {
     set_constraints(Vec::new());
+    set_probe_bounds(Vec::new());
+}
+
+/// A whole-route metric the fast insertion probe (`eval.rs`) can check cheaply.
+#[derive(Debug, Clone, Copy)]
+pub enum ProbeMetric {
+    TravelTime,
+    Distance,
+    Duration,
+}
+
+/// A hard upper bound on a probe-visible metric, mirrored from a DSL constraint
+/// so the O(1) insertion probe can prune candidates before full evaluation.
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeBound {
+    pub metric: ProbeMetric,
+    pub max: f64,
+}
+
+static HAS_PROBE: AtomicBool = AtomicBool::new(false);
+static PROBE_BOUNDS: RwLock<Vec<ProbeBound>> = RwLock::new(Vec::new());
+
+/// Register the probe bounds derived from the active constraints. Cleared by
+/// [`clear_constraints`].
+pub fn set_probe_bounds(list: Vec<ProbeBound>) {
+    let mut g = PROBE_BOUNDS.write().unwrap();
+    HAS_PROBE.store(!list.is_empty(), Ordering::SeqCst);
+    *g = list;
+}
+
+/// Whether any probe bound is registered (cheap, lock-free).
+#[inline]
+pub fn has_probe_bounds() -> bool {
+    HAS_PROBE.load(Ordering::Relaxed)
+}
+
+/// True when a route with these whole-route totals already breaks a registered
+/// hard probe bound — lets `eval.rs::precompute` reject early.
+pub fn probe_violates(travel_time: i64, distance: i64, duration: i64) -> bool {
+    if !has_probe_bounds() {
+        return false;
+    }
+    let g = PROBE_BOUNDS.read().unwrap();
+    for b in g.iter() {
+        let v = match b.metric {
+            ProbeMetric::TravelTime => travel_time as f64,
+            ProbeMetric::Distance => distance as f64,
+            ProbeMetric::Duration => duration as f64,
+        };
+        if v > b.max {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether any custom constraint is currently registered (cheap, lock-free).

@@ -203,6 +203,12 @@ pub fn precompute(
         distance_total += matrix.distance(p, e);
     }
     if t > vw.end { return None; }
+    // Mirror of probe-safe DSL hard bounds (travel/distance/duration): prune the
+    // candidate here, before the full evaluator runs. Pruning only — never
+    // rejects a feasible route; `evaluate_route` remains the authority.
+    if crate::constraint::probe_violates(travel_total, distance_total, t - vw.start) {
+        return None;
+    }
     pos[positions - 1].depart = t;
 
     // load_at needs one more entry to cover the end-depot position; the load

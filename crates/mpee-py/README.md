@@ -266,6 +266,41 @@ small/medium instances; registering any constraint also keeps the solve on the
 CPU. Same hook is available natively (and faster) in Rust via
 `brooom::constraint`.
 
+> **Heads-up on callables:** a callable that raises, or returns something other
+> than `bool` / number / `None`, is treated as *allow* (the exception is printed
+> to stderr, once per worker thread) — a broken constraint silently stops
+> enforcing rather than aborting the solve. For rules you must be able to trust,
+> prefer the **DSL string** form below: it's validated up front (a bad string
+> raises immediately, before any routing) and can't throw mid-solve.
+
+**Faster: a constraint as a string.** Pass a **string** instead of a callable and
+it is compiled once to native code (Python expression syntax) and run with no
+per-route GIL callback — and field-only hard bounds are mirrored into the
+insertion probe. No I/O or imports; just the route schema + pure builtins.
+
+```python
+plan = router.solve(problem_json, constraints=[
+    "route.travel_time <= 28800",          # hard bound (mirrored into the probe)
+    "250 if route.distance > 50000 else 0",# soft penalty
+    "20 not in route.job_ids",             # forbid a job
+])
+```
+
+Schema (times in **seconds**, distances in **metres**):
+`route.{travel_time, service_time, waiting_time, setup_time, start_time,
+end_time, distance, cost, duration, stop_count, job_ids}` and
+`vehicle.{id, capacity, max_tasks, fixed, per_hour}`; a bool result is
+feasible/infeasible, a number `> 0` is a soft penalty. Chained comparisons
+(`0 < route.travel_time < 28800`) work. A malformed string raises `RuntimeError`
+**before** any routing. Strings and callables can be mixed in the same
+`constraints=[...]` list.
+
+> **Three field namespaces, don't mix them up.** A *callable* receives a dict
+> `route["job_ids"] / ["duration_s"] / ["distance_m"] / ["cost"] / …`; a *DSL
+> string* uses attribute syntax `route.travel_time / .distance / .job_ids`; and
+> the **result** of `solve()` is different again — `plan["routes"][i]["stops"][j]["job_id"]`
+> for served stops and `plan["unassigned"]` as a plain list of job ids.
+
 ## Plan a work week (multi-day, multiple depots)
 
 Model a week by giving each driver **one vehicle per day**, each bound to that

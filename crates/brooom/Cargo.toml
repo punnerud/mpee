@@ -41,6 +41,13 @@ neural   = ["ort", "ndarray"]
 parallel = ["dep:rayon"]
 gpu      = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 mobile   = []
+# Constraint DSL: write constraints as code and run them native in the solver.
+# `pyspell`        Rust-expression front-end via `syn` (already in the tree as a
+#              build-dep; adds no new crates, just rebuilds syn with `full`).
+# `pyspell-python` adds a Python-expression front-end via rustpython-parser (the
+#              only genuinely new dependency tree — opt-in).
+pyspell        = ["dep:syn"]
+pyspell-python = ["pyspell", "dep:rustpython-parser"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -64,6 +71,9 @@ ndarray = { version = "0.17", optional = true }
 wgpu = { version = "0.20", optional = true }
 pollster = { version = "0.3", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
+# Constraint-DSL front-ends (optional; see the `pyspell` / `pyspell-python` features).
+syn = { version = "2", features = ["full", "parsing"], optional = true }
+rustpython-parser = { version = "0.4", optional = true }
 
 # On wasm, rand's getrandom backend needs the browser crypto ("js") source.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

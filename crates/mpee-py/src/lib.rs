@@ -701,11 +701,31 @@ impl Router {
         problem.validate().map_err(|e| PyRuntimeError::new_err(format!("invalid problem: {e}")))?;
 
         // Install any custom constraints (code) for the duration of this solve.
-        // The guard clears the global registry when it drops at method end.
-        let _cguard = constraints.map(|cs| {
-            let wrapped: Vec<_> = cs.into_iter().map(wrap_py_constraint).collect();
-            brooom::constraint::ConstraintGuard::install(wrapped)
-        });
+        // Each item is either a Python callable (invoked per route) or a string
+        // in the constraint DSL (compiled once to native IR — far faster, and it
+        // can be mirrored into the insertion probe). The guard clears the global
+        // registry when it drops at method end.
+        let _cguard = match constraints {
+            None => None,
+            Some(cs) => {
+                let mut closures = Vec::with_capacity(cs.len());
+                let mut bounds = Vec::new();
+                for obj in cs {
+                    if let Ok(src) = obj.extract::<String>(py) {
+                        let (c, b) = brooom::pyspell::compiled_python(&src)
+                            .map_err(|e| PyRuntimeError::new_err(format!("constraint: {e}")))?;
+                        if let Some(b) = b {
+                            bounds.push(b);
+                        }
+                        closures.push(c);
+                    } else {
+                        closures.push(wrap_py_constraint(obj));
+                    }
+                }
+                brooom::constraint::set_probe_bounds(bounds);
+                Some(brooom::constraint::ConstraintGuard::install(closures))
+            }
+        };
 
         // Snap every vehicle start/end + job coord, build the matrix, and
         // rewrite the problem's Locations to matrix indices (off the GIL).
