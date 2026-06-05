@@ -95,11 +95,16 @@ impl TaskRef {
 /// objective-weight multiplier the solver applies *outside* `evaluate_route`):
 ///   `cost == cost_travel + cost_span + cost_custom`.
 ///
-/// NOTE: this is *weighted scalarization*, not true lexicographic
-/// multi-objective optimisation. The LS loop still minimises one number; the
-/// components only let you shape and inspect that number. A real lexicographic
-/// solver (phase 1: minimise vehicle count, phase 2: minimise cost) would need
-/// a two-phase search and is out of scope here.
+/// NOTE: within a single solve pass this is *weighted scalarization*, not true
+/// lexicographic optimisation — the LS loop minimises one number; the
+/// components only let you shape and inspect that number.
+///
+/// For a genuine count-then-cost ordering, set
+/// `SolverConfig::objective_mode = ObjectiveMode::Lexicographic { primary:
+/// Vehicles, secondary: Cost }`: that runs a two-phase driver (phase 1 minimises
+/// vehicle count V*, phase 2 minimises cost with `max_vehicles(V*)` pinned as a
+/// hard cap). BEST-EFFORT caveat: V* is the metaheuristic's best-found count,
+/// not a proven optimum, and the stack is fixed at two levels (count → cost).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RouteMetrics {
     pub start_time: Time,
