@@ -6,7 +6,10 @@
 use std::collections::HashMap;
 
 use super::error::DslError;
-use super::ir::{Builtin, CmpOp, Expr, Field, LetBinding, ListField, Program, Value, DEFAULT_MAX_STEPS};
+use super::ir::{
+    Builtin, CmpOp, Expr, Field, GlobalProgram, LetBinding, ListField, Program, SolutionField,
+    Value, DEFAULT_MAX_STEPS,
+};
 
 pub(crate) struct Ctx {
     pub locals: HashMap<String, u16>,
@@ -57,6 +60,21 @@ pub(crate) fn resolve_field(base: &str, field: &str, ctx: &mut Ctx) -> Result<Ex
             "capacity" => Ok(Expr::ListField(ListField::VehicleCapacity)),
             _ => Err(DslError::UnknownField { base: "vehicle", field: field.to_string() }),
         },
+        // Cross-route fields, only meaningful inside a global program. The
+        // evaluator's context (route vs solution) decides whether they read.
+        "solution" => {
+            let sf = |s: SolutionField| Ok(Expr::SolutionField(s));
+            match field {
+                "vehicles_used" => sf(SolutionField::VehiclesUsed),
+                "route_count" => sf(SolutionField::RouteCount),
+                "unassigned_count" => sf(SolutionField::UnassignedCount),
+                "cost" => sf(SolutionField::SolutionCost),
+                "total_load" => sf(SolutionField::TotalLoad),
+                "max_route_load" => sf(SolutionField::MaxRouteLoad),
+                "average_duration" => sf(SolutionField::AverageDuration),
+                _ => Err(DslError::UnknownField { base: "solution", field: field.to_string() }),
+            }
+        }
         _ => Err(DslError::UnknownName(base.to_string())),
     }
 }
@@ -94,6 +112,12 @@ pub(crate) fn finish(ctx: Ctx, ret: Expr) -> Program {
         reads: ctx.reads,
         mirror_bound,
     }
+}
+
+/// Assemble a [`GlobalProgram`] from a finished context and return expression.
+/// Globals run only on the cold path, so they carry no probe metadata.
+pub(crate) fn finish_global(ctx: Ctx, ret: Expr) -> GlobalProgram {
+    GlobalProgram { body: ctx.body, ret, n_locals: ctx.next_slot, max_steps: DEFAULT_MAX_STEPS }
 }
 
 /// A single `field <= const` / `field < const` on a probe-visible field can be

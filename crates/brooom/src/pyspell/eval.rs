@@ -7,14 +7,72 @@
 use std::sync::Arc;
 
 use crate::constraint::{RouteView, Verdict};
+use crate::global_constraint::SolutionView;
 
 use super::error::DslError;
-use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, Field, ListField, Program, UnOp, Value};
+use super::ir::{
+    BinOp, BoolOp, Builtin, CmpOp, Expr, Field, GlobalProgram, ListField, Program, SolutionField,
+    UnOp, Value,
+};
 
-struct Frame<'a> {
+/// The data a tree-walk reads its leaf fields from. A per-route program walks a
+/// [`RouteFrame`] (reads `route.*`/`vehicle.*`); a global program walks a
+/// [`GlobalFrame`] (reads `solution.*`). The shared `eval` dispatch and all the
+/// builtins are written once against this trait.
+trait Frame {
+    fn budget(&mut self) -> &mut u32;
+    fn locals(&self) -> &[Value];
+    fn read_field(&self, fld: Field) -> Result<Value, DslError>;
+    fn read_list_field(&self, lf: ListField) -> Result<Value, DslError>;
+    fn read_solution_field(&self, sf: SolutionField) -> Result<Value, DslError>;
+}
+
+struct RouteFrame<'a> {
     view: &'a RouteView<'a>,
     locals: Vec<Value>,
     budget: u32,
+}
+
+impl Frame for RouteFrame<'_> {
+    fn budget(&mut self) -> &mut u32 {
+        &mut self.budget
+    }
+    fn locals(&self) -> &[Value] {
+        &self.locals
+    }
+    fn read_field(&self, fld: Field) -> Result<Value, DslError> {
+        Ok(read_field(fld, self.view))
+    }
+    fn read_list_field(&self, lf: ListField) -> Result<Value, DslError> {
+        Ok(read_list_field(lf, self.view))
+    }
+    fn read_solution_field(&self, _sf: SolutionField) -> Result<Value, DslError> {
+        Err(DslError::Type("`solution.*` is not available in a per-route constraint".into()))
+    }
+}
+
+struct GlobalFrame<'a> {
+    view: &'a SolutionView<'a>,
+    locals: Vec<Value>,
+    budget: u32,
+}
+
+impl Frame for GlobalFrame<'_> {
+    fn budget(&mut self) -> &mut u32 {
+        &mut self.budget
+    }
+    fn locals(&self) -> &[Value] {
+        &self.locals
+    }
+    fn read_field(&self, _fld: Field) -> Result<Value, DslError> {
+        Err(DslError::Type("`route.*`/`vehicle.*` is not available in a global constraint".into()))
+    }
+    fn read_list_field(&self, _lf: ListField) -> Result<Value, DslError> {
+        Err(DslError::Type("list fields are not available in a global constraint".into()))
+    }
+    fn read_solution_field(&self, sf: SolutionField) -> Result<Value, DslError> {
+        Ok(read_solution_field(sf, self.view))
+    }
 }
 
 /// Evaluate a compiled program against one finished route, mapping its final
@@ -22,7 +80,7 @@ struct Frame<'a> {
 /// * `bool`   → `Feasible` / `Infeasible`
 /// * number   → `<= 0` is `Feasible`, `> 0` is `Penalty(x)`
 pub fn run(program: &Program, view: &RouteView) -> Result<Verdict, DslError> {
-    let mut f = Frame {
+    let mut f = RouteFrame {
         view,
         locals: vec![Value::Int(0); program.n_locals as usize],
         budget: program.max_steps,
@@ -32,6 +90,28 @@ pub fn run(program: &Program, view: &RouteView) -> Result<Verdict, DslError> {
         f.locals[b.slot as usize] = v;
     }
     let out = eval(&program.ret, &mut f)?;
+    value_to_verdict(out)
+}
+
+/// Evaluate a compiled global program against the whole candidate solution,
+/// mapping its final value to a `Verdict` with the same contract as [`run`].
+/// This is the cold-path entry used by `recompute_summary`.
+pub fn run_global(program: &GlobalProgram, view: &SolutionView) -> Result<Verdict, DslError> {
+    let mut f = GlobalFrame {
+        view,
+        locals: vec![Value::Int(0); program.n_locals as usize],
+        budget: program.max_steps,
+    };
+    for b in &program.body {
+        let v = eval(&b.expr, &mut f)?;
+        f.locals[b.slot as usize] = v;
+    }
+    let out = eval(&program.ret, &mut f)?;
+    value_to_verdict(out)
+}
+
+/// Shared result contract: bool → feasibility; number → `<= 0` feasible else penalty.
+fn value_to_verdict(out: Value) -> Result<Verdict, DslError> {
     Ok(match out {
         Value::Bool(true) => Verdict::Feasible,
         Value::Bool(false) => Verdict::Infeasible,
@@ -53,16 +133,20 @@ pub fn run(program: &Program, view: &RouteView) -> Result<Verdict, DslError> {
     })
 }
 
-fn eval(e: &Expr, f: &mut Frame) -> Result<Value, DslError> {
-    if f.budget == 0 {
-        return Err(DslError::Budget);
+fn eval(e: &Expr, f: &mut dyn Frame) -> Result<Value, DslError> {
+    {
+        let b = f.budget();
+        if *b == 0 {
+            return Err(DslError::Budget);
+        }
+        *b -= 1;
     }
-    f.budget -= 1;
     match e {
         Expr::Const(v) => Ok(v.clone()),
-        Expr::Local(i) => Ok(f.locals[*i as usize].clone()),
-        Expr::Field(fld) => Ok(read_field(*fld, f.view)),
-        Expr::ListField(lf) => Ok(read_list_field(*lf, f.view)),
+        Expr::Local(i) => Ok(f.locals()[*i as usize].clone()),
+        Expr::Field(fld) => f.read_field(*fld),
+        Expr::SolutionField(sf) => f.read_solution_field(*sf),
+        Expr::ListField(lf) => f.read_list_field(*lf),
         Expr::Bin(op, a, b) => {
             let (x, y) = (eval(a, f)?, eval(b, f)?);
             num_binop(*op, x, y)
@@ -145,6 +229,34 @@ fn read_list_field(lf: ListField, view: &RouteView) -> Value {
             let cap: Arc<[Value]> =
                 view.vehicle.capacity.iter().map(|&c| Value::Int(c)).collect();
             Value::List(cap)
+        }
+    }
+}
+
+fn read_solution_field(sf: SolutionField, view: &SolutionView) -> Value {
+    match sf {
+        SolutionField::VehiclesUsed => Value::Int(view.vehicles_used() as i64),
+        SolutionField::RouteCount => Value::Int(view.route_count() as i64),
+        SolutionField::UnassignedCount => Value::Int(view.unassigned.len() as i64),
+        SolutionField::SolutionCost => {
+            Value::Float((0..view.route_count()).map(|i| view.cost(i)).sum())
+        }
+        SolutionField::TotalLoad => {
+            Value::Int((0..view.route_count()).map(|i| view.load(i)).sum())
+        }
+        SolutionField::MaxRouteLoad => {
+            Value::Int((0..view.route_count()).map(|i| view.load(i)).max().unwrap_or(0))
+        }
+        SolutionField::AverageDuration => {
+            let used: Vec<i64> = (0..view.route_count())
+                .filter(|&i| !view.routes[i].steps.is_empty())
+                .map(|i| view.duration(i))
+                .collect();
+            if used.is_empty() {
+                Value::Float(0.0)
+            } else {
+                Value::Float(used.iter().sum::<i64>() as f64 / used.len() as f64)
+            }
         }
     }
 }
@@ -239,7 +351,7 @@ fn index(list: Value, idx: Value) -> Result<Value, DslError> {
     Ok(items[real as usize].clone())
 }
 
-fn call_builtin(b: Builtin, args: &[Expr], f: &mut Frame) -> Result<Value, DslError> {
+fn call_builtin(b: Builtin, args: &[Expr], f: &mut dyn Frame) -> Result<Value, DslError> {
     let name = builtin_name(b);
     // Evaluate args once.
     let mut vals: Vec<Value> = Vec::with_capacity(args.len());
@@ -660,6 +772,70 @@ mod tests {
         let steps = [TaskRef::Job(0)];
         let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m };
         assert_eq!(run(&p, &view), Err(DslError::Budget));
+    }
+
+    fn route(vehicle_idx: usize, steps: Vec<TaskRef>, m: RouteMetrics) -> crate::solution::Route {
+        crate::solution::Route { vehicle_idx, steps, metrics: m }
+    }
+
+    fn gprog(ret: Expr) -> GlobalProgram {
+        GlobalProgram { body: vec![], ret, n_locals: 0, max_steps: DEFAULT_MAX_STEPS }
+    }
+
+    #[test]
+    fn global_reads_solution_fields() {
+        // Two routes (one with both jobs, one empty) and one unassigned task.
+        let mut problem = problem();
+        problem.vehicles = vec![vehicle()];
+        let r0 = route(0, vec![TaskRef::Job(0), TaskRef::Job(1)], metrics());
+        let r1 = route(0, vec![], metrics()); // empty route slot
+        let routes = [r0, r1];
+        let unassigned = [TaskRef::Job(0)];
+        let view = SolutionView { problem: &problem, routes: &routes, unassigned: &unassigned };
+
+        // vehicles_used == 1 (only one non-empty route)
+        assert_eq!(
+            run_global(&gprog(Expr::SolutionField(SolutionField::VehiclesUsed)), &view).unwrap(),
+            Verdict::Penalty(1.0)
+        );
+        // route_count == 2 (slots, including the empty one)
+        assert_eq!(
+            run_global(&gprog(Expr::SolutionField(SolutionField::RouteCount)), &view).unwrap(),
+            Verdict::Penalty(2.0)
+        );
+        // unassigned_count == 1
+        assert_eq!(
+            run_global(&gprog(Expr::SolutionField(SolutionField::UnassignedCount)), &view).unwrap(),
+            Verdict::Penalty(1.0)
+        );
+        // total_load == 2 (each job has delivery [1])
+        assert_eq!(
+            run_global(&gprog(Expr::SolutionField(SolutionField::TotalLoad)), &view).unwrap(),
+            Verdict::Penalty(2.0)
+        );
+        // average_duration == 1000 (only the non-empty route counts; 1100-100)
+        assert_eq!(
+            run_global(&gprog(Expr::SolutionField(SolutionField::AverageDuration)), &view).unwrap(),
+            Verdict::Penalty(1000.0)
+        );
+        // A hard bound: vehicles_used <= 0 is violated → Infeasible.
+        let bound = Expr::Cmp(
+            CmpOp::Le,
+            Box::new(Expr::SolutionField(SolutionField::VehiclesUsed)),
+            Box::new(Expr::Const(Value::Int(0))),
+        );
+        assert_eq!(run_global(&gprog(bound), &view).unwrap(), Verdict::Infeasible);
+    }
+
+    #[test]
+    fn global_program_rejects_route_fields() {
+        // A `route.*` field has no meaning in a global program → eval error.
+        let problem = problem();
+        let routes: [crate::solution::Route; 0] = [];
+        let unassigned: [TaskRef; 0] = [];
+        let view = SolutionView { problem: &problem, routes: &routes, unassigned: &unassigned };
+        let p = gprog(Expr::Field(Field::RouteDistance));
+        assert!(matches!(run_global(&p, &view), Err(DslError::Type(_))));
     }
 
     #[test]

@@ -9,14 +9,23 @@
 use rustpython_parser::{ast, Parse};
 
 use super::error::DslError;
-use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, UnOp, Value};
-use super::lower::{builtin_from, finish, resolve_field, Ctx};
+use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, UnOp, Value};
+use super::lower::{builtin_from, finish, finish_global, resolve_field, Ctx};
 
 pub fn compile_python(src: &str) -> Result<super::ir::Program, DslError> {
     let expr = ast::Expr::parse(src, "<constraint>").map_err(|e| DslError::Parse(e.to_string()))?;
     let mut ctx = Ctx::new();
     let ret = lower(&expr, &mut ctx)?;
     Ok(finish(ctx, ret))
+}
+
+/// Compile a **global** (cross-route) constraint from Python-expression syntax.
+/// It reads `solution.*` fields and is evaluated against the whole solution.
+pub fn compile_python_global(src: &str) -> Result<GlobalProgram, DslError> {
+    let expr = ast::Expr::parse(src, "<constraint>").map_err(|e| DslError::Parse(e.to_string()))?;
+    let mut ctx = Ctx::new();
+    let ret = lower(&expr, &mut ctx)?;
+    Ok(finish_global(ctx, ret))
 }
 
 fn lower(e: &ast::Expr, ctx: &mut Ctx) -> Result<Expr, DslError> {
@@ -27,7 +36,7 @@ fn lower(e: &ast::Expr, ctx: &mut Ctx) -> Result<Expr, DslError> {
             let name = n.id.as_str();
             if let Some(&slot) = ctx.locals.get(name) {
                 Ok(Expr::Local(slot))
-            } else if name == "route" || name == "vehicle" {
+            } else if name == "route" || name == "vehicle" || name == "solution" {
                 Err(DslError::Forbidden(format!(
                     "`{name}` must be used with a field, e.g. `{name}.<field>`"
                 )))

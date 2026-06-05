@@ -5,10 +5,25 @@
 use syn::{BinOp as SBin, Expr as SExpr, Lit, Member, Stmt, UnOp as SUn};
 
 use super::error::DslError;
-use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, LetBinding, Program, UnOp, Value};
-use super::lower::{builtin_from, finish, resolve_field, Ctx};
+use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, LetBinding, Program, UnOp, Value};
+use super::lower::{builtin_from, finish, finish_global, resolve_field, Ctx};
 
 pub fn compile_rust(src: &str) -> Result<Program, DslError> {
+    let (ctx, ret) = compile_body(src)?;
+    Ok(finish(ctx, ret))
+}
+
+/// Compile a **global** (cross-route) constraint from Rust-expression syntax. It
+/// reads `solution.*` fields and is evaluated against the whole solution.
+pub fn compile_rust_global(src: &str) -> Result<GlobalProgram, DslError> {
+    let (ctx, ret) = compile_body(src)?;
+    Ok(finish_global(ctx, ret))
+}
+
+/// Shared parse + lower: `let` bindings then a trailing expression. The same
+/// expression subset serves both per-route and global programs; which fields
+/// are legal is decided at evaluation time by the frame's context.
+fn compile_body(src: &str) -> Result<(Ctx, Expr), DslError> {
     // Wrap as a block so `let` bindings + a trailing expression parse.
     let block = syn::parse_str::<syn::Block>(&format!("{{ {src} }}"))
         .map_err(|e| DslError::Parse(e.to_string()))?;
@@ -54,7 +69,7 @@ pub fn compile_rust(src: &str) -> Result<Program, DslError> {
     }
 
     let ret = ret.ok_or_else(|| DslError::Parse("no trailing expression to return".into()))?;
-    Ok(finish(ctx, ret))
+    Ok((ctx, ret))
 }
 
 fn pat_ident(pat: &syn::Pat) -> Result<String, DslError> {
@@ -122,7 +137,7 @@ fn lower(e: &SExpr, ctx: &mut Ctx) -> Result<Expr, DslError> {
                 .ok_or_else(|| DslError::Forbidden("path expression".into()))?;
             if let Some(&slot) = ctx.locals.get(&name) {
                 Ok(Expr::Local(slot))
-            } else if name == "route" || name == "vehicle" {
+            } else if name == "route" || name == "vehicle" || name == "solution" {
                 Err(DslError::Forbidden(format!(
                     "`{name}` must be used with a field, e.g. `{name}.<field>`"
                 )))

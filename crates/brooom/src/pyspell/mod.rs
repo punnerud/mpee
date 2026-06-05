@@ -12,9 +12,18 @@
 //! * number   → `<= 0` is feasible, `> 0` is a soft penalty added to the cost
 //!
 //! ## Schema (the only inputs)
-//! `route.{travel_time, service_time, waiting_time, setup_time, start_time,
-//! end_time, distance, cost, duration, stop_count, job_ids}` and
-//! `vehicle.{id, capacity, max_tasks, fixed, per_hour}`.
+//! Per-route programs read `route.{travel_time, service_time, waiting_time,
+//! setup_time, start_time, end_time, distance, cost, duration, stop_count,
+//! job_ids}` and `vehicle.{id, capacity, max_tasks, fixed, per_hour}`.
+//!
+//! ## Global (cross-route) constraints
+//! [`install_global_rust`] / [`install_global_python`] compile a program that
+//! reads the `solution.*` namespace — `solution.{vehicles_used, route_count,
+//! unassigned_count, cost, total_load, max_route_load, average_duration}` — and
+//! runs once per `recompute_summary` (the cold path), never in the insertion
+//! probe. This mirrors the built-in `max_vehicles`/`fairness` closures but is
+//! authored in text. A single expression reads either the per-route namespace
+//! or `solution.*`, never both.
 
 pub mod error;
 pub mod eval;
@@ -27,9 +36,12 @@ pub mod py_frontend;
 use std::sync::Arc;
 
 use crate::constraint::{ConstraintGuard, CustomConstraintFn, ProbeBound, RouteView, Verdict};
+use crate::global_constraint::{
+    GlobalConstraintFn, GlobalConstraintGuard, SolutionView, HARD,
+};
 
 pub use error::DslError;
-pub use ir::Program;
+pub use ir::{GlobalProgram, Program};
 
 /// Compile + install a set of Rust-syntax constraints for the duration of the
 /// returned guard, registering their probe bounds so the fast insertion probe
@@ -104,5 +116,42 @@ fn wrap(program: Arc<Program>) -> Arc<CustomConstraintFn> {
         Ok(v) => v,
         // A runtime/sandbox error rejects the route (conservative, never panics).
         Err(_) => Verdict::Infeasible,
+    })
+}
+
+/// Compile + install a set of **global** (cross-route) constraints written in
+/// Rust-expression syntax for the duration of the returned guard. Each reads
+/// `solution.*` fields and runs once per `recompute_summary` (the cold path),
+/// not inside the insertion probe. The guard clears them on drop.
+pub fn install_global_rust(srcs: &[&str]) -> Result<GlobalConstraintGuard, DslError> {
+    let mut closures = Vec::with_capacity(srcs.len());
+    for s in srcs {
+        let program = Arc::new(rust_frontend::compile_rust_global(s)?);
+        closures.push(wrap_global(program));
+    }
+    Ok(GlobalConstraintGuard::install(closures))
+}
+
+/// Python-syntax counterpart of [`install_global_rust`].
+#[cfg(feature = "pyspell-python")]
+pub fn install_global_python(srcs: &[&str]) -> Result<GlobalConstraintGuard, DslError> {
+    let mut closures = Vec::with_capacity(srcs.len());
+    for s in srcs {
+        let program = Arc::new(py_frontend::compile_python_global(s)?);
+        closures.push(wrap_global(program));
+    }
+    Ok(GlobalConstraintGuard::install(closures))
+}
+
+/// Wrap a compiled global program as an additive solution-level penalty. The
+/// `Verdict` contract is reused: `false`/`Infeasible` is a hard violation
+/// ([`HARD`]); a positive number is its own soft penalty; feasible adds nothing.
+fn wrap_global(program: Arc<GlobalProgram>) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |view: &SolutionView| match eval::run_global(&program, view) {
+        Ok(Verdict::Feasible) => 0.0,
+        Ok(Verdict::Infeasible) => HARD,
+        Ok(Verdict::Penalty(x)) => x,
+        // A runtime/sandbox error is treated as a hard violation (never panics).
+        Err(_) => HARD,
     })
 }
