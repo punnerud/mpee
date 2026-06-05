@@ -1,0 +1,12 @@
+{
+  "description": "tight time-window chain (propagation-hard for greedy+LS)",
+  "vehicles": [
+    {"id": 1, "start": [10.75, 59.91], "end": [10.75, 59.91], "capacity": [10]}
+  ],
+  "jobs": [
+    {"id": 11, "location": [10.76, 59.91], "service": 300, "delivery": [1], "time_windows": [[3000, 3300]]},
+    {"id": 12, "location": [10.77, 59.92], "service": 300, "delivery": [1], "time_windows": [[600, 900]]},
+    {"id": 13, "location": [10.74, 59.90], "service": 300, "delivery": [1], "time_windows": [[1800, 2100]]},
+    {"id": 14, "location": [10.78, 59.93], "service": 300, "delivery": [1], "time_windows": [[4200, 4500]]}
+  ]
+}
