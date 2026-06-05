@@ -150,6 +150,16 @@ pub struct VehicleIn {
     pub fixed: Option<Cost>,
     #[serde(default)]
     pub per_hour: Option<Cost>,
+    /// Cost per second of route span. Absent ⇒ 0.0 (no span cost), reproducing
+    /// today's behaviour. See `problem::Vehicle::span_cost`.
+    #[serde(default)]
+    pub span_cost: Option<Cost>,
+    /// Weight on the per-distance travel cost. Absent ⇒ 0.0.
+    #[serde(default)]
+    pub distance_weight: Option<f64>,
+    /// Weight on the per-hour travel-time cost. Absent ⇒ 1.0 (unchanged).
+    #[serde(default)]
+    pub time_weight: Option<f64>,
     #[serde(default)]
     pub breaks: Vec<BreakIn>,
     #[serde(default = "default_max_trips_in")]
@@ -218,6 +228,9 @@ fn vehicle_from(v: &VehicleIn) -> Vehicle {
         max_distance: v.max_distance,
         fixed: v.fixed.unwrap_or(0.0),
         per_hour: v.per_hour.unwrap_or(3600.0),
+        span_cost: v.span_cost.unwrap_or(0.0),
+        distance_weight: v.distance_weight.unwrap_or(0.0),
+        time_weight: v.time_weight.unwrap_or(1.0),
         profile: v.profile.clone().unwrap_or_else(|| "car".to_string()),
         breaks: v.breaks.iter().map(|b| crate::problem::Break {
             id: b.id,

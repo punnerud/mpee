@@ -27,6 +27,15 @@ pub enum Field {
     RouteEndTime,
     RouteDistance,
     RouteCost,
+    /// Travel/time/distance + fixed component of `cost`.
+    RouteCostTravel,
+    /// Route-span component of `cost` (`span_cost × span`).
+    RouteCostSpan,
+    /// Custom-constraint penalty component of `cost`.
+    RouteCostCustom,
+    /// Derived: `end_time - start_time` (same value as `RouteDuration`, but
+    /// named to match the per-vehicle `span_cost` semantics).
+    RouteSpan,
     /// Derived: `end_time - start_time`.
     RouteDuration,
     /// Derived: number of stops on the route.

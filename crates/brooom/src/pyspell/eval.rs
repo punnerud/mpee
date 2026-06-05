@@ -125,6 +125,10 @@ fn read_field(fld: Field, view: &RouteView) -> Value {
         Field::RouteEndTime => Value::Int(m.end_time),
         Field::RouteDistance => Value::Int(m.distance),
         Field::RouteCost => Value::Float(m.cost),
+        Field::RouteCostTravel => Value::Float(m.cost_travel),
+        Field::RouteCostSpan => Value::Float(m.cost_span),
+        Field::RouteCostCustom => Value::Float(m.cost_custom),
+        Field::RouteSpan => Value::Int(m.end_time - m.start_time),
         Field::RouteDuration => Value::Int(m.end_time - m.start_time),
         Field::RouteStopCount => Value::Int(view.steps.len() as i64),
         Field::VehicleId => Value::Int(v.id as i64),
@@ -504,6 +508,9 @@ mod tests {
             max_distance: None,
             fixed: 10.0,
             per_hour: 3600.0,
+            span_cost: 0.0,
+            distance_weight: 0.0,
+            time_weight: 1.0,
             profile: "car".into(),
             breaks: vec![],
             max_trips: 1,
@@ -521,6 +528,9 @@ mod tests {
             setup_time: 0,
             distance: 5000,
             cost: 42.0,
+            cost_travel: 42.0,
+            cost_span: 0.0,
+            cost_custom: 0.0,
         }
     }
 

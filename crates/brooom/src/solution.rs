@@ -87,6 +87,18 @@ impl TaskRef {
 }
 
 /// Computed metrics for a single route. All times are in seconds.
+///
+/// `cost` is the single aggregated scalar the local search minimises. The
+/// `cost_*` fields below decompose that scalar into named components purely for
+/// reporting / DSL access — they always sum to `cost` (modulo the global
+/// objective-weight multiplier the solver applies *outside* `evaluate_route`):
+///   `cost == cost_travel + cost_span + cost_custom`.
+///
+/// NOTE: this is *weighted scalarization*, not true lexicographic
+/// multi-objective optimisation. The LS loop still minimises one number; the
+/// components only let you shape and inspect that number. A real lexicographic
+/// solver (phase 1: minimise vehicle count, phase 2: minimise cost) would need
+/// a two-phase search and is out of scope here.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RouteMetrics {
     pub start_time: Time,
@@ -96,7 +108,15 @@ pub struct RouteMetrics {
     pub waiting_time: Time,
     pub setup_time: Time,
     pub distance: i64,
+    /// Aggregated scalar minimised by local search (the sum of the components).
     pub cost: Cost,
+    /// Travel/time/distance + fixed component (the historical cost basis).
+    pub cost_travel: Cost,
+    /// Route-span component (`span_cost × route span`). 0 unless `span_cost` set.
+    pub cost_span: Cost,
+    /// Custom per-route constraint penalty (from `constraint::apply`). 0 unless
+    /// a custom/DSL constraint added one.
+    pub cost_custom: Cost,
 }
 
 /// One route in the final solution.
@@ -556,11 +576,25 @@ fn evaluate_route_with_buf(
     }
 
     let route_dur = t - vw.start;
-    let cost = vehicle.fixed
-        + (travel_time as f64) * (vehicle.per_hour / 3600.0).max(0.0)
+
+    // --- Weighted-scalarization cost shaping --------------------------------
+    // The components below are summed into a single `cost` scalar; the LS loop
+    // is UNCHANGED — it still minimises that one number. This is NOT true
+    // lexicographic multi-objective optimisation (which would need a two-phase
+    // count-then-cost search); the weights merely shape the scalar.
+    //
+    // Defaults reproduce the historical cost exactly:
+    //   time_weight     = 1.0  → keeps the `travel_time × per_hour/3600` term
+    //   distance_weight = 0.0  → distance does not enter the cost
+    //   span_cost       = 0.0  → no span term
+    let cost_travel = vehicle.fixed
+        + (travel_time as f64) * (vehicle.per_hour / 3600.0).max(0.0) * vehicle.time_weight
+        + (distance as f64) * vehicle.distance_weight
         // tiny tiebreaker per service second so longer service still costs:
         + (service_time as f64) * 1e-6;
-    let _ = route_dur;
+    // Span cost: charged per second of total shift span (end − start), which
+    // includes waiting and breaks, not just travel. 0 by default.
+    let cost_span = (route_dur as f64) * vehicle.span_cost.max(0.0);
 
     let mut metrics = RouteMetrics {
         start_time: vw.start,
@@ -570,7 +604,10 @@ fn evaluate_route_with_buf(
         waiting_time,
         setup_time,
         distance,
-        cost,
+        cost: cost_travel + cost_span,
+        cost_travel,
+        cost_span,
+        cost_custom: 0.0,
     };
 
     // User-supplied custom constraints (code, from Rust or Python). The flag
@@ -578,7 +615,10 @@ fn evaluate_route_with_buf(
     if crate::constraint::has_constraints() {
         let view = crate::constraint::RouteView { problem, vehicle, steps, metrics: &metrics };
         match crate::constraint::apply(&view) {
-            Ok(penalty) => metrics.cost += penalty,
+            Ok(penalty) => {
+                metrics.cost_custom += penalty;
+                metrics.cost += penalty;
+            }
             Err(e) => return Err(e),
         }
     }
