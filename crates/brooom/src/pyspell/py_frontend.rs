@@ -6,14 +6,14 @@
 //! `x in list`; integer `/` truncates (it is not Python true division) — a
 //! deliberate simplification documented for the constraint DSL.
 
-use rustpython_parser::{ast, parse_expression};
+use rustpython_parser::{ast, Parse};
 
 use super::error::DslError;
 use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, UnOp, Value};
 use super::lower::{builtin_from, finish, resolve_field, Ctx};
 
 pub fn compile_python(src: &str) -> Result<super::ir::Program, DslError> {
-    let expr = parse_expression(src, "<constraint>").map_err(|e| DslError::Parse(e.to_string()))?;
+    let expr = ast::Expr::parse(src, "<constraint>").map_err(|e| DslError::Parse(e.to_string()))?;
     let mut ctx = Ctx::new();
     let ret = lower(&expr, &mut ctx)?;
     Ok(finish(ctx, ret))
