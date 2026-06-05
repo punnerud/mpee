@@ -36,7 +36,7 @@ The generated script is a standalone Python file with the instance baked in
 Both steps above were executed in this environment:
 
 * `export_cpsat.py` on `oslo_5jobs.json` → generated `/tmp/oslo_cpsat.py`
-  (262 lines, `python3 -m py_compile` clean).
+  (~126 lines, `python3 -m py_compile` clean).
 * `ortools 9.15` installed via pip; the generated model solved to:
 
   ```
