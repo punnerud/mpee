@@ -159,11 +159,14 @@ pub fn greedy_insertion_seeded(problem: &Problem, matrix: &Matrix, seed: u64) ->
     let mut is_pair_head: Vec<bool> = Vec::new();
 
     let mut singles: Vec<TaskRef> = (0..problem.jobs.len()).map(TaskRef::Job).collect();
-    // Prize-collecting: insert by prize (high-value first, so scarce capacity
-    // goes to the most valuable jobs), then priority. Every job's prize defaults
-    // to the same large sentinel, so this is identical to the old priority-only
-    // order unless finite prizes were set.
-    let prize_of = |t: &TaskRef| t.description(problem).prize;
+    // Prize-collecting: insert by value (high-value first, so scarce capacity
+    // goes to the most valuable jobs), then priority. "Value" is the full cost
+    // of dropping the job — `prize + disjunction_penalty` — so an explicit
+    // OR-Tools-style drop penalty also pulls a job toward the front, just like a
+    // high prize. Every job's prize defaults to the same large sentinel and the
+    // penalty to 0, so this is identical to the old priority-only order unless
+    // finite prizes / penalties were set.
+    let prize_of = |t: &TaskRef| t.description(problem).unassigned_cost();
     if seed == 0 {
         singles.sort_by(|a, b| {
             prize_of(b).partial_cmp(&prize_of(a)).unwrap_or(Ordering::Equal)

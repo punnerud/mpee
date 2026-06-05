@@ -379,3 +379,112 @@ fn multi_constraint_solution_round_trips() {
     let matrix = build_matrix(&mut problem, Some(&HaversineMatrix::default())).unwrap();
     verify_solution(&problem, &matrix, &sol).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Disjunctions / optional visits with an explicit drop penalty (OR-Tools
+// `AddDisjunction([node], penalty)` semantics). `disjunction_penalty` is
+// charged *on top of* `prize` for every unassigned job, so it shows up in the
+// objective and lets local search trade dropping against routing cost.
+// ---------------------------------------------------------------------------
+
+// A finite drop penalty on an unassigned job is added to the summary cost.
+#[test]
+fn disjunction_penalty_charged_on_unassigned() {
+    // One vehicle with capacity 1 and two equal jobs: exactly one fits, so the
+    // other is forced unassigned regardless of heuristics. The far job carries a
+    // big drop penalty; the near job none — and both have a small finite prize so
+    // neither is "mandatory" via the sentinel.
+    let json = r#"{
+        "vehicles": [{"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [1],
+                      "time_window": [0, 1000000]}],
+        "jobs": [
+            {"id": 1, "location": [10.02, 60.0], "delivery": [1], "prize": 50.0},
+            {"id": 2, "location": [10.50, 60.0], "delivery": [1], "prize": 50.0,
+             "disjunction_penalty": 100000.0}
+        ]
+    }"#;
+    let mut problem = parse_input(json).unwrap();
+    let sol = solve(&mut problem, Some(&HaversineMatrix::default()), SolverConfig::default()).unwrap();
+
+    // Exactly one job is unassigned (capacity 1).
+    assert_eq!(sol.unassigned.len(), 1, "only one of the two jobs fits");
+
+    // Because job 2's drop penalty (100000) dwarfs job 1's (0), the solver keeps
+    // job 2 served and drops the cheap, penalty-free job 1.
+    let unassigned_ids: Vec<u64> = sol
+        .unassigned
+        .iter()
+        .map(|t| t.description(&problem).id)
+        .collect();
+    assert_eq!(unassigned_ids, vec![1], "the penalty-free job is the one dropped");
+
+    // And the objective must reflect the dropped job's prize but NOT job 2's
+    // penalty (since job 2 stayed served): the only unassigned charge is job 1's
+    // prize of 50.
+    let routed: f64 = sol.routes.iter().map(|r| r.metrics.cost).sum();
+    assert!(
+        (sol.summary.cost - (routed + 50.0)).abs() < 1e-6,
+        "summary should be routing cost + dropped job's prize (50), got {} (routed {})",
+        sol.summary.cost,
+        routed
+    );
+}
+
+// Under capacity contention the drop penalty decides *which* job is sacrificed:
+// flipping which job carries the big penalty flips which one is kept. This is
+// the core "trade a drop penalty against routing cost / value" behaviour and
+// exercises the prize-swap pass that now accounts for the penalty.
+//
+// (Note: the engine has no *voluntary* single-job drop operator — a feasible
+// job is never dropped just because its routing cost exceeds its value, the
+// same as for `prize` today. The penalty steers contention, not free capacity.)
+#[test]
+fn disjunction_penalty_drives_which_job_is_dropped() {
+    // Capacity 1 ⇒ exactly one of two equidistant jobs is served. Both carry the
+    // same small finite prize, so only the disjunction penalty breaks the tie.
+    let make = |pen1: f64, pen2: f64| {
+        format!(
+            r#"{{
+                "vehicles": [{{"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0],
+                              "capacity": [1], "time_window": [0, 100000000]}}],
+                "jobs": [
+                    {{"id": 1, "location": [10.05, 60.0], "delivery": [1], "prize": 10.0,
+                     "disjunction_penalty": {pen1}}},
+                    {{"id": 2, "location": [10.05, 60.10], "delivery": [1], "prize": 10.0,
+                     "disjunction_penalty": {pen2}}}
+                ]
+            }}"#
+        )
+    };
+
+    // Job 1 has the big penalty ⇒ keep job 1, drop job 2.
+    let mut p_a = parse_input(&make(100000.0, 0.0)).unwrap();
+    let sol_a = solve(&mut p_a, Some(&HaversineMatrix::default()), SolverConfig::default()).unwrap();
+    let dropped_a: Vec<u64> = sol_a.unassigned.iter().map(|t| t.description(&p_a).id).collect();
+    assert_eq!(dropped_a, vec![2], "big penalty on job 1 ⇒ job 2 is the one dropped");
+
+    // Flip the penalty onto job 2 ⇒ the choice flips: keep job 2, drop job 1.
+    let mut p_b = parse_input(&make(0.0, 100000.0)).unwrap();
+    let sol_b = solve(&mut p_b, Some(&HaversineMatrix::default()), SolverConfig::default()).unwrap();
+    let dropped_b: Vec<u64> = sol_b.unassigned.iter().map(|t| t.description(&p_b).id).collect();
+    assert_eq!(dropped_b, vec![1], "flipping the penalty flips which job is dropped");
+}
+
+// Backward-compat guard: with the field omitted, behaviour is identical to a
+// pre-disjunction input (sentinel prize, no extra charge).
+#[test]
+fn disjunction_penalty_absent_is_backward_compatible() {
+    let json = r#"{
+        "vehicles": [{"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10],
+                      "time_window": [0, 1000000]}],
+        "jobs": [
+            {"id": 1, "location": [10.02, 60.0], "delivery": [1]},
+            {"id": 2, "location": [10.04, 60.0], "delivery": [1]}
+        ]
+    }"#;
+    let mut problem = parse_input(json).unwrap();
+    // The field must deserialize to None and parsing must succeed unchanged.
+    assert!(problem.jobs.iter().all(|j| j.disjunction_penalty.is_none()));
+    let sol = solve(&mut problem, Some(&HaversineMatrix::default()), SolverConfig::default()).unwrap();
+    assert_eq!(sol.unassigned.len(), 0, "both reachable jobs served as before");
+}

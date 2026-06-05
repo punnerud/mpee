@@ -60,6 +60,14 @@ impl RoutePrecomp {
 /// Build the precomputation arrays for a route. Returns `None` if the route
 /// itself is infeasible (capacity overflow, missed TW, etc.) so the caller
 /// can flag the route for repair / rejection.
+///
+/// Disjunctions / drop penalties: this probe is purely about routing
+/// feasibility and Δ-cost of *inserting* a task; it never reads a job's `prize`
+/// or `disjunction_penalty`. The drop-penalty trade-off (insert-vs-leave-
+/// unassigned) lives where the *value* of serving is known: the insertion
+/// ordering in `insertion.rs` (`Job::unassigned_cost()` = prize + penalty pulls
+/// high-penalty jobs to the front) and the prize-swap pass in `solver.rs`, both
+/// kept consistent with the objective charged in `Solution::recompute_summary`.
 pub fn precompute(
     problem: &Problem,
     matrix: &Matrix,

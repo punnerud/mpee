@@ -481,6 +481,7 @@ mod tests {
             priority: 0,
             time_windows: vec![],
             prize: crate::problem::DEFAULT_PRIZE,
+            disjunction_penalty: None,
             group: None,
             description: None,
         };

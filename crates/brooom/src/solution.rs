@@ -41,6 +41,7 @@ fn reload_sentinel() -> &'static Job {
         priority: 0,
         time_windows: vec![],
         prize: crate::problem::DEFAULT_PRIZE,
+        disjunction_penalty: None,
         group: None,
         description: None,
     })
@@ -610,6 +611,18 @@ impl Solution {
         // single jobs are optional; shipment halves keep the sentinel.
         for t in &self.unassigned {
             s.cost += t.description(problem).prize;
+        }
+        // Disjunctions (OR-Tools `AddDisjunction` semantics): on top of `prize`,
+        // charge each unassigned job its explicit `disjunction_penalty` if set.
+        // `prize` answers "what is serving worth"; `disjunction_penalty` answers
+        // "what does *dropping* cost" — keeping them separate lets local search
+        // trade a known drop penalty against routing cost. Unset penalties are 0,
+        // so this loop is a no-op for inputs that don't use the feature. Only
+        // single jobs carry one; shipment halves keep the sentinel job.
+        for t in &self.unassigned {
+            if let Some(p) = t.description(problem).disjunction_penalty {
+                s.cost += p;
+            }
         }
         // Solution-level (cross-route) penalty term, behind a lock-free fast path.
         if crate::global_constraint::has_global() {

@@ -146,6 +146,20 @@ pub struct Job {
     /// stay effectively mandatory (dropping one costs the same as before).
     #[serde(default = "default_prize")]
     pub prize: Cost,
+    /// Explicit drop penalty for an *optional* visit, mirroring OR-Tools
+    /// `AddDisjunction([node], penalty)`. Charged on top of `prize` whenever
+    /// this job is left unassigned, so local search can trade a known drop
+    /// penalty against routing cost. Contrast with `prize`, whose huge default
+    /// sentinel (`DEFAULT_PRIZE`) makes an unset job effectively *mandatory*:
+    /// `disjunction_penalty` defaults to `None` (== 0), i.e. the node is freely
+    /// droppable at no extra cost unless a finite penalty is set here.
+    ///
+    /// Scope caveat: this is the common per-node drop-penalty case only. There
+    /// is no built-in "exactly-k-of-M" cardinality or overlapping disjunctions
+    /// sharing a node; the existing `group` ("exactly one per group") already
+    /// covers the exactly-1 case.
+    #[serde(default)]
+    pub disjunction_penalty: Option<Cost>,
     /// Client-group id. The "exactly one per group" global constraint serves
     /// exactly one member of each non-None group. None = ungrouped.
     #[serde(default)]
@@ -158,6 +172,17 @@ pub struct Job {
 /// historical flat unassigned penalty).
 pub const DEFAULT_PRIZE: Cost = 1e9;
 fn default_prize() -> Cost { DEFAULT_PRIZE }
+
+impl Job {
+    /// Objective cost charged when this job is left unassigned: its `prize`
+    /// (value of serving) plus any explicit `disjunction_penalty` (OR-Tools
+    /// `AddDisjunction` semantics). With both unset this is exactly the old
+    /// `DEFAULT_PRIZE`, so behaviour is unchanged for existing inputs.
+    #[inline]
+    pub fn unassigned_cost(&self) -> Cost {
+        self.prize + self.disjunction_penalty.unwrap_or(0.0)
+    }
+}
 
 /// Default kind when only `Job` is present in input is `Single`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
