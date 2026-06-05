@@ -257,6 +257,47 @@ struct Router {
     _pp: dijeng::cache_pp::PpFull,
 }
 
+/// Wrap a Python callable as a brooom custom constraint. The callable is invoked
+/// on every completed candidate route with a dict
+/// `{vehicle_id, job_ids, cost, duration_s, distance_m, service_s, waiting_s}`
+/// and returns:
+///   * `None` / `True`  → feasible
+///   * `False`          → infeasible (hard reject — the route is never used)
+///   * a number         → soft penalty added to that route's cost
+/// A raised exception is printed and treated as feasible, so a buggy constraint
+/// can't silently wipe out every route. Note: the callable runs under the GIL on
+/// the solver's worker threads, so it is best suited to small/medium instances;
+/// registering any constraint also keeps the solve on the CPU (no GPU polish).
+fn wrap_py_constraint(cb: Py<PyAny>) -> Arc<brooom::constraint::CustomConstraintFn> {
+    use brooom::constraint::Verdict;
+    Arc::new(move |view: &brooom::constraint::RouteView| {
+        Python::with_gil(|py| {
+            let route = PyDict::new_bound(py);
+            let _ = route.set_item("vehicle_id", view.vehicle.id);
+            let _ = route.set_item("job_ids", view.stop_ids());
+            let _ = route.set_item("cost", view.metrics.cost);
+            let _ = route.set_item("duration_s", view.metrics.travel_time);
+            let _ = route.set_item("distance_m", view.metrics.distance);
+            let _ = route.set_item("service_s", view.metrics.service_time);
+            let _ = route.set_item("waiting_s", view.metrics.waiting_time);
+            match cb.call1(py, (route,)) {
+                Ok(ret) => {
+                    if ret.is_none(py) {
+                        Verdict::Feasible
+                    } else if let Ok(b) = ret.extract::<bool>(py) {
+                        if b { Verdict::Feasible } else { Verdict::Infeasible }
+                    } else if let Ok(p) = ret.extract::<f64>(py) {
+                        Verdict::Penalty(p)
+                    } else {
+                        Verdict::Feasible
+                    }
+                }
+                Err(e) => { e.print(py); Verdict::Feasible }
+            }
+        })
+    })
+}
+
 #[pymethods]
 impl Router {
     /// Open a prebuilt cache pair. `pp_path` is the `.pp` file, `ch_path`
@@ -649,14 +690,22 @@ impl Router {
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
-    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false))]
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None))]
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
+        constraints: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
             .map_err(|e| PyRuntimeError::new_err(format!("problem JSON: {e}")))?;
         problem.validate().map_err(|e| PyRuntimeError::new_err(format!("invalid problem: {e}")))?;
+
+        // Install any custom constraints (code) for the duration of this solve.
+        // The guard clears the global registry when it drops at method end.
+        let _cguard = constraints.map(|cs| {
+            let wrapped: Vec<_> = cs.into_iter().map(wrap_py_constraint).collect();
+            brooom::constraint::ConstraintGuard::install(wrapped)
+        });
 
         // Snap every vehicle start/end + job coord, build the matrix, and
         // rewrite the problem's Locations to matrix indices (off the GIL).

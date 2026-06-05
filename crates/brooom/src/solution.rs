@@ -469,7 +469,7 @@ fn evaluate_route_with_buf(
         + (service_time as f64) * 1e-6;
     let _ = route_dur;
 
-    Ok(RouteMetrics {
+    let mut metrics = RouteMetrics {
         start_time: vw.start,
         end_time: t,
         travel_time,
@@ -478,7 +478,19 @@ fn evaluate_route_with_buf(
         setup_time,
         distance,
         cost,
-    })
+    };
+
+    // User-supplied custom constraints (code, from Rust or Python). The flag
+    // check is a single relaxed atomic load — free when none are registered.
+    if crate::constraint::has_constraints() {
+        let view = crate::constraint::RouteView { problem, vehicle, steps, metrics: &metrics };
+        match crate::constraint::apply(&view) {
+            Ok(penalty) => metrics.cost += penalty,
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(metrics)
 }
 
 /// Return the first time window in `tws` whose end is ≥ `arrival`. If `tws`

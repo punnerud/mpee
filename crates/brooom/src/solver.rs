@@ -242,8 +242,12 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     // level after cluster_decompose the routes are too short for batch
     // GPU to find diversity-driven wins. The outer flow in main.rs runs
     // a separate top-level gpu_polish on the merged solution.
+    // Custom constraints run only on the CPU evaluator, so skip GPU polishing
+    // when any are registered (the megakernel can't call arbitrary closures).
     #[cfg(feature = "gpu")]
-    if config.use_gpu && best.routes.len() > 0 && matrix.n >= 500 {
+    if config.use_gpu && best.routes.len() > 0 && matrix.n >= 500
+        && !crate::constraint::has_constraints()
+    {
         let t_gpu = std::time::Instant::now();
         let max_iter = if matrix.n >= 5000 { 2000 } else { 1000 };
         if let Some(gpu_sol) = crate::gpu_polish::gpu_polish(

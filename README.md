@@ -72,18 +72,54 @@ yourself: `cargo test -p brooom --test constraints`.
 | **Multi-depot** (distinct per-vehicle start/end) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Priority / optional jobs | ✅ hint | ✅ | ✅ | ✅ prizes | ✅ |
 | Setup time, fixed + per-hour vehicle cost | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| Soft (penalised) constraints | ⛏ roadmap | ⚠️ | ✅ | ⚠️ | ✅ |
-| Arbitrary custom constraints in code | ⛏ roadmap | ❌ | ✅ | ⚠️ | ✅ |
+| Soft (penalised) constraints | ✅ per-route | ⚠️ | ✅ | ⚠️ | ✅ |
+| Custom constraints written in code (Rust **or** Python) | ✅ per-route | ❌ | ✅ | ⚠️ | ✅ |
+| Cross-route / global constraints in code | ⛏ roadmap | ❌ | ✅ | ❌ | ✅ |
 
 <sub>✅ built-in · ⚠️ partial or emulated · ❌ not available · ⛏ on the roadmap.
-Competitor columns reflect first-class support per their public docs. The one
-place Timefold and OR-Tools genuinely pull ahead is the **last two rows** —
-penalised soft constraints and *arbitrary* constraints written in code
-(Timefold's Constraint Streams). That's an architectural choice, not a bigger
-number: MPEE exposes a fixed, fast, hard-constraint VRP model rather than a
-general constraint engine. For the standard fleet-routing constraints — the rows
-above the line — MPEE matches or beats VROOM and covers what OR-Tools / PyVRP /
-Timefold offer, in one streaming Rust process with no separate matrix step.</sub>
+Competitor columns reflect first-class support per their public docs. MPEE now
+covers code-defined constraints too — see **[Custom constraints in
+code](#custom-constraints-in-code)** below — so the only remaining edge for
+Timefold / OR-Tools is *cross-route / global* constraints (e.g. "at most N
+vehicles in zone Z"): MPEE's hook is evaluated **per route**, not over the whole
+plan. For the standard fleet-routing constraints — every row above the line —
+MPEE matches or beats VROOM and covers what OR-Tools / PyVRP / Timefold offer,
+in one streaming Rust process with no separate matrix step.</sub>
+
+### Custom constraints in code
+
+Need a rule the built-ins don't cover? Register a closure (Rust) or a callable
+(Python) that the solver runs on **every completed route**. Return `Infeasible`
+to reject it outright, or `Penalty(x)` to make it a *soft* constraint the search
+weighs against cost. Because every accepted route passes through the same
+evaluator, your rule genuinely shapes the search — not just a post-hoc filter.
+
+```rust
+// Rust — forbid any route that visits job 20, and softly discourage night work.
+use brooom::constraint::{ConstraintGuard, Verdict};
+use std::sync::Arc;
+
+let _guard = ConstraintGuard::install(vec![Arc::new(|r: &brooom::RouteView| {
+    if r.stop_ids().contains(&20) { return Verdict::Infeasible; }
+    if r.metrics.end_time > 18 * 3600 { Verdict::Penalty(500.0) } else { Verdict::Feasible }
+})]);
+let solution = brooom::solve(&mut problem, Some(&matrix), cfg);
+```
+
+```python
+# Python — same idea, passed straight to Router.solve(...).
+def no_job_20(route):
+    if 20 in route["job_ids"]:
+        return False                      # hard reject
+    return 500.0 if route["duration_s"] > 6 * 3600 else None  # soft penalty / ok
+
+plan = router.solve(problem_json, constraints=[no_job_20])
+```
+
+The callback returns `False`/`Infeasible` (reject), a number (penalty added to the
+route's cost), or `None`/`True`/`Feasible` (ok). Registering any custom
+constraint keeps the solve on the CPU evaluator (the GPU megakernel can't run
+arbitrary code). Proven by [`crates/brooom/tests/custom_constraints.rs`](crates/brooom/tests/custom_constraints.rs).
 
 ## Install (Python / CLI)
 

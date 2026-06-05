@@ -244,6 +244,28 @@ print("unassigned:", plan["unassigned"])   # over-capacity / outside every windo
 `unassigned` (over capacity, outside all time windows, or no road to them) —
 it never invents an impossible route.
 
+### Custom constraints in code
+
+When the built-ins aren't enough, pass `constraints=[...]` to `solve()`: each is
+a callable run on **every completed route**, receiving
+`{vehicle_id, job_ids, cost, duration_s, distance_m, service_s, waiting_s}`.
+Return `False` to reject the route (hard), a number to add a soft penalty, or
+`None`/`True` to allow it.
+
+```python
+def keep_vip_off_overtime(route):
+    if 999 in route["job_ids"] and route["duration_s"] > 6 * 3600:
+        return False                 # VIP job must never sit on an overtime route
+    return None
+
+plan = router.solve(problem_json, constraints=[keep_vip_off_overtime])
+```
+
+The callable runs under the GIL on the solver's worker threads, so it suits
+small/medium instances; registering any constraint also keeps the solve on the
+CPU. Same hook is available natively (and faster) in Rust via
+`brooom::constraint`.
+
 ## Plan a work week (multi-day, multiple depots)
 
 Model a week by giving each driver **one vehicle per day**, each bound to that

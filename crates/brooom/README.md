@@ -332,7 +332,8 @@ brooom/
 - Distillation pipeline (PyTorch → ONNX → Rust) — research code
 
 **Not implemented:**
-- Soft (penalised) constraints — every constraint is currently hard
+- Cross-route / global constraints in code (the custom-constraint hook is
+  per-route — see `constraint.rs`; soft *per-route* penalties are supported)
 - Multiple shifts per vehicle (one time-window per vehicle, not several)
 - Exact branch-and-cut (only brute-force `--exact-polish` for routes ≤ 14)
 

@@ -3,6 +3,7 @@
 //! Open Rust alternative to Vroom. Solves TSP / CVRP / VRPTW / PDPTW
 //! and accepts Vroom-compatible JSON.
 
+pub mod constraint;
 pub mod error;
 pub mod problem;
 pub mod matrix;
@@ -39,5 +40,6 @@ pub use problem::{
 pub use matrix::{Matrix, MatrixSource, HaversineMatrix};
 #[cfg(feature = "osrm")]
 pub use matrix::OsrmClient;
+pub use constraint::{RouteView, Verdict};
 pub use solution::{Route, Solution, Step, StepKind, Summary, TaskRef};
 pub use solver::{solve, solve_full, solve_with_matrix, Solved, SolverConfig};
