@@ -246,6 +246,25 @@ pub struct Vehicle {
     /// Cost per hour of route duration.
     #[serde(default = "default_per_hour")]
     pub per_hour: Cost,
+    /// Cost charged per second of *route span* (end_time − start_time, i.e. the
+    /// total wall-clock duration of the shift including waiting and breaks, not
+    /// just travel). Lets you penalise long workdays / balance shift lengths.
+    /// Defaults to 0.0 so an unset vehicle contributes no span cost — exactly
+    /// reproduces today's behaviour. Part of the weighted-scalarization cost
+    /// shaping (see `evaluate_route`); this is NOT a true lexicographic span
+    /// objective.
+    #[serde(default)]
+    pub span_cost: Cost,
+    /// Weight on the per-distance travel-cost component (`distance` metres ×
+    /// this). Defaults to 0.0 so distance does not enter the cost unless asked,
+    /// matching today's time-only cost. Combined additively with the time term.
+    #[serde(default)]
+    pub distance_weight: f64,
+    /// Weight on the per-hour travel-time cost component. Defaults to 1.0 so the
+    /// historical `travel_time × per_hour/3600` term is reproduced exactly when
+    /// unset. Set <1.0 to de-emphasise time, >1.0 to emphasise it.
+    #[serde(default = "one")]
+    pub time_weight: f64,
     #[serde(default = "default_profile")]
     pub profile: String,
     /// Mandatory driver breaks; each must be taken within one of its windows.

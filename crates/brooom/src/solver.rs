@@ -62,6 +62,16 @@ pub struct SolverConfig {
     pub fairness_weight: f64,
     /// Which per-route quantity fairness balances (duration or load).
     pub fairness_metric: crate::global_constraint::FairnessMetric,
+    /// Optional weighted-scalarization weights on the global cost components
+    /// (travel / span / custom). `None` (or an all-1.0 set) leaves the objective
+    /// exactly as today. When set with non-unit weights the solver registers a
+    /// global cost re-weighting that multiplies each component before LS runs.
+    ///
+    /// HONEST CAVEAT: this is weighted scalarization, not true lexicographic
+    /// multi-objective search. The LS still minimises one aggregated scalar;
+    /// these weights merely shape it. A real phase-1 (minimise vehicle count)
+    /// then phase-2 (minimise cost) solver is out of scope here.
+    pub objective_weights: Option<crate::global_constraint::ObjectiveWeights>,
 }
 
 impl Default for SolverConfig {
@@ -87,6 +97,7 @@ impl Default for SolverConfig {
             max_vehicles: None,
             fairness_weight: 0.0,
             fairness_metric: crate::global_constraint::FairnessMetric::Duration,
+            objective_weights: None,
         }
     }
 }
@@ -149,6 +160,15 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     }
     if config.fairness_weight > 0.0 {
         globals.push(crate::global_constraint::fairness(config.fairness_weight, config.fairness_metric));
+    }
+    // Weighted-scalarization objective weights: register only when non-identity,
+    // so default solves keep their exact historical objective. Multiplies each
+    // global cost component before LS converges. NOT lexicographic — see
+    // SolverConfig::objective_weights.
+    if let Some(w) = config.objective_weights {
+        if !w.is_identity() {
+            globals.push(crate::global_constraint::objective_weights(w));
+        }
     }
     if problem.jobs.iter().any(|j| j.group.is_some()) {
         globals.push(crate::global_constraint::exactly_one_per_group());

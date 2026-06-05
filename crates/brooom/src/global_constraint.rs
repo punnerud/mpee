@@ -172,6 +172,55 @@ pub fn exactly_one_per_group() -> Arc<GlobalConstraintFn> {
     })
 }
 
+/// Per-objective-component weights applied as a global cost multiplier.
+///
+/// Weighted scalarization, NOT lexicographic. The base per-route `cost` already
+/// equals `cost_travel + cost_span + cost_custom`; these weights re-scale each
+/// component's contribution to the *global* objective. The constraint adds the
+/// delta `Σ_routes (w_travel−1)·cost_travel + (w_span−1)·cost_span +
+/// (w_custom−1)·cost_custom`, so the effective minimised objective becomes
+/// `Σ (w_travel·cost_travel + w_span·cost_span + w_custom·cost_custom)` plus the
+/// usual unassigned prizes and other global penalties. All weights default to
+/// 1.0, which adds exactly 0.0 and leaves today's objective untouched.
+///
+/// NOTE: a true lexicographic solver (phase 1 minimise vehicle count, phase 2
+/// minimise cost) is a separate two-phase search and out of scope here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObjectiveWeights {
+    pub travel: Cost,
+    pub span: Cost,
+    pub custom: Cost,
+}
+
+impl Default for ObjectiveWeights {
+    fn default() -> Self {
+        Self { travel: 1.0, span: 1.0, custom: 1.0 }
+    }
+}
+
+impl ObjectiveWeights {
+    /// True when every weight is exactly 1.0 (the multiplier is a no-op).
+    pub fn is_identity(&self) -> bool {
+        self.travel == 1.0 && self.span == 1.0 && self.custom == 1.0
+    }
+}
+
+/// Re-weight the global objective's cost components by [`ObjectiveWeights`].
+/// Adds only the delta from the unit-weight baseline, so an identity weight set
+/// contributes 0.0 and reproduces today's objective exactly.
+pub fn objective_weights(w: ObjectiveWeights) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| {
+        let mut delta = 0.0;
+        for r in v.routes {
+            let m = &r.metrics;
+            delta += (w.travel - 1.0) * m.cost_travel
+                + (w.span - 1.0) * m.cost_span
+                + (w.custom - 1.0) * m.cost_custom;
+        }
+        delta
+    })
+}
+
 /// Penalize the spread (max - min) of a per-route metric across used routes,
 /// scaled by `weight`. Soft by construction — trades against travel cost.
 pub fn fairness(weight: Cost, metric: FairnessMetric) -> Arc<GlobalConstraintFn> {
