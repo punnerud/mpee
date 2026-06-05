@@ -72,9 +72,12 @@ pub fn precompute(
     let positions = l + 2;
     let speed = vehicle.speed_factor.max(0.01);
 
-    // Pickup-before-delivery check (O(L)).
+    // Pickup-before-delivery and linehaul-before-backhaul checks (O(L)). These
+    // mirror `evaluate_route` so the probe prunes the same infeasible orderings
+    // early; the evaluator remains the authority.
     {
         let mut seen = std::collections::HashSet::<usize>::new();
+        let mut seen_backhaul = false;
         for s in steps {
             if !vehicle.has_skills(s.skills(problem)) {
                 return None;
@@ -84,7 +87,14 @@ pub fn precompute(
                 TaskRef::Delivery(i) => {
                     if !seen.contains(i) { return None; }
                 }
-                TaskRef::Job(_) => {}
+                TaskRef::Job(_) => {
+                    let j = s.description(problem);
+                    if !j.pickup.is_empty() && j.delivery.is_empty() {
+                        seen_backhaul = true;
+                    } else if !j.delivery.is_empty() && seen_backhaul {
+                        return None;
+                    }
+                }
             }
         }
     }

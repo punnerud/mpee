@@ -226,6 +226,7 @@ impl Engine {
                 fixed: 0.0,
                 per_hour: 3600.0,
                 profile: "car".into(),
+                breaks: vec![],
                 description: None,
             });
         }

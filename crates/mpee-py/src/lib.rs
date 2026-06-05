@@ -526,7 +526,8 @@ impl Router {
                         capacity: vec![capacity],
                         skills: vec![], time_window: None, speed_factor: 1.0,
                         max_tasks: None, max_travel_time: None, max_distance: None,
-                        fixed: 0.0, per_hour: 3600.0, profile: "car".into(), description: None,
+                        fixed: 0.0, per_hour: 3600.0, profile: "car".into(),
+                        breaks: vec![], description: None,
                     });
                 }
                 for i in 0..stops.len() {
@@ -926,7 +927,7 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
             max_travel_time: max_tt,
             max_distance: max_d,
             fixed: 0.0, per_hour: 3600.0,
-            profile: "car".into(), description: None,
+            profile: "car".into(), breaks: vec![], description: None,
         });
     }
 

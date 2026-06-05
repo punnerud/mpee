@@ -97,6 +97,7 @@ pub enum StepKind {
     Job,
     Pickup,
     Delivery,
+    Break,
     End,
 }
 
@@ -229,6 +230,14 @@ pub fn evaluate_route(
 /// (no road leg approaches 100 000 km / ~3 years of travel time).
 const UNREACHABLE_LEG: i64 = 100_000_000;
 
+/// A plain job is a *backhaul* (collect-only) stop when it has a pickup amount
+/// and no delivery. Vroom-style routing requires every linehaul (delivery)
+/// stop to be served before any backhaul on the same route.
+#[inline]
+fn is_backhaul(job: &Job) -> bool {
+    !job.pickup.is_empty() && job.delivery.is_empty()
+}
+
 #[inline]
 fn evaluate_route_with_buf(
     problem: &Problem,
@@ -305,10 +314,25 @@ fn evaluate_route_with_buf(
     let mut setup_time: Time = 0;
     let mut distance: i64 = 0;
     let mut tasks_count: usize = 0;
+    // Backhaul ordering: once a collect-only stop is served, no further
+    // delivery stop may follow. Free for pure-CVRP routes (just a bool).
+    let mut seen_backhaul = false;
+    // Driver breaks are taken in input order, greedily at the first open
+    // window. `break_idx` is the next break still to schedule.
+    let breaks = &vehicle.breaks;
+    let mut break_idx = 0usize;
 
     for s in steps {
         let job = s.description(problem);
         let here = job.location.index.ok_or("job location missing matrix index")?;
+
+        if let TaskRef::Job(_) = s {
+            if is_backhaul(job) {
+                seen_backhaul = true;
+            } else if !job.delivery.is_empty() && seen_backhaul {
+                return Err("linehaul after backhaul");
+            }
+        }
 
         if let Some(p) = prev_idx {
             let raw = matrix.duration(p, here);
@@ -378,6 +402,17 @@ fn evaluate_route_with_buf(
         t += job.service;
         service_time += job.service;
 
+        // Take any due breaks whose chosen window is already open at `t`.
+        // Break time pushes the timeline (and thus end_time / vehicle window /
+        // later job windows) but is not travel — so `travel_time` is untouched.
+        while break_idx < breaks.len() {
+            let br = &breaks[break_idx];
+            let tw = pick_time_window(&br.time_windows, t).ok_or("break time window missed")?;
+            if t < tw.start { break; }
+            t += br.service;
+            break_idx += 1;
+        }
+
         prev_idx = Some(here);
         tasks_count += 1;
         if let Some(max) = vehicle.max_tasks {
@@ -395,6 +430,22 @@ fn evaluate_route_with_buf(
         t += dur;
         travel_time += dur;
         distance += matrix.distance(p, e);
+    }
+
+    // Any breaks not yet taken must still fit before the vehicle's day ends;
+    // wait for the window to open if needed, else the route is infeasible.
+    while break_idx < breaks.len() {
+        let br = &breaks[break_idx];
+        let tw = pick_time_window(&br.time_windows, t).ok_or("break time window missed")?;
+        if t < tw.start {
+            waiting_time += tw.start - t;
+            t = tw.start;
+        }
+        if t > tw.end {
+            return Err("break time window missed");
+        }
+        t += br.service;
+        break_idx += 1;
     }
 
     if t > vw.end {

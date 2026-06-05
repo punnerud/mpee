@@ -236,8 +236,9 @@ print("unassigned:", plan["unassigned"])   # over-capacity / outside every windo
 | `skills` — which jobs it may serve | `skills` — required vehicle capability |
 | `speed_factor` — e.g. a motorcycle at `1.6` | `time_windows` — allowed arrival times |
 | `time_window` — the driver's shift | `service` — time spent at the stop |
-| `max_travel_time` / `max_distance` | `priority` — which jobs to keep when demand > capacity |
-| distinct `start` / `end` locations | |
+| `max_travel_time` / `max_distance` / `max_tasks` | `priority` — which jobs to keep when demand > capacity |
+| `breaks` — driver rests within a window | `setup` — extra time when arriving from elsewhere |
+| distinct `start` / `end` locations (multi-depot) | a pickup-only stop is a `backhaul` (served after linehaul) |
 
 `solve()` serves every job it feasibly can and returns the rest in
 `unassigned` (over capacity, outside all time windows, or no road to them) —

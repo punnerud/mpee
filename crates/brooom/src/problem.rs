@@ -184,6 +184,22 @@ pub struct VehicleStep {
     pub time: Option<Time>,
 }
 
+/// A mandatory driver break (rest/lunch). The break must be taken somewhere in
+/// the route such that it starts within one of its `time_windows`. Mirrors
+/// Vroom's per-vehicle `breaks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Break {
+    pub id: u64,
+    /// Break duration in seconds.
+    #[serde(default)]
+    pub service: Time,
+    /// Windows the break may start within. Empty means any time (FOREVER).
+    #[serde(default)]
+    pub time_windows: Vec<TimeWindow>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vehicle {
     pub id: u64,
@@ -213,6 +229,9 @@ pub struct Vehicle {
     pub per_hour: Cost,
     #[serde(default = "default_profile")]
     pub profile: String,
+    /// Mandatory driver breaks; each must be taken within one of its windows.
+    #[serde(default)]
+    pub breaks: Vec<Break>,
     #[serde(default)]
     pub description: Option<String>,
 }

@@ -51,6 +51,40 @@ it**, which is where the speed and memory wins come from.
 > country ≈ GBs). There's no global tiling, by design — within your area, one
 > cache is simpler and faster.
 
+## Constraints
+
+"Vroom-compatible" undersells what the solver actually enforces. brooom ships
+the **whole standard VRP constraint set out of the box** — everything VROOM does,
+plus driver breaks, backhaul and multi-depot — all checked in one evaluator
+(`crates/brooom/src/solution.rs`) and proven by a conformance suite you can run
+yourself: `cargo test -p brooom --test constraints`.
+
+| Constraint | MPEE (brooom) | VROOM | OR-Tools | PyVRP | Timefold |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Multi-dimensional capacity (weight + volume + …) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Time windows (multiple per stop) | ✅ | ✅ | ✅ | ⚠️ one | ✅ |
+| Skills / vehicle–job compatibility | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| Pickup & delivery (PDPTW, paired, same vehicle) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Backhaul** (linehaul served before backhaul) | ✅ | ⚠️ | ✅ | ⚠️ | ✅ |
+| **Driver breaks** (rest within a window) | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Mixed fleet (per-vehicle speed / cost / capacity) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Max route duration / distance / stops | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Multi-depot** (distinct per-vehicle start/end) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Priority / optional jobs | ✅ hint | ✅ | ✅ | ✅ prizes | ✅ |
+| Setup time, fixed + per-hour vehicle cost | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| Soft (penalised) constraints | ⛏ roadmap | ⚠️ | ✅ | ⚠️ | ✅ |
+| Arbitrary custom constraints in code | ⛏ roadmap | ❌ | ✅ | ⚠️ | ✅ |
+
+<sub>✅ built-in · ⚠️ partial or emulated · ❌ not available · ⛏ on the roadmap.
+Competitor columns reflect first-class support per their public docs. The one
+place Timefold and OR-Tools genuinely pull ahead is the **last two rows** —
+penalised soft constraints and *arbitrary* constraints written in code
+(Timefold's Constraint Streams). That's an architectural choice, not a bigger
+number: MPEE exposes a fixed, fast, hard-constraint VRP model rather than a
+general constraint engine. For the standard fleet-routing constraints — the rows
+above the line — MPEE matches or beats VROOM and covers what OR-Tools / PyVRP /
+Timefold offer, in one streaming Rust process with no separate matrix step.</sub>
+
 ## Install (Python / CLI)
 
 The fastest way to use the engine is the `mpee` Python package — a thin CLI
@@ -273,9 +307,13 @@ order — use **`{"lat": …, "lon": …}`** if in doubt:
 ```
 
 Per-vehicle `capacity` / `skills` / `time_window` / `speed_factor` /
-`max_travel_time` / `max_distance` and per-job `delivery` / `pickup` / `skills`
-/ `time_windows` / `service` / `priority` are all honoured — see the full
-constraint table in [`crates/mpee-py/`](crates/mpee-py/) (same engine model).
+`max_travel_time` / `max_distance` / `max_tasks` / `breaks` and per-job
+`delivery` / `pickup` (a pickup-only job is a **backhaul**, served after every
+linehaul) / `skills` / `time_windows` / `service` / `setup` / `priority` are all
+honoured — each backed by a test in
+[`crates/brooom/tests/constraints.rs`](crates/brooom/tests/constraints.rs).
+Multi-depot needs no special flag: give each vehicle its own `start` / `end`.
+See the [Constraints](#constraints) matrix above.
 
 > Don't want to hand-write JSON? `mpee-cli gen` makes a random problem to try —
 > at **any** location, not just the four named regions:

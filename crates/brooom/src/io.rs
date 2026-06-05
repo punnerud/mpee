@@ -141,6 +141,19 @@ pub struct VehicleIn {
     #[serde(default)]
     pub per_hour: Option<Cost>,
     #[serde(default)]
+    pub breaks: Vec<BreakIn>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakIn {
+    pub id: u64,
+    #[serde(default)]
+    pub service: Time,
+    #[serde(default)]
+    pub time_windows: Vec<[Time; 2]>,
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -188,6 +201,12 @@ fn vehicle_from(v: &VehicleIn) -> Vehicle {
         fixed: v.fixed.unwrap_or(0.0),
         per_hour: v.per_hour.unwrap_or(3600.0),
         profile: v.profile.clone().unwrap_or_else(|| "car".to_string()),
+        breaks: v.breaks.iter().map(|b| crate::problem::Break {
+            id: b.id,
+            service: b.service,
+            time_windows: b.time_windows.iter().copied().map(tw_from).collect(),
+            description: b.description.clone(),
+        }).collect(),
         description: v.description.clone(),
     }
 }
@@ -352,6 +371,10 @@ fn route_steps(
     let mut total_setup: Time = 0;
     let mut total_wait: Time = 0;
     let mut total_dist: i64 = 0;
+    // Mirror the break scheduling in `evaluate_route` so emitted `break` steps
+    // line up with the timings the solver actually used.
+    let breaks = &veh.breaks;
+    let mut break_idx = 0usize;
 
     steps.push(Step {
         kind: StepKind::Start,
@@ -449,6 +472,30 @@ fn route_steps(
 
         t += j.service;
         total_service += j.service;
+
+        // Emit any breaks whose window is already open at `t` (same greedy
+        // placement as the evaluator). A break carries the current load and
+        // has no location.
+        while break_idx < breaks.len() {
+            let br = &breaks[break_idx];
+            let tw = crate::solution::pick_time_window(&br.time_windows, t)
+                .unwrap_or(TimeWindow::FOREVER);
+            if t < tw.start { break; }
+            steps.push(Step {
+                kind: StepKind::Break,
+                job_id: Some(br.id),
+                location_index: None,
+                arrival: t,
+                service: br.service,
+                waiting_time: 0,
+                setup: 0,
+                load: load.clone(),
+                distance: total_dist,
+            });
+            t += br.service;
+            break_idx += 1;
+        }
+
         prev = Some(here);
     }
 
@@ -462,6 +509,33 @@ fn route_steps(
             total_dist += mx.distance(p, e);
         }
     }
+
+    // Any breaks not yet placed must still be taken before the day ends
+    // (waiting for the window to open if needed) — mirrors the evaluator.
+    while break_idx < breaks.len() {
+        let br = &breaks[break_idx];
+        let tw = match crate::solution::pick_time_window(&br.time_windows, t) {
+            Some(w) => w,
+            None => break,
+        };
+        let waiting = if t < tw.start { tw.start - t } else { 0 };
+        t += waiting;
+        total_wait += waiting;
+        steps.push(Step {
+            kind: StepKind::Break,
+            job_id: Some(br.id),
+            location_index: None,
+            arrival: t,
+            service: br.service,
+            waiting_time: waiting,
+            setup: 0,
+            load: load.clone(),
+            distance: total_dist,
+        });
+        t += br.service;
+        break_idx += 1;
+    }
+
     steps.push(Step {
         kind: StepKind::End,
         job_id: None,

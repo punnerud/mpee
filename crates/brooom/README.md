@@ -28,7 +28,7 @@ only tested solver that converges at all on a laptop.
 | Language              | Rust (stable) |
 | GPU backend           | wgpu (Metal / Vulkan / DX12) |
 | Lines of code         | ~16 000 |
-| Solves                | CVRP, VRPTW, PDPTW, multi-vehicle, time windows, capacity, skills |
+| Solves                | CVRP, VRPTW, PDPTW, multi-depot, backhaul, multi-vehicle, time windows, capacity, skills, driver breaks |
 | Input format          | Vroom-compatible JSON (drop-in) |
 | Output format         | Vroom-compatible JSON |
 | Routing engine        | OSRM via HTTP, custom CH engine (MMM), or precomputed matrix |
@@ -287,7 +287,8 @@ BROOOM_GPU_REPEATS=4 BROOOM_GPU_KICK=8 BROOOM_PENALTY_LS=1 \
 | N ≥ 5 000                      | **brooom_gpu**       | Only solver that scales here |
 | N = 50 000 (laptop)            | **brooom_gpu coord-mode** | Unique capability |
 | PDPTW                          | (unbenchmarked)     | brooom supports it natively |
-| Multi-depot                    | not yet              | Not implemented in brooom |
+| Multi-depot                    | supported           | distinct per-vehicle start/end (Vroom-style) |
+| Backhaul / driver breaks       | supported           | enforced in the route evaluator |
 
 ---
 
@@ -331,8 +332,8 @@ brooom/
 - Distillation pipeline (PyTorch → ONNX → Rust) — research code
 
 **Not implemented:**
-- Multi-depot
-- Heterogeneous fleet (partial — capacity yes, time-window per vehicle no)
+- Soft (penalised) constraints — every constraint is currently hard
+- Multiple shifts per vehicle (one time-window per vehicle, not several)
 - Exact branch-and-cut (only brute-force `--exact-polish` for routes ≤ 14)
 
 ---
@@ -350,8 +351,9 @@ brooom has measured weaknesses or has not been validated:
 2. **Latency for small N** — Vroom solves N=100 in 0.4 s with 99 % of
    PyVRP's quality. For latency-sensitive use cases (interactive routing,
    sub-second response), brooom's 30 s warmup is a poor fit.
-3. **PDPTW / multi-depot / heterogeneous fleet** — supported in the data
-   model but never benchmarked head-to-head.
+3. **PDPTW / multi-depot / heterogeneous fleet / backhaul / breaks** —
+   supported and feasibility-tested (`tests/constraints.rs`), but solution
+   quality is never benchmarked head-to-head against other solvers.
 4. **C / RC / R2 instance series** (clustered, mixed, long time-windows) —
    only R1-style tested; no claim on other geographies.
 5. **Real road-network distances** — only tested on synthetic Euclidean.

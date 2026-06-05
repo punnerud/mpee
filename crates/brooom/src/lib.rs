@@ -34,7 +34,7 @@ pub mod population;
 
 pub use error::{Error, Result};
 pub use problem::{
-    Capacity, Job, Location, Problem, Shipment, TimeWindow, Vehicle, VehicleStep, JobKind,
+    Break, Capacity, Job, Location, Problem, Shipment, TimeWindow, Vehicle, VehicleStep, JobKind,
 };
 pub use matrix::{Matrix, MatrixSource, HaversineMatrix};
 #[cfg(feature = "osrm")]

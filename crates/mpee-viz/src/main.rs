@@ -307,7 +307,7 @@ fn solve_in_process(args: &Args, state: &Arc<RwLock<AppState>>) -> Result<()> {
             speed_factor: 1.0,
             max_tasks: None, max_travel_time: None, max_distance: None,
             fixed: 0.0, per_hour: 3600.0,
-            profile: "car".into(), description: None,
+            profile: "car".into(), breaks: vec![], description: None,
         });
     }
 
