@@ -72,6 +72,13 @@ pub fn precompute(
     let positions = l + 2;
     let speed = vehicle.speed_factor.max(0.01);
 
+    // Multi-trip routes (with a Reload) are not modelled by this O(1) probe;
+    // bail so the caller falls back to the full `evaluate_route` (correct, just
+    // not O(1)). Single-trip routes are unaffected.
+    if steps.iter().any(|s| s.is_reload()) {
+        return None;
+    }
+
     // Pickup-before-delivery and linehaul-before-backhaul checks (O(L)). These
     // mirror `evaluate_route` so the probe prunes the same infeasible orderings
     // early; the evaluator remains the authority.
@@ -87,6 +94,7 @@ pub fn precompute(
                 TaskRef::Delivery(i) => {
                     if !seen.contains(i) { return None; }
                 }
+                TaskRef::Reload => {}
                 TaskRef::Job(_) => {
                     let j = s.description(problem);
                     if !j.pickup.is_empty() && j.delivery.is_empty() {
@@ -187,6 +195,7 @@ pub fn precompute(
                 let amt = if !s.amount.is_empty() { &s.amount } else { &s.pickup.pickup };
                 for i in 0..dim_eff { load[i] -= *amt.get(i).unwrap_or(&0); }
             }
+            TaskRef::Reload => {} // unreachable: precompute bails on reload routes
         }
         if load.iter().any(|&x| x < 0) { return None; }
         if !vehicle.capacity.is_empty() {

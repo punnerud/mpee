@@ -6,6 +6,12 @@
 > `pyspell/eval.rs`; field-only hard bounds are mirrored into `eval.rs::precompute`.
 > Tests: `pyspell/*` unit tests + `tests/pyspell_constraints.rs`. This note records the
 > design (captured from a reviewed-and-removed Python→AST sandbox, `pybox`).
+>
+> Precedence/sequencing builtins (`index`, `before`, `first`, `last`) operate
+> over `route.job_ids` in visiting order, so "A before B" / "X first/last" are
+> expressible per route with no solver change. Cross-route constraints
+> (max-vehicles, client-groups, fairness + an arbitrary global hook) live in
+> `crate::global_constraint`, applied in `recompute_summary`.
 
 ## Motivation
 

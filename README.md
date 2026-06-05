@@ -70,21 +70,26 @@ yourself: `cargo test -p brooom --test constraints`.
 | Mixed fleet (per-vehicle speed / cost / capacity) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Max route duration / distance / stops | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Multi-depot** (distinct per-vehicle start/end) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Priority / optional jobs | ✅ hint | ✅ | ✅ | ✅ prizes | ✅ |
+| Prize-collecting / optional jobs (per-job prize) | ✅ | ⚠️ | ✅ | ✅ prizes | ✅ |
+| **Precedence / sequencing** (A before B, first/last) | ✅ DSL | ❌ | ✅ | ⚠️ | ✅ |
+| **Release times** (earliest service per job) | ✅ | ⚠️ | ✅ | ✅ | ✅ |
+| **Multi-trip / reloading** (return to depot, reload) | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Max-vehicles cap** | ✅ | ⚠️ | ✅ | ✅ | ✅ |
+| **Client-groups** (visit exactly one of a set) | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Fairness / balancing** (duration or load) | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Setup time, fixed + per-hour vehicle cost | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| Soft (penalised) constraints | ✅ per-route | ⚠️ | ✅ | ⚠️ | ✅ |
-| Custom constraints written in code (Rust **or** Python) | ✅ per-route | ❌ | ✅ | ⚠️ | ✅ |
-| Cross-route / global constraints in code | ⛏ roadmap | ❌ | ✅ | ❌ | ✅ |
+| Soft (penalised) constraints | ✅ | ⚠️ | ✅ | ⚠️ | ✅ |
+| Custom constraints written in code (Rust **or** Python) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
+| Cross-route / global constraints in code | ✅ | ❌ | ✅ | ❌ | ✅ |
 
-<sub>✅ built-in · ⚠️ partial or emulated · ❌ not available · ⛏ on the roadmap.
-Competitor columns reflect first-class support per their public docs. MPEE now
-covers code-defined constraints too — see **[Custom constraints in
-code](#custom-constraints-in-code)** below — so the only remaining edge for
-Timefold / OR-Tools is *cross-route / global* constraints (e.g. "at most N
-vehicles in zone Z"): MPEE's hook is evaluated **per route**, not over the whole
-plan. For the standard fleet-routing constraints — every row above the line —
-MPEE matches or beats VROOM and covers what OR-Tools / PyVRP / Timefold offer,
-in one streaming Rust process with no separate matrix step.</sub>
+<sub>✅ built-in · ⚠️ partial or emulated · ❌ not available.
+Competitor columns reflect first-class support per their public docs. With
+per-route custom constraints (pyspell), cross-route built-ins (max-vehicles,
+client-groups, fairness) and an arbitrary solution-level hook, MPEE now covers
+the full standard VRP feature set plus code-defined constraints, in one
+streaming Rust process with no separate matrix step. The remaining edge for
+Timefold/OR-Tools is breadth of *arbitrary* global constraints expressed in
+code; MPEE ships the common ones built-in and a Rust/Python hook for the rest.</sub>
 
 ### Custom constraints in code
 
@@ -177,10 +182,36 @@ bindings before the final expression (`let d = route.end_time - route.start_time
 A bad string is reported as a compile error **before** any solve — never a panic
 (in Python it's raised as `RuntimeError`). Feature-gated
 (`pyspell` for Rust syntax, `pyspell-python` adds Python); the default build pulls no new
-crates. The genuinely remaining gap vs Timefold is *cross-route / global*
-constraints — this hook is per route. Proven by
+crates. Precedence/sequencing uses the `index`/`before`/`first`/`last` builtins
+over `route.job_ids` (visiting order), e.g.
+`!route.job_ids.contains(10) || before(route.job_ids, 10, 20)` ("if both are on
+this route, 10 before 20"). Proven by
 [`crates/brooom/tests/pyspell_constraints.rs`](crates/brooom/tests/pyspell_constraints.rs);
-design in [`crates/brooom/docs/constraint-dsl-design.md`](crates/brooom/docs/constraint-dsl-design.md).
+design in [`crates/brooom/docs/pyspell-design.md`](crates/brooom/docs/pyspell-design.md).
+
+### Advanced VRP variants
+
+Beyond the per-route hook, these are first-class — set a field or a solve knob:
+
+| Variant | How |
+|---|---|
+| Prize-collecting / optional jobs | per-job `prize` (finite ⇒ optional, worth that much; default ⇒ mandatory) |
+| Release times | per-job `release` (earliest service time, seconds) |
+| Client-groups (visit exactly one) | per-job `group` id |
+| Multi-trip / reloading | per-vehicle `max_trips > 1` (returns to depot to reload) |
+| Max-vehicles cap | solve option `max_vehicles` |
+| Fairness / balancing | solve options `fairness_weight` + `fairness_metric` ("duration"/"load") |
+
+```python
+plan = router.solve(problem_json, max_vehicles=8, fairness_weight=2.0)
+# per-job  {"id": 7, "location": {...}, "prize": 200, "release": 3600, "group": 1}
+# per-veh  {"id": 1, "start": {...}, "capacity": [100], "max_trips": 3}
+```
+
+The built-in cross-route constraints (max-vehicles, client-groups, fairness) ride
+on a solution-level hook (`brooom::global_constraint`); a custom Rust/Python
+global is the escape hatch for anything else. Multi-trip and any global keep the
+solve on the CPU evaluator.
 
 ## Install (Python / CLI)
 

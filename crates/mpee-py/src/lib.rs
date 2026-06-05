@@ -568,7 +568,7 @@ impl Router {
                         skills: vec![], time_window: None, speed_factor: 1.0,
                         max_tasks: None, max_travel_time: None, max_distance: None,
                         fixed: 0.0, per_hour: 3600.0, profile: "car".into(),
-                        breaks: vec![], description: None,
+                        breaks: vec![], max_trips: 1, description: None,
                     });
                 }
                 for i in 0..stops.len() {
@@ -691,15 +691,24 @@ impl Router {
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
-    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None))]
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration"))]
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
         constraints: Option<Vec<Py<PyAny>>>,
+        max_vehicles: Option<usize>, fairness_weight: f64, fairness_metric: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
             .map_err(|e| PyRuntimeError::new_err(format!("problem JSON: {e}")))?;
         problem.validate().map_err(|e| PyRuntimeError::new_err(format!("invalid problem: {e}")))?;
+
+        let fairness_metric = match fairness_metric {
+            "load" => brooom::FairnessMetric::Load,
+            "duration" => brooom::FairnessMetric::Duration,
+            other => return Err(PyRuntimeError::new_err(format!(
+                "fairness_metric must be \"duration\" or \"load\", got {other:?}"
+            ))),
+        };
 
         // Install any custom constraints (code) for the duration of this solve.
         // Each item is either a Python callable (invoked per route) or a string
@@ -749,6 +758,9 @@ impl Router {
                     time_limit_ms: Some((time_limit_s * 1000.0) as u64),
                     verbose: false,
                     use_gpu,
+                    max_vehicles,
+                    fairness_weight,
+                    fairness_metric,
                     ..Default::default()
                 };
                 let t = std::time::Instant::now();
@@ -998,7 +1010,7 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
             max_travel_time: max_tt,
             max_distance: max_d,
             fixed: 0.0, per_hour: 3600.0,
-            profile: "car".into(), breaks: vec![], description: None,
+            profile: "car".into(), breaks: vec![], max_trips: 1, description: None,
         });
     }
 

@@ -200,7 +200,10 @@ rebuilds an existing cache.)
 For mixed fleets and constrained jobs, use `Router.solve(problem)` with a
 [VROOM](https://github.com/VROOM-Project)-style problem (JSON). It exposes the
 engine's full model — vehicle types, capacities, skills, time windows and
-distinct start/end depots:
+distinct start/end depots, plus per-job `prize` (prize-collecting / optional),
+`release` (earliest service), `group` (visit exactly one of a set), per-vehicle
+`max_trips` (multi-trip / reloading), and the solve options `max_vehicles`,
+`fairness_weight` + `fairness_metric` ("duration"/"load"):
 
 ```python
 import json, mpee

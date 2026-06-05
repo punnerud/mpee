@@ -148,6 +148,8 @@ pub struct VehicleIn {
     pub per_hour: Option<Cost>,
     #[serde(default)]
     pub breaks: Vec<BreakIn>,
+    #[serde(default = "default_max_trips_in")]
+    pub max_trips: usize,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -218,9 +220,12 @@ fn vehicle_from(v: &VehicleIn) -> Vehicle {
             time_windows: b.time_windows.iter().copied().map(tw_from).collect(),
             description: b.description.clone(),
         }).collect(),
+        max_trips: v.max_trips,
         description: v.description.clone(),
     }
 }
+
+fn default_max_trips_in() -> usize { 1 }
 
 impl From<VroomInput> for Problem {
     fn from(v: VroomInput) -> Self {
@@ -336,6 +341,7 @@ pub fn to_output(
                 TaskRef::Job(_) => "job".to_string(),
                 TaskRef::Pickup(_) => "pickup".to_string(),
                 TaskRef::Delivery(_) => "delivery".to_string(),
+                TaskRef::Reload => "reload".to_string(),
             },
             location_index: j.location.index,
             location: j.location.coord,
@@ -361,9 +367,11 @@ fn route_steps(
     let speed = veh.speed_factor.max(0.01);
     let vw = veh.time_window();
 
-    // Recompute load profile: leave depot loaded with all deliveries.
+    // Recompute load profile: leave the depot loaded with the FIRST trip's
+    // deliveries (reset at each reload below for multi-trip routes).
     let mut load = vec![0i64; dim];
     for s in &r.steps {
+        if let TaskRef::Reload = s { break; }
         let j = s.description(problem);
         for k in 0..dim {
             load[k] += *j.delivery.get(k).unwrap_or(&0);
@@ -408,7 +416,41 @@ fn route_steps(
         .and_then(|p| crate::matrix::Matrix::from_provided(p).ok());
     let matrix: Option<&crate::matrix::Matrix> = explicit_matrix.or(owned_matrix.as_ref());
 
-    for s in &r.steps {
+    for (k, s) in r.steps.iter().enumerate() {
+        // Multi-trip reload: travel back to the depot, reset the load to the
+        // next trip's deliveries, emit a `reload` step, and depart again.
+        if let TaskRef::Reload = s {
+            if let (Some(p), Some(d)) = (prev, start_idx) {
+                if let Some(mx) = matrix {
+                    let dur = ((mx.duration(p, d) as f64) * speed).round() as i64;
+                    t += dur;
+                    total_travel += dur;
+                    total_dist += mx.distance(p, d);
+                }
+            }
+            for v in load.iter_mut() { *v = 0; }
+            for ns in &r.steps[k + 1..] {
+                if let TaskRef::Reload = ns { break; }
+                if let TaskRef::Job(_) = ns {
+                    let nj = ns.description(problem);
+                    for kk in 0..dim { load[kk] += *nj.delivery.get(kk).unwrap_or(&0); }
+                }
+            }
+            steps.push(Step {
+                kind: StepKind::Reload,
+                job_id: None,
+                location_index: start_idx,
+                arrival: t,
+                service: 0,
+                waiting_time: 0,
+                setup: 0,
+                load: load.clone(),
+                distance: total_dist,
+            });
+            prev = start_idx;
+            continue;
+        }
+
         let j = s.description(problem);
         let here = j.location.index.unwrap_or(0);
 
@@ -466,12 +508,14 @@ fn route_steps(
                 };
                 for k in 0..dim { load[k] -= *amt.get(k).unwrap_or(&0); }
             }
+            TaskRef::Reload => {} // handled above
         }
 
         let kind = match s {
             TaskRef::Job(_) => StepKind::Job,
             TaskRef::Pickup(_) => StepKind::Pickup,
             TaskRef::Delivery(_) => StepKind::Delivery,
+            TaskRef::Reload => StepKind::Reload,
         };
 
         steps.push(Step {

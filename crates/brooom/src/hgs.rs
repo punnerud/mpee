@@ -233,6 +233,7 @@ fn edge_set(sol: &Solution) -> HashSet<(u32, u32)> {
                 TaskRef::Job(i) => (i as u64) << 2 | 1,
                 TaskRef::Pickup(i) => (i as u64) << 2 | 2,
                 TaskRef::Delivery(i) => (i as u64) << 2 | 3,
+                TaskRef::Reload => continue, // HGS is single-trip; ignore reload markers
             };
             edges.insert((last as u32, v as u32));
             last = v;

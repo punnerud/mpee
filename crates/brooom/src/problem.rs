@@ -251,6 +251,11 @@ pub struct Vehicle {
     /// Mandatory driver breaks; each must be taken within one of its windows.
     #[serde(default)]
     pub breaks: Vec<Break>,
+    /// Maximum number of trips this vehicle may make from its depot within one
+    /// shift (multi-trip / reloading). 1 (default) = a single trip; >1 lets the
+    /// solver return to the depot to reload and continue.
+    #[serde(default = "default_max_trips")]
+    pub max_trips: usize,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -258,6 +263,7 @@ pub struct Vehicle {
 fn one() -> f64 { 1.0 }
 fn default_per_hour() -> f64 { 3600.0 }
 fn default_profile() -> String { "car".to_string() }
+fn default_max_trips() -> usize { 1 }
 
 impl Vehicle {
     pub fn time_window(&self) -> TimeWindow {
@@ -269,6 +275,10 @@ impl Vehicle {
     /// Vehicle dominates a job's skills iff the vehicle has every skill the job requires.
     pub fn has_skills(&self, required: &[u32]) -> bool {
         required.iter().all(|s| self.skills.contains(s))
+    }
+    /// Whether this vehicle may make more than one trip (reload at the depot).
+    pub fn is_multi_trip(&self) -> bool {
+        self.max_trips > 1
     }
 }
 
@@ -299,6 +309,11 @@ pub struct ProvidedMatrix {
 }
 
 impl Problem {
+    /// Whether any vehicle is configured for multiple trips (reloading).
+    pub fn any_multi_trip(&self) -> bool {
+        self.vehicles.iter().any(|v| v.is_multi_trip())
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.vehicles.is_empty() {
             return Err(Error::Invalid("at least one vehicle is required".into()));

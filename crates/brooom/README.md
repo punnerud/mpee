@@ -28,7 +28,7 @@ only tested solver that converges at all on a laptop.
 | Language              | Rust (stable) |
 | GPU backend           | wgpu (Metal / Vulkan / DX12) |
 | Lines of code         | ~16 000 |
-| Solves                | CVRP, VRPTW, PDPTW, multi-depot, backhaul, multi-vehicle, time windows, capacity, skills, driver breaks |
+| Solves                | CVRP, VRPTW, PDPTW, multi-depot, backhaul, multi-trip, prize-collecting, client-groups, multi-vehicle, time windows, release times, capacity, skills, driver breaks, precedence, fairness/max-vehicles |
 | Input format          | Vroom-compatible JSON (drop-in) |
 | Output format         | Vroom-compatible JSON |
 | Routing engine        | OSRM via HTTP, custom CH engine (MMM), or precomputed matrix |

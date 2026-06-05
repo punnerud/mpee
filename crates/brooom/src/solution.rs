@@ -16,6 +16,34 @@ pub enum TaskRef {
     Job(usize),
     Pickup(usize),
     Delivery(usize),
+    /// Return-to-depot reload marker for a multi-trip vehicle. Carries no job;
+    /// `description` yields a neutral sentinel so step-iterating heuristics
+    /// never panic, while the authoritative walkers (`evaluate_route` / io)
+    /// handle it against the vehicle's depot.
+    Reload,
+}
+
+/// Neutral job returned for `TaskRef::Reload` — no location, no demand, no
+/// skills — so heuristics that read a step's job don't panic. The reload's real
+/// effect (depot leg + load reset) is applied by the route evaluator.
+fn reload_sentinel() -> &'static Job {
+    static S: std::sync::OnceLock<Job> = std::sync::OnceLock::new();
+    S.get_or_init(|| Job {
+        id: 0,
+        location: crate::problem::Location { coord: None, index: None },
+        kind: Default::default(),
+        service: 0,
+        setup: 0,
+        release: 0,
+        delivery: vec![],
+        pickup: vec![],
+        skills: vec![],
+        priority: 0,
+        time_windows: vec![],
+        prize: crate::problem::DEFAULT_PRIZE,
+        group: None,
+        description: None,
+    })
 }
 
 impl TaskRef {
@@ -24,11 +52,16 @@ impl TaskRef {
             TaskRef::Job(i) => &p.jobs[*i],
             TaskRef::Pickup(i) => &p.shipments[*i].pickup,
             TaskRef::Delivery(i) => &p.shipments[*i].delivery,
+            TaskRef::Reload => reload_sentinel(),
         }
+    }
+    /// Whether this step is a depot reload (multi-trip boundary).
+    pub fn is_reload(&self) -> bool {
+        matches!(self, TaskRef::Reload)
     }
     pub fn kind(&self) -> JobKind {
         match self {
-            TaskRef::Job(_) => JobKind::Single,
+            TaskRef::Job(_) | TaskRef::Reload => JobKind::Single,
             TaskRef::Pickup(_) => JobKind::Pickup,
             TaskRef::Delivery(_) => JobKind::Delivery,
         }
@@ -36,6 +69,7 @@ impl TaskRef {
     pub fn skills<'a>(&self, p: &'a Problem) -> &'a [u32] {
         match self {
             TaskRef::Job(i) => &p.jobs[*i].skills,
+            TaskRef::Reload => &[],
             TaskRef::Pickup(i) | TaskRef::Delivery(i) => {
                 let s = &p.shipments[*i];
                 if !s.skills.is_empty() { &s.skills } else { &s.pickup.skills }
@@ -45,6 +79,7 @@ impl TaskRef {
     pub fn priority(&self, p: &Problem) -> u8 {
         match self {
             TaskRef::Job(i) => p.jobs[*i].priority,
+            TaskRef::Reload => 0,
             TaskRef::Pickup(i) | TaskRef::Delivery(i) => p.shipments[*i].priority,
         }
     }
@@ -98,6 +133,7 @@ pub enum StepKind {
     Pickup,
     Delivery,
     Break,
+    Reload,
     End,
 }
 
@@ -254,9 +290,11 @@ fn evaluate_route_with_buf(
     }
     for v in load[..dim].iter_mut() { *v = 0; }
 
-    // Initial load = sum of all single-job deliveries (shipments are picked
-    // up en-route, not pre-loaded).
+    // Initial load = sum of the FIRST trip's single-job deliveries (shipments
+    // are picked up en-route). For multi-trip routes the load is reset to the
+    // next trip's deliveries at each `Reload`, so only sum up to the first one.
     for s in steps {
+        if let TaskRef::Reload = s { break; }
         if let TaskRef::Job(_) = s {
             let j = s.description(problem);
             for (i, &v) in j.delivery.iter().enumerate() {
@@ -288,7 +326,7 @@ fn evaluate_route_with_buf(
                     return Err("delivery before pickup");
                 }
             }
-            TaskRef::Job(_) => {}
+            TaskRef::Job(_) | TaskRef::Reload => {}
         }
     }
 
@@ -321,10 +359,56 @@ fn evaluate_route_with_buf(
     // window. `break_idx` is the next break still to schedule.
     let breaks = &vehicle.breaks;
     let mut break_idx = 0usize;
+    // Multi-trip: shipments may not be carried across a depot reload.
+    let mut open_shipments: i32 = 0;
 
-    for s in steps {
+    for (k, s) in steps.iter().enumerate() {
+        // Multi-trip reload: close the current trip back at the depot, reset the
+        // load to the next trip's deliveries, and depart the depot again. Time,
+        // travel and distance accumulate across the whole shift.
+        if let TaskRef::Reload = s {
+            if open_shipments != 0 {
+                return Err("reload while a shipment is still on board");
+            }
+            if let (Some(p), Some(d)) = (prev_idx, start_idx) {
+                let raw = matrix.duration(p, d);
+                if raw as i64 >= UNREACHABLE_LEG {
+                    return Err("unreachable leg (no road to depot for reload)");
+                }
+                let dur = ((raw as f64) * speed).round() as i64;
+                t += dur;
+                travel_time += dur;
+                distance += matrix.distance(p, d);
+            }
+            // Reset load to the next trip's single-job deliveries.
+            for v in load[..dim].iter_mut() { *v = 0; }
+            for ns in &steps[k + 1..] {
+                if let TaskRef::Reload = ns { break; }
+                if let TaskRef::Job(_) = ns {
+                    let nj = ns.description(problem);
+                    for (i, &v) in nj.delivery.iter().enumerate() {
+                        if i < dim { load[i] += v; }
+                    }
+                }
+            }
+            for (i, &cap_i) in vehicle.capacity.iter().enumerate() {
+                if i < dim && load[i] > cap_i {
+                    return Err("capacity exceeded after reload");
+                }
+            }
+            seen_backhaul = false;
+            prev_idx = start_idx;
+            continue;
+        }
+
         let job = s.description(problem);
         let here = job.location.index.ok_or("job location missing matrix index")?;
+
+        match s {
+            TaskRef::Pickup(_) => open_shipments += 1,
+            TaskRef::Delivery(_) => open_shipments -= 1,
+            _ => {}
+        }
 
         if let TaskRef::Job(_) = s {
             if is_backhaul(job) {
@@ -396,6 +480,7 @@ fn evaluate_route_with_buf(
                     if i < dim { load[i] -= v; }
                 }
             }
+            TaskRef::Reload => {} // handled at the top of the loop
         }
         for i in 0..dim {
             if load[i] < 0 { return Err("negative load (over-delivery)"); }

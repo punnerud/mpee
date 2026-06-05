@@ -277,6 +277,7 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     if config.use_gpu && best.routes.len() > 0 && matrix.n >= 500
         && !crate::constraint::has_constraints()
         && !crate::global_constraint::has_global()
+        && !problem.any_multi_trip()
     {
         let t_gpu = std::time::Instant::now();
         let max_iter = if matrix.n >= 5000 { 2000 } else { 1000 };
@@ -494,6 +495,8 @@ fn repair_unassigned(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
     enum Slot {
         Existing(usize, usize),
         NewVehicle(usize),
+        /// Replace a route's steps wholesale (used to open a new multi-trip leg).
+        Replace(usize, Vec<TaskRef>),
     }
 
     // Multi-pass: a job whose *solo* round-trip is infeasible (e.g. a one-way
@@ -535,6 +538,25 @@ fn repair_unassigned(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
                     }
                 }
             }
+            // Multi-trip: open a new trip for this vehicle if it has trips left.
+            // A reload resets the load, so a job that won't fit the current trip
+            // can ride a fresh one.
+            if veh.is_multi_trip() {
+                let reloads = sol.routes[ri].steps.iter().filter(|s| s.is_reload()).count();
+                if reloads + 1 < veh.max_trips {
+                    let mut cand = sol.routes[ri].steps.clone();
+                    cand.push(TaskRef::Reload);
+                    cand.push(task);
+                    if let Ok(m) = evaluate_route(problem, matrix, veh, &cand) {
+                        if m.distance < UNREACHABLE_M {
+                            let delta = m.cost - old;
+                            if best.as_ref().map_or(true, |b| delta < b.1) {
+                                best = Some((Slot::Replace(ri, cand), delta, m));
+                            }
+                        }
+                    }
+                }
+            }
         }
         // (b) one fresh route per currently-unused vehicle.
         let used: std::collections::HashSet<usize> =
@@ -565,6 +587,11 @@ fn repair_unassigned(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
             }
             Some((Slot::NewVehicle(vi), _, m)) => {
                 sol.routes.push(Route { vehicle_idx: vi, steps: vec![task], metrics: m });
+                placed_any = true;
+            }
+            Some((Slot::Replace(ri, steps), _, m)) => {
+                sol.routes[ri].steps = steps;
+                sol.routes[ri].metrics = m;
                 placed_any = true;
             }
             None => leftovers.push(task),
