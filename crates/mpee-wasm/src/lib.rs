@@ -254,6 +254,7 @@ impl Engine {
                 delivery: vec![1],
                 pickup: vec![],
                 skills: vec![],
+                allowed_vehicles: None,
                 priority: 0,
                 time_windows: vec![],
                 prize: brooom::problem::DEFAULT_PRIZE,

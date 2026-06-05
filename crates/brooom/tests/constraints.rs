@@ -149,6 +149,76 @@ fn break_pushes_timeline_by_its_duration() {
     );
     // Travel time is unaffected — a break is rest, not driving.
     assert_eq!(mwith.travel_time, mno.travel_time);
+
+    // The finished route exposes how many breaks ran and their total duration —
+    // this is what the DSL `route.has_break` / `route.break_count` reads.
+    assert_eq!(mwith.break_count, 1, "one break was scheduled");
+    assert_eq!(mwith.break_duration, 600, "its duration is recorded");
+    assert_eq!(mno.break_count, 0, "no breaks on the break-free vehicle");
+    assert_eq!(mno.break_duration, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Vehicle allowlist (`allowed_vehicles`): a job may only ride a listed vehicle.
+// Unset (None) leaves the job servable by any eligible vehicle.
+// ---------------------------------------------------------------------------
+#[test]
+fn allowed_vehicles_pins_a_job_to_its_vehicle() {
+    // Two identical vehicles. Job 1 is pinned to vehicle 2; job 2 to vehicle 1.
+    // The depot is shared, so without the allowlist either vehicle could take
+    // either job. With it, each job must land on its allowed vehicle.
+    let json = r#"{
+        "vehicles": [
+            {"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10]},
+            {"id": 2, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10]}
+        ],
+        "jobs": [
+            {"id": 1, "location": [10.10, 60.0], "delivery": [1], "allowed_vehicles": [2]},
+            {"id": 2, "location": [10.20, 60.0], "delivery": [1], "allowed_vehicles": [1]}
+        ]
+    }"#;
+    let mut problem = parse_input(json).unwrap();
+    let sol = solve(&mut problem, Some(&HaversineMatrix::default()), SolverConfig::default()).unwrap();
+    assert_eq!(sol.unassigned.len(), 0, "both jobs must be placed on their allowed vehicle");
+    for r in &sol.routes {
+        let veh_id = problem.vehicles[r.vehicle_idx].id;
+        for s in &r.steps {
+            let job = s.description(&problem);
+            assert!(
+                job.allows_vehicle(veh_id),
+                "job {} landed on vehicle {} which is not in its allowlist",
+                job.id, veh_id
+            );
+        }
+    }
+}
+
+#[test]
+fn allowed_vehicles_rejected_directly_by_evaluate_route() {
+    // Direct evaluator check: a job pinned away from this vehicle is rejected.
+    let json = r#"{
+        "vehicles": [
+            {"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10]}
+        ],
+        "jobs": [
+            {"id": 1, "location": [10.10, 60.0], "delivery": [1], "allowed_vehicles": [99]}
+        ]
+    }"#;
+    let (p, m) = prep(json);
+    let r = evaluate_route(&p, &m, &p.vehicles[0], &[TaskRef::Job(0)]);
+    assert_eq!(r.err(), Some("job not allowed on this vehicle"));
+
+    // Sanity: the same job with no allowlist evaluates fine.
+    let json_ok = r#"{
+        "vehicles": [
+            {"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10]}
+        ],
+        "jobs": [
+            {"id": 1, "location": [10.10, 60.0], "delivery": [1]}
+        ]
+    }"#;
+    let (p2, m2) = prep(json_ok);
+    assert!(evaluate_route(&p2, &m2, &p2.vehicles[0], &[TaskRef::Job(0)]).is_ok());
 }
 
 #[test]

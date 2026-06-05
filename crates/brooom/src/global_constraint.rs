@@ -142,9 +142,16 @@ pub fn max_vehicles(cap: usize) -> Arc<GlobalConstraintFn> {
     })
 }
 
-/// Penalize any client-group that doesn't have exactly one served member.
-pub fn exactly_one_per_group() -> Arc<GlobalConstraintFn> {
-    Arc::new(|v: &SolutionView| {
+/// Penalize any client-group whose number of served members falls outside
+/// `[min, max]` — a "k-of-N" choose constraint. The penalty is `HARD` per
+/// member over/under the bound, so the search keeps a gradient (one too many
+/// out-ranks two too many) while still treating the bound as effectively hard.
+///
+/// `min == max == 1` reproduces the classic "exactly one per group" rule.
+pub fn k_of_n_per_group(min: u32, max: u32) -> Arc<GlobalConstraintFn> {
+    let lo = min as i64;
+    let hi = max as i64;
+    Arc::new(move |v: &SolutionView| {
         use std::collections::HashMap;
         let mut served: HashMap<u32, i64> = HashMap::new();
         for r in v.routes {
@@ -154,7 +161,7 @@ pub fn exactly_one_per_group() -> Arc<GlobalConstraintFn> {
                 }
             }
         }
-        // Every group declared on any job must end with exactly one served.
+        // Every group declared on any job must end within [lo, hi] served.
         let mut groups: HashMap<u32, ()> = HashMap::new();
         for j in &v.problem.jobs {
             if let Some(g) = j.group {
@@ -164,12 +171,18 @@ pub fn exactly_one_per_group() -> Arc<GlobalConstraintFn> {
         let mut pen = 0.0;
         for g in groups.keys() {
             let c = served.get(g).copied().unwrap_or(0);
-            if c != 1 {
-                pen += HARD * (c - 1).unsigned_abs() as Cost;
-            }
+            let over = (c - hi).max(0);
+            let under = (lo - c).max(0);
+            pen += HARD * (over + under) as Cost;
         }
         pen
     })
+}
+
+/// Penalize any client-group that doesn't have exactly one served member.
+/// Thin wrapper over [`k_of_n_per_group`] with `min == max == 1`.
+pub fn exactly_one_per_group() -> Arc<GlobalConstraintFn> {
+    k_of_n_per_group(1, 1)
 }
 
 /// Penalize the spread (max - min) of a per-route metric across used routes,
@@ -190,4 +203,67 @@ pub fn fairness(weight: Cost, metric: FairnessMetric) -> Arc<GlobalConstraintFn>
         let max = *vals.iter().max().unwrap();
         weight * (max - min) as Cost
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::{Job, Location, Problem};
+    use crate::solution::{Route, RouteMetrics, TaskRef};
+
+    /// A grouped job at problem index `idx` with group `g`.
+    fn grouped_job(id: u64, g: u32) -> Job {
+        Job {
+            id,
+            location: Location { coord: None, index: Some(0) },
+            kind: Default::default(),
+            service: 0,
+            setup: 0,
+            release: 0,
+            delivery: vec![1],
+            pickup: vec![],
+            skills: vec![],
+            allowed_vehicles: None,
+            priority: 0,
+            time_windows: vec![],
+            prize: crate::problem::DEFAULT_PRIZE,
+            group: Some(g),
+            description: None,
+        }
+    }
+
+    /// Build a problem of `n` jobs all in group 1, and a single route serving
+    /// the first `served` of them, then evaluate `c`'s penalty.
+    fn penalty_for(c: &Arc<GlobalConstraintFn>, n: usize, served: usize) -> Cost {
+        let mut p = Problem::default();
+        p.jobs = (0..n).map(|i| grouped_job(i as u64 + 1, 1)).collect();
+        let route = Route {
+            vehicle_idx: 0,
+            steps: (0..served).map(TaskRef::Job).collect(),
+            metrics: RouteMetrics::default(),
+        };
+        let routes = vec![route];
+        let view = SolutionView { problem: &p, routes: &routes, unassigned: &[] };
+        c(&view)
+    }
+
+    #[test]
+    fn exactly_one_is_one_one() {
+        let c = exactly_one_per_group();
+        // 0 served → 1 under → HARD; 1 → ok; 3 → 2 over → 2*HARD.
+        assert_eq!(penalty_for(&c, 3, 0), HARD);
+        assert_eq!(penalty_for(&c, 3, 1), 0.0);
+        assert_eq!(penalty_for(&c, 3, 3), 2.0 * HARD);
+    }
+
+    #[test]
+    fn k_of_n_allows_a_range() {
+        // "between 2 and 3 of the group must be served".
+        let c = k_of_n_per_group(2, 3);
+        assert_eq!(penalty_for(&c, 5, 0), 2.0 * HARD, "0 served is 2 under the min");
+        assert_eq!(penalty_for(&c, 5, 1), HARD, "1 served is 1 under the min");
+        assert_eq!(penalty_for(&c, 5, 2), 0.0, "2 is inside [2,3]");
+        assert_eq!(penalty_for(&c, 5, 3), 0.0, "3 is inside [2,3]");
+        assert_eq!(penalty_for(&c, 5, 5), 2.0 * HARD, "5 served is 2 over the max");
+    }
 }

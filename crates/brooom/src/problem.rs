@@ -135,6 +135,11 @@ pub struct Job {
 
     #[serde(default)]
     pub skills: SkillSet,
+    /// Vehicle allowlist: if `Some`, this job may only be served by a vehicle
+    /// whose `id` appears in the list. `None` (the default) leaves the job
+    /// servable by any otherwise-eligible vehicle, preserving old behavior.
+    #[serde(default)]
+    pub allowed_vehicles: Option<Vec<u64>>,
     /// Priority 0..=100. Higher means more important to schedule.
     #[serde(default)]
     pub priority: u8,
@@ -264,6 +269,18 @@ fn one() -> f64 { 1.0 }
 fn default_per_hour() -> f64 { 3600.0 }
 fn default_profile() -> String { "car".to_string() }
 fn default_max_trips() -> usize { 1 }
+
+impl Job {
+    /// Whether a vehicle with id `vehicle_id` is allowed to serve this job.
+    /// `allowed_vehicles == None` (the default) means any vehicle is allowed.
+    #[inline]
+    pub fn allows_vehicle(&self, vehicle_id: u64) -> bool {
+        match &self.allowed_vehicles {
+            None => true,
+            Some(ids) => ids.contains(&vehicle_id),
+        }
+    }
+}
 
 impl Vehicle {
     pub fn time_window(&self) -> TimeWindow {

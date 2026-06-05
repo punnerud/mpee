@@ -31,6 +31,12 @@ pub enum Field {
     RouteDuration,
     /// Derived: number of stops on the route.
     RouteStopCount,
+    /// `1` if at least one driver break was scheduled on this route, else `0`.
+    RouteHasBreak,
+    /// Number of driver breaks scheduled on this route.
+    RouteBreakCount,
+    /// Total seconds spent on driver breaks on this route.
+    RouteBreakDuration,
     VehicleId,
     /// `vehicle.max_tasks.unwrap_or(i64::MAX)`.
     VehicleMaxTasks,

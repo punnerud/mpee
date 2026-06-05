@@ -91,6 +91,9 @@ pub struct JobIn {
     pub pickup: Capacity,
     #[serde(default)]
     pub skills: SkillSet,
+    /// Vehicle allowlist: if present, only these vehicle ids may serve the job.
+    #[serde(default)]
+    pub allowed_vehicles: Option<Vec<u64>>,
     #[serde(default)]
     pub priority: u8,
     #[serde(default)]
@@ -191,6 +194,7 @@ fn job_from(j: &JobIn) -> Job {
         delivery: j.delivery.clone(),
         pickup: j.pickup.clone(),
         skills: j.skills.clone(),
+        allowed_vehicles: j.allowed_vehicles.clone(),
         priority: j.priority,
         time_windows: j.time_windows.iter().copied().map(tw_from).collect(),
         prize: j.prize,

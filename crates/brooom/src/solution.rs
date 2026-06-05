@@ -38,6 +38,7 @@ fn reload_sentinel() -> &'static Job {
         delivery: vec![],
         pickup: vec![],
         skills: vec![],
+        allowed_vehicles: None,
         priority: 0,
         time_windows: vec![],
         prize: crate::problem::DEFAULT_PRIZE,
@@ -96,6 +97,10 @@ pub struct RouteMetrics {
     pub setup_time: Time,
     pub distance: i64,
     pub cost: Cost,
+    /// Number of driver breaks actually scheduled on this route.
+    pub break_count: u32,
+    /// Total seconds spent on driver breaks on this route.
+    pub break_duration: Time,
 }
 
 /// One route in the final solution.
@@ -316,6 +321,9 @@ fn evaluate_route_with_buf(
         if !vehicle.has_skills(s.skills(problem)) {
             return Err("vehicle missing required skill");
         }
+        if !s.description(problem).allows_vehicle(vehicle.id) {
+            return Err("job not allowed on this vehicle");
+        }
         match s {
             TaskRef::Pickup(i) => {
                 if pickups_seen.len() <= *i { pickups_seen.resize(*i + 1, false); }
@@ -359,6 +367,10 @@ fn evaluate_route_with_buf(
     // window. `break_idx` is the next break still to schedule.
     let breaks = &vehicle.breaks;
     let mut break_idx = 0usize;
+    // Track how many breaks were scheduled and their total duration so finished
+    // routes can expose them (used by the DSL `route.has_break` etc.).
+    let mut break_count: u32 = 0;
+    let mut break_duration: Time = 0;
     // Multi-trip: shipments may not be carried across a depot reload.
     let mut open_shipments: i32 = 0;
 
@@ -502,6 +514,8 @@ fn evaluate_route_with_buf(
             let tw = pick_time_window(&br.time_windows, t).ok_or("break time window missed")?;
             if t < tw.start { break; }
             t += br.service;
+            break_count += 1;
+            break_duration += br.service;
             break_idx += 1;
         }
 
@@ -537,6 +551,8 @@ fn evaluate_route_with_buf(
             return Err("break time window missed");
         }
         t += br.service;
+        break_count += 1;
+        break_duration += br.service;
         break_idx += 1;
     }
 
@@ -570,6 +586,8 @@ fn evaluate_route_with_buf(
         setup_time,
         distance,
         cost,
+        break_count,
+        break_duration,
     };
 
     // User-supplied custom constraints (code, from Rust or Python). The flag
