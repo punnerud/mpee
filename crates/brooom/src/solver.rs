@@ -72,6 +72,56 @@ pub struct SolverConfig {
     /// these weights merely shape it. A real phase-1 (minimise vehicle count)
     /// then phase-2 (minimise cost) solver is out of scope here.
     pub objective_weights: Option<crate::global_constraint::ObjectiveWeights>,
+    /// How the objective is optimised. `Scalar` (the default) is today's exact
+    /// behaviour: one aggregated cost scalar minimised by the metaheuristic.
+    /// `Lexicographic` runs the two-phase driver in [`solve_with_matrix`]:
+    /// phase 1 minimises the vehicle count, phase 2 re-solves minimising cost
+    /// with the phase-1 vehicle count pinned as a hard cap. See [`ObjectiveMode`].
+    pub objective_mode: ObjectiveMode,
+}
+
+/// Selects scalar (default) vs. two-phase lexicographic optimisation.
+///
+/// `Scalar` is byte-identical to the historical solver: a single aggregated
+/// cost is minimised and the secondary "use fewer vehicles" preference is only
+/// whatever the cost function happens to encode.
+///
+/// `Lexicographic { Vehicles, Cost }` is a real two-phase driver:
+///   * **Phase 1** minimises the PRIMARY objective — number of vehicles/routes
+///     used — by running the search with a large per-vehicle fixed cost so the
+///     metaheuristic packs jobs onto as few routes as feasible, then reads back
+///     `vehicles_used` as V*.
+///   * **Phase 2** re-solves minimising the SECONDARY objective (cost) while
+///     pinning `max_vehicles(V*)` as a HARD cap, so the search can lower travel
+///     cost but can never regress the primary objective.
+///
+/// HONEST CAVEAT: V* is the metaheuristic's *best-found* vehicle count, NOT a
+/// proven optimum, so this is best-effort lexicographic (the standard practical
+/// meaning), not exact lexicographic. It is also fixed at two levels
+/// (count → cost); a general N-level lexicographic stack is a further
+/// generalisation not implemented here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObjectiveMode {
+    /// Today's behaviour: minimise one aggregated cost scalar.
+    #[default]
+    Scalar,
+    /// Two-phase: minimise `primary` first, then `secondary` with the primary
+    /// held at its phase-1 best as a hard constraint.
+    Lexicographic {
+        primary: LexObjective,
+        secondary: LexObjective,
+    },
+}
+
+/// The objectives a lexicographic phase can optimise. Today only the
+/// `(Vehicles, Cost)` ordering is wired end-to-end; the enum is spelled out so
+/// the intent reads clearly and so a future N-level stack has names to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LexObjective {
+    /// Number of vehicles/routes used (`vehicles_used`).
+    Vehicles,
+    /// Aggregated travel/operating cost (`summary.cost`).
+    Cost,
 }
 
 impl Default for SolverConfig {
@@ -98,6 +148,7 @@ impl Default for SolverConfig {
             fairness_weight: 0.0,
             fairness_metric: crate::global_constraint::FairnessMetric::Duration,
             objective_weights: None,
+            objective_mode: ObjectiveMode::Scalar,
         }
     }
 }
@@ -147,6 +198,138 @@ pub fn solve_full(
 /// baseline so we can never beat-then-lose; seeds 1..K shuffle pending tasks
 /// within priority class to give LS distinct starting points.
 pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConfig) -> Solution {
+    match config.objective_mode {
+        // Default path: byte-identical to the historical single-scalar solver.
+        ObjectiveMode::Scalar => solve_scalar(problem, matrix, config),
+        ObjectiveMode::Lexicographic { primary, secondary } => {
+            solve_lexicographic(problem, matrix, config, primary, secondary)
+        }
+    }
+}
+
+/// Two-phase lexicographic driver: minimise `primary` (phase 1), then minimise
+/// `secondary` (phase 2) with the phase-1 primary value pinned as a hard cap so
+/// phase 2 can never regress it.
+///
+/// Only the `(Vehicles, Cost)` ordering is wired end-to-end today; any other
+/// pairing falls back to a plain scalar solve (documented best-effort).
+///
+/// HONEST CAVEAT: V* (the phase-1 vehicle count) is the metaheuristic's
+/// best-found value, NOT a proven optimum — so this is *best-effort*
+/// lexicographic, the standard practical meaning, not exact. And it is two
+/// fixed levels (count → cost); a general N-level stack is future work.
+fn solve_lexicographic(
+    problem: &Problem,
+    matrix: &Matrix,
+    config: &SolverConfig,
+    primary: LexObjective,
+    secondary: LexObjective,
+) -> Solution {
+    // Only the canonical "minimise vehicles, then cost" ordering is supported
+    // end-to-end. Anything else degrades gracefully to a scalar solve rather
+    // than silently doing the wrong thing.
+    if primary != LexObjective::Vehicles || secondary != LexObjective::Cost {
+        return solve_scalar(problem, matrix, config);
+    }
+
+    // Penalty magnitude for phase 1. It must dominate any realistic travel-cost
+    // difference between solutions that differ by one vehicle, so the search
+    // always trades cost for a fewer-vehicle plan. We reuse the global-constraint
+    // HARD scale (1e12), which already out-ranks any real route cost.
+    let phase1_penalty = crate::global_constraint::HARD;
+
+    // --- Phase 1: minimise vehicle count -----------------------------------
+    // Run the normal scalar solver but with a large per-vehicle penalty so the
+    // metaheuristic consolidates onto as few routes as feasible. Read back V*.
+    let phase1_cfg = SolverConfig {
+        objective_mode: ObjectiveMode::Scalar,
+        // Layer the vehicle-count penalty on top of any user objective weights
+        // by routing through a dedicated phase-1 global. We can't express that
+        // through `objective_weights` (which only scales cost components), so we
+        // install it directly in the scalar solve via a sentinel field below.
+        ..config.clone()
+    };
+    let phase1 = solve_scalar_with_extra_global(
+        problem,
+        matrix,
+        &phase1_cfg,
+        Some(crate::global_constraint::vehicle_count_penalty(phase1_penalty)),
+    );
+    let v_star = phase1.routes.iter().filter(|r| !r.steps.is_empty()).count();
+
+    if config.verbose {
+        eprintln!(
+            "brooom: lexicographic phase 1 — V*={} vehicles (cost={:.2})",
+            v_star, phase1.summary.cost
+        );
+    }
+
+    // V*==0 means no jobs were served at all; nothing for phase 2 to refine.
+    if v_star == 0 {
+        return phase1;
+    }
+
+    // --- Phase 2: minimise cost with vehicles pinned at V* -----------------
+    // Install max_vehicles(V*) as a HARD cap so the cost-minimising search can
+    // never open a (V*+1)-th route. Phase 2 keeps the user's real objective
+    // (no count penalty), so it is free to lower travel cost within the cap.
+    let phase2_cfg = SolverConfig {
+        objective_mode: ObjectiveMode::Scalar,
+        max_vehicles: Some(match config.max_vehicles {
+            // Respect a stricter user cap if one was set; V* can't exceed it
+            // because phase 1 also honoured it, but min() is the safe contract.
+            Some(user_cap) => v_star.min(user_cap),
+            None => v_star,
+        }),
+        ..config.clone()
+    };
+    let mut phase2 = solve_scalar(problem, matrix, &phase2_cfg);
+
+    let v_phase2 = phase2.routes.iter().filter(|r| !r.steps.is_empty()).count();
+
+    // Phase 2 must never exceed the phase-1 vehicle count. The max_vehicles cap
+    // + enforce_max_vehicles already guarantee this, but if for any reason
+    // phase 2 came back worse on the PRIMARY objective (more vehicles) or on the
+    // SECONDARY at equal vehicles (higher cost), fall back to phase 1's plan so
+    // lexicographic is monotone-safe by construction.
+    let worse_primary = v_phase2 > v_star;
+    let worse_secondary_at_equal =
+        v_phase2 == v_star && phase2.summary.cost > phase1.summary.cost + 1e-6;
+    if worse_primary || worse_secondary_at_equal {
+        if config.verbose {
+            eprintln!(
+                "brooom: lexicographic phase 2 not better (v={} cost={:.2}) — keeping phase 1 (v={} cost={:.2})",
+                v_phase2, phase2.summary.cost, v_star, phase1.summary.cost
+            );
+        }
+        return phase1;
+    }
+
+    if config.verbose {
+        eprintln!(
+            "brooom: lexicographic phase 2 — v={} cost={:.2} (V* held at {})",
+            v_phase2, phase2.summary.cost, v_star
+        );
+    }
+    phase2.recompute_summary(problem);
+    phase2
+}
+
+/// The historical single-scalar solve. Extracted verbatim from the old
+/// `solve_with_matrix` body so the default path is byte-identical.
+fn solve_scalar(problem: &Problem, matrix: &Matrix, config: &SolverConfig) -> Solution {
+    solve_scalar_with_extra_global(problem, matrix, config, None)
+}
+
+/// Backing implementation for the scalar solve, optionally installing one extra
+/// global constraint (used by phase 1 of the lexicographic driver to add the
+/// per-vehicle penalty). `extra_global == None` is exactly the historical path.
+fn solve_scalar_with_extra_global(
+    problem: &Problem,
+    matrix: &Matrix,
+    config: &SolverConfig,
+    extra_global: Option<std::sync::Arc<crate::global_constraint::GlobalConstraintFn>>,
+) -> Solution {
     // Drop any stale eval cache from a previous solve. Worker threads each
     // have their own thread-local cache; rayon will warm them as it spawns.
     crate::solution::eval_cache_invalidate();
@@ -172,6 +355,12 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     }
     if problem.jobs.iter().any(|j| j.group.is_some()) {
         globals.push(crate::global_constraint::exactly_one_per_group());
+    }
+    // Phase-1 lexicographic driver injects a per-vehicle penalty here so the
+    // search consolidates routes. `None` (every non-lexicographic solve) leaves
+    // the registered globals exactly as today.
+    if let Some(g) = extra_global {
+        globals.push(g);
     }
     let _global_guard = (!globals.is_empty())
         .then(|| crate::global_constraint::GlobalConstraintGuard::install(globals));

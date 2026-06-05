@@ -142,6 +142,19 @@ pub fn max_vehicles(cap: usize) -> Arc<GlobalConstraintFn> {
     })
 }
 
+/// Charge a flat penalty per vehicle/route used. Drives phase 1 of the
+/// lexicographic (two-phase) solver: with a `penalty` far larger than any
+/// realistic travel-cost difference, the metaheuristic prefers fewer routes —
+/// so `vehicles_used` on the result is the search's best-found minimum vehicle
+/// count V*. Unlike [`max_vehicles`], this never makes a job infeasible (it has
+/// no cap); it only biases the objective toward consolidation.
+///
+/// Soft and additive, so it composes with the other globals. It is installed
+/// only during phase 1 and removed before phase 2 re-solves for cost.
+pub fn vehicle_count_penalty(penalty: Cost) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| penalty * v.vehicles_used() as Cost)
+}
+
 /// Penalize any client-group whose number of served members falls outside
 /// `[min, max]` — a "k-of-N" choose constraint. The penalty is `HARD` per
 /// member over/under the bound, so the search keeps a gradient (one too many
