@@ -97,6 +97,10 @@ pub struct JobIn {
     pub time_windows: Vec<[Time; 2]>,
     #[serde(default = "default_prize")]
     pub prize: Cost,
+    /// Explicit per-node drop penalty (OR-Tools `AddDisjunction`). `None`/omitted
+    /// means freely droppable at no extra cost; see `Job::disjunction_penalty`.
+    #[serde(default)]
+    pub disjunction_penalty: Option<Cost>,
     #[serde(default)]
     pub group: Option<u32>,
     #[serde(default)]
@@ -194,6 +198,7 @@ fn job_from(j: &JobIn) -> Job {
         priority: j.priority,
         time_windows: j.time_windows.iter().copied().map(tw_from).collect(),
         prize: j.prize,
+        disjunction_penalty: j.disjunction_penalty,
         group: j.group,
         description: j.description.clone(),
     }

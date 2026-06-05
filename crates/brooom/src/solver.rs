@@ -331,10 +331,14 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
     }
 
     // Prize-collecting: the cost-greedy insertion fills scarce capacity with the
-    // cheapest-to-reach jobs, ignoring value. Swap a served low-prize job for an
-    // unassigned higher-prize one whenever that lowers the objective. No-op when
-    // every job keeps the default sentinel prize.
-    if problem.jobs.iter().any(|j| j.prize < crate::problem::DEFAULT_PRIZE) {
+    // cheapest-to-reach jobs, ignoring value. Swap a served low-value job for an
+    // unassigned higher-value one whenever that lowers the objective. No-op when
+    // every job keeps the default sentinel prize and no explicit disjunction
+    // drop penalty is set (an explicit penalty also makes serving worthwhile and
+    // so warrants the swap pass).
+    if problem.jobs.iter().any(|j| {
+        j.prize < crate::problem::DEFAULT_PRIZE || j.disjunction_penalty.is_some()
+    }) {
         prize_swap_pass(&mut best, problem, matrix);
     }
 
@@ -361,9 +365,12 @@ pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConf
 }
 
 /// Prize-collecting improvement: replace a served job with an unassigned
-/// higher-prize job when doing so lowers the objective (route-cost delta plus
-/// the swapped prizes). Greedy, applied to convergence; O(unassigned × stops)
-/// per round, only when finite prizes exist.
+/// higher-value job when doing so lowers the objective (route-cost delta plus
+/// the swapped unassigned costs). "Value" here is `Job::unassigned_cost()` =
+/// `prize + disjunction_penalty`, i.e. exactly what the objective charges when a
+/// job is dropped, so the swap is consistent with `recompute_summary`. Greedy,
+/// applied to convergence; O(unassigned × stops) per round, only when finite
+/// prizes or explicit disjunction penalties exist.
 fn prize_swap_pass(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
     loop {
         let mut applied = false;
@@ -372,15 +379,15 @@ fn prize_swap_pass(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
             if !matches!(u, TaskRef::Job(_)) {
                 continue;
             }
-            let u_prize = u.description(problem).prize;
+            let u_cost = u.description(problem).unassigned_cost();
             for ri in 0..sol.routes.len() {
                 for pos in 0..sol.routes[ri].steps.len() {
                     let s = sol.routes[ri].steps[pos];
                     if !matches!(s, TaskRef::Job(_)) {
                         continue;
                     }
-                    let s_prize = s.description(problem).prize;
-                    if s_prize >= u_prize {
+                    let s_cost = s.description(problem).unassigned_cost();
+                    if s_cost >= u_cost {
                         continue; // only swap in a strictly more valuable job
                     }
                     let mut cand = sol.routes[ri].steps.clone();
@@ -388,7 +395,7 @@ fn prize_swap_pass(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
                     let veh = &problem.vehicles[sol.routes[ri].vehicle_idx];
                     if let Ok(m) = crate::solution::evaluate_route(problem, matrix, veh, &cand) {
                         // Δobjective = route-cost change + (s now unassigned) − (u no longer unassigned).
-                        let delta = (m.cost - sol.routes[ri].metrics.cost) + s_prize - u_prize;
+                        let delta = (m.cost - sol.routes[ri].metrics.cost) + s_cost - u_cost;
                         if delta < -1e-6 {
                             sol.routes[ri].steps = cand;
                             sol.routes[ri].metrics = m;
