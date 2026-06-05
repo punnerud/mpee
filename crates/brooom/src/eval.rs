@@ -159,6 +159,19 @@ pub fn precompute(
     let mut distance_total: i64 = 0;
     let mut load = initial_load.clone();
 
+    // Custom-dimension arcs (P5 probe mirror): only collected when at least one
+    // registered dimension is monotone with a max bound, so the common path pays
+    // nothing. The arc arrival times mirror `solution::evaluate_route` exactly
+    // (the time after travel, before setup/service), so the probe accumulates the
+    // SAME cumuls the full evaluator would and never reports a breach the
+    // authority would not. See `dimension::probe_breaches_monotone_max`.
+    let track_probe_dims = crate::dimension::has_probe_dimensions();
+    let mut dim_arcs: Vec<crate::dimension::Arc2> = if track_probe_dims {
+        Vec::with_capacity(steps.len() + 1)
+    } else {
+        Vec::new()
+    };
+
     pos[0].depart = t;
 
     for (k, s) in steps.iter().enumerate() {
@@ -172,6 +185,14 @@ pub fn precompute(
             t += dur;
             travel_total += dur;
             distance_total += matrix.distance(p, here);
+        }
+        // Record the dimension arc here (after travel, before setup/service) to
+        // match the evaluator's arrival timing exactly.
+        if track_probe_dims {
+            match prev_loc {
+                Some(p) => dim_arcs.push(crate::dimension::Arc2 { from: p, to: here, arrival: t }),
+                None => dim_arcs.push(crate::dimension::Arc2 { from: here, to: here, arrival: t }),
+            }
         }
         let do_setup = match prev_loc {
             Some(p) => p != here && job.setup > 0,
@@ -228,12 +249,26 @@ pub fn precompute(
         t += dur;
         travel_total += dur;
         distance_total += matrix.distance(p, e);
+        if track_probe_dims {
+            dim_arcs.push(crate::dimension::Arc2 { from: p, to: e, arrival: t });
+        }
     }
     if t > vw.end { return None; }
     // Mirror of probe-safe DSL hard bounds (travel/distance/duration): prune the
     // candidate here, before the full evaluator runs. Pruning only — never
     // rejects a feasible route; `evaluate_route` remains the authority.
     if crate::constraint::probe_violates(travel_total, distance_total, t - vw.start) {
+        return None;
+    }
+    // P5 probe mirror: prune a candidate whose monotone custom-dimension cumul
+    // would breach its declared max — the same proactive prune as above, now for
+    // a prefix-accumulated resource. Prune-only: a non-monotone or unbounded
+    // dimension is skipped entirely and its bound is still honoured at full
+    // `evaluate_route` (the P5 caveat, narrowed to non-probe-expressible dims).
+    if track_probe_dims && crate::dimension::probe_breaches_monotone_max(&dim_arcs) {
+        #[cfg(test)]
+        crate::dimension::PROBE_PRUNE_COUNT
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return None;
     }
     pos[positions - 1].depart = t;

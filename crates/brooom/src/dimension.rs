@@ -22,12 +22,18 @@
 //!     `(from, to, cumul_before, arrival)` only. It is NOT a true vehicle-scoped
 //!     history across trips: it cannot remember per-vehicle state from earlier
 //!     trips, only the cumul threaded through the current route.
-//!   * Arbitrary cumul bounds (`min`/`max`) are checked at **full route
-//!     evaluation** (`evaluate_route`), NOT in the O(1) insertion probe in
-//!     `eval.rs`. A bounded dimension is honoured (infeasible routes are never
-//!     committed), but it does not prune candidates in the fast probe the way a
-//!     travel/distance/duration bound does. We are explicit about this rather
-//!     than pretending the probe understands arbitrary user callbacks.
+//!   * Cumul bounds (`min`/`max`) are always checked at **full route
+//!     evaluation** (`evaluate_route`), so a bounded dimension is honoured
+//!     (infeasible routes are never committed). Spike `res` adds a *proactive*
+//!     prune for the probe-expressible subset: a dimension declared
+//!     [`CustomDimension::monotone`] with a `max` bound has that bound mirrored
+//!     into the O(1) insertion probe in `eval.rs` (via
+//!     [`probe_breaches_monotone_max`]), so a breaching insertion is rejected
+//!     early, exactly like a travel/distance/duration bound. The residual
+//!     caveat: **non-monotone or unbounded** dimensions, and the `min` bound,
+//!     still fall back to full-eval-only — we do not pretend the probe
+//!     understands arbitrary user callbacks. This narrows, but does not erase,
+//!     the original P5 caveat.
 //!   * No soft cumul bounds (no slack / span-cost on a custom dimension) and no
 //!     cross-dimension coupling (e.g. `fuel = distance × factor` reading another
 //!     dimension) in this first cut. The callback sees only its own cumul.
@@ -63,14 +69,38 @@ pub struct CustomDimension {
     /// evaluation (NOT in the O(1) probe).
     pub min: Option<i64>,
     /// Optional hard upper bound on every cumul value. Checked at full route
-    /// evaluation (NOT in the O(1) probe).
+    /// evaluation; ALSO mirrored into the O(1) insertion probe when [`monotone`]
+    /// is set (see [`CustomDimension::monotone`]).
     pub max: Option<i64>,
+    /// Declares this dimension is a **monotone non-decreasing prefix-accumulated
+    /// resource**: every transit delta is `>= 0`, so the cumul never falls along
+    /// a route and its running peak is simply the latest value. The caller
+    /// asserts this property (it is NOT verified for arbitrary callbacks at
+    /// registration — a lying flag is caught defensively at full evaluation,
+    /// which remains the authority).
+    ///
+    /// When `monotone` is `true` AND `max` is `Some`, the fast insertion probe in
+    /// `eval.rs` can prune a candidate that would breach the resource max BEFORE
+    /// the full `evaluate_route`, exactly like a travel/distance/duration bound.
+    /// The reasoning: inserting any task contributes a non-negative delta to every
+    /// downstream cumul, so if the route's peak resource (its final cumul) plus
+    /// the inserted task's own transit delta already exceeds `max`, no ordering
+    /// can rescue it — the probe rejects early. Non-monotone or unbounded
+    /// dimensions ignore this flag and fall back to full-eval (caveat preserved).
+    pub monotone: bool,
 }
 
 impl CustomDimension {
     /// A dimension with no bounds and a start value of 0.
     pub fn new(name: impl Into<String>, transit: Arc<TransitFn>) -> Self {
-        CustomDimension { name: name.into(), transit, start: 0, min: None, max: None }
+        CustomDimension {
+            name: name.into(),
+            transit,
+            start: 0,
+            min: None,
+            max: None,
+            monotone: false,
+        }
     }
     pub fn with_start(mut self, start: i64) -> Self {
         self.start = start;
@@ -84,11 +114,23 @@ impl CustomDimension {
         self.max = Some(max);
         self
     }
+    /// Declare this dimension monotone non-decreasing (see
+    /// [`CustomDimension::monotone`]). Combined with [`with_max`](Self::with_max)
+    /// this makes the dimension's max bound prune in the O(1) insertion probe.
+    pub fn monotone(mut self) -> Self {
+        self.monotone = true;
+        self
+    }
 }
 
 // Fast-path flag read on every route walk; the RwLock is only touched when this
 // is true. Mirrors `crate::constraint::HAS_CUSTOM`.
 static HAS_DIM: AtomicBool = AtomicBool::new(false);
+// Set iff at least one registered dimension is `monotone` with a `max` bound,
+// i.e. its feasibility is probe-mirrorable. Lets the O(1) insertion probe in
+// `eval.rs` skip all dimension work in the (common) case where no dimension is
+// probe-expressible. Mirrors `crate::constraint::HAS_PROBE`.
+static HAS_PROBE_DIM: AtomicBool = AtomicBool::new(false);
 static REGISTRY: RwLock<Vec<CustomDimension>> = RwLock::new(Vec::new());
 
 /// Replace the registered custom dimensions. Pass an empty vec to clear.
@@ -96,6 +138,10 @@ static REGISTRY: RwLock<Vec<CustomDimension>> = RwLock::new(Vec::new());
 pub fn set_dimensions(list: Vec<CustomDimension>) {
     let mut g = REGISTRY.write().unwrap();
     HAS_DIM.store(!list.is_empty(), Ordering::SeqCst);
+    HAS_PROBE_DIM.store(
+        list.iter().any(|d| d.monotone && d.max.is_some()),
+        Ordering::SeqCst,
+    );
     *g = list;
     drop(g);
     crate::solution::eval_cache_invalidate();
@@ -219,6 +265,63 @@ pub fn accumulate(arcs: &[Arc2]) -> DimensionCumuls {
     out
 }
 
+/// Whether any registered dimension is probe-mirrorable (monotone + max bound).
+/// Cheap, lock-free — read once at the top of the insertion-probe forward pass.
+#[inline]
+pub fn has_probe_dimensions() -> bool {
+    HAS_PROBE_DIM.load(Ordering::Relaxed)
+}
+
+/// Test-only instrumentation: counts how many times a candidate route was
+/// rejected *in the O(1) insertion probe* by a monotone dimension's max bound
+/// (i.e. pruned before the full `evaluate_route`). Lets a test prove the
+/// proactive prune actually fired rather than relying on the full-eval fallback.
+#[cfg(test)]
+pub static PROBE_PRUNE_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Mirror of the monotone-dimension max bound into the O(1) insertion probe.
+///
+/// Given a route described by its ordered arcs (same `Arc2` sequence the full
+/// evaluator threads), accumulate ONLY the dimensions declared `monotone` with a
+/// `max` bound and return `true` if any of them breaches its max anywhere on the
+/// route. Because such a dimension never decreases, its running peak is its final
+/// cumul; checking each position is exactly the max-bound check, and a route that
+/// breaches with the current stops can never be rescued by inserting more (every
+/// insertion adds a non-negative delta). So `precompute` may reject early.
+///
+/// This is PRUNE-ONLY: it never reports a breach the full evaluator would not
+/// also report (the full evaluator re-checks via `accumulate` and remains the
+/// authority). Non-monotone / unbounded dimensions are skipped entirely and keep
+/// their full-eval-only behaviour. Returns `false` immediately when no
+/// probe-mirrorable dimension is registered.
+pub fn probe_breaches_monotone_max(arcs: &[Arc2]) -> bool {
+    if !has_probe_dimensions() {
+        return false;
+    }
+    let g = REGISTRY.read().unwrap();
+    for dim in g.iter() {
+        let max = match (dim.monotone, dim.max) {
+            (true, Some(m)) => m,
+            _ => continue,
+        };
+        let mut v = dim.start;
+        if v > max {
+            return true;
+        }
+        for a in arcs {
+            // Same threading as `accumulate`. The caller asserted monotonicity;
+            // if a (buggy) callback returns a negative delta, the worst case is a
+            // missed prune, never a false reject (we only ever return on `> max`).
+            v += (dim.transit)(a.from, a.to, v, a.arrival);
+            if v > max {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// RAII guard: installs dimensions and clears them on drop, so a solve can be
 /// scoped without leaking global state into the next one. Mirrors
 /// [`crate::constraint::ConstraintGuard`].
@@ -330,5 +433,72 @@ mod tests {
         assert!(!has_dimensions());
         assert_eq!(dimension_count(), 0);
         assert!(dimension_names().is_empty());
+    }
+
+    #[test]
+    fn monotone_max_flags_only_when_probe_expressible() {
+        let _lock = guard();
+        // Monotone + max → probe-mirrorable.
+        let mono = CustomDimension::new("load", Arc::new(|_, _, _, _| 10))
+            .with_max(25)
+            .monotone();
+        let _g = DimensionGuard::install(vec![mono]);
+        assert!(has_probe_dimensions(), "monotone+max is probe-expressible");
+
+        // Monotone but NO max → not probe-mirrorable (nothing to prune against).
+        let mono_nobound = CustomDimension::new("load", Arc::new(|_, _, _, _| 10)).monotone();
+        set_dimensions(vec![mono_nobound]);
+        assert!(!has_probe_dimensions(), "monotone without a max is not mirrorable");
+
+        // Max but NOT declared monotone → stays on the full-eval fallback.
+        let bounded_nonmono =
+            CustomDimension::new("load", Arc::new(|_, _, _, _| 10)).with_max(25);
+        set_dimensions(vec![bounded_nonmono]);
+        assert!(!has_probe_dimensions(), "non-monotone keeps full-eval-only behaviour");
+        clear_dimensions();
+        assert!(!has_probe_dimensions());
+    }
+
+    #[test]
+    fn probe_breaches_matches_accumulate_for_monotone_resource() {
+        let _lock = guard();
+        // A "load" resource that accrues +10 per arc, capped at 25.
+        let dim = CustomDimension::new("load", Arc::new(|_, _, _, _| 10))
+            .with_max(25)
+            .monotone();
+        let _g = DimensionGuard::install(vec![dim]);
+
+        // Two arcs → cumuls [0, 10, 20]: peak 20 ≤ 25, no breach.
+        let ok = [
+            Arc2 { from: 0, to: 1, arrival: 1 },
+            Arc2 { from: 1, to: 0, arrival: 2 },
+        ];
+        assert!(!probe_breaches_monotone_max(&ok));
+        // The full-eval accumulator agrees: not bound_violated.
+        assert!(!accumulate(&ok).bound_violated);
+
+        // Three arcs → cumuls [0, 10, 20, 30]: 30 > 25 → breach.
+        let bad = [
+            Arc2 { from: 0, to: 1, arrival: 1 },
+            Arc2 { from: 1, to: 2, arrival: 2 },
+            Arc2 { from: 2, to: 0, arrival: 3 },
+        ];
+        assert!(probe_breaches_monotone_max(&bad), "probe detects the resource breach");
+        // And the authoritative full-eval path reports the SAME breach.
+        assert!(accumulate(&bad).bound_violated, "full-eval agrees with the probe");
+    }
+
+    #[test]
+    fn non_monotone_dimension_is_not_probe_pruned() {
+        let _lock = guard();
+        // A genuinely non-monotone resource (drains) with a max bound, NOT
+        // declared monotone. The probe mirror must skip it entirely (returns
+        // false), leaving enforcement to full eval — the preserved caveat.
+        let dim = CustomDimension::new("fuel", Arc::new(|_, _, _, _| -10))
+            .with_max(1000); // huge max, never breached anyway
+        let _g = DimensionGuard::install(vec![dim]);
+        assert!(!has_probe_dimensions());
+        let arcs = [Arc2 { from: 0, to: 1, arrival: 1 }];
+        assert!(!probe_breaches_monotone_max(&arcs), "non-monotone is never probe-pruned");
     }
 }

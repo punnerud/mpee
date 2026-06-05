@@ -662,10 +662,12 @@ fn evaluate_route_with_buf(
     // Custom dimensions (P5): accumulate every registered dimension along this
     // route's arcs. Free when none are registered (`track_dims` is the relaxed
     // atomic load taken once at the top of the walk). A registered hard min/max
-    // cumul bound is honoured HERE, at full route evaluation — NOT in the O(1)
-    // insertion probe (see dimension.rs caveats): an out-of-bounds route is
-    // rejected so it is never committed, but bounded dimensions do not prune in
-    // the fast probe the way travel/distance/duration bounds do.
+    // cumul bound is honoured HERE, at full route evaluation, so an out-of-bounds
+    // route is always rejected and never committed — this remains the authority.
+    // Spike `res` ALSO mirrors the `max` bound of a *monotone* dimension into the
+    // O(1) insertion probe (eval.rs) so a breaching insertion is pruned early;
+    // non-monotone/unbounded dimensions (and the `min` bound) still rely solely on
+    // this full-eval check (see dimension.rs caveats).
     let dim_cumuls = if track_dims {
         crate::dimension::accumulate(&dim_arcs)
     } else {
