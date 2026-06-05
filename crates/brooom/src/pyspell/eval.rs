@@ -215,6 +215,9 @@ fn read_field(fld: Field, view: &RouteView) -> Value {
         Field::RouteSpan => Value::Int(m.end_time - m.start_time),
         Field::RouteDuration => Value::Int(m.end_time - m.start_time),
         Field::RouteStopCount => Value::Int(view.steps.len() as i64),
+        Field::RouteHasBreak => Value::Bool(m.break_count > 0),
+        Field::RouteBreakCount => Value::Int(m.break_count as i64),
+        Field::RouteBreakDuration => Value::Int(m.break_duration),
         Field::VehicleId => Value::Int(v.id as i64),
         Field::VehicleMaxTasks => Value::Int(v.max_tasks.map(|n| n as i64).unwrap_or(i64::MAX)),
         Field::VehicleFixed => Value::Float(v.fixed),
@@ -594,6 +597,7 @@ mod tests {
             delivery: vec![1],
             pickup: vec![],
             skills: vec![],
+            allowed_vehicles: None,
             priority: 0,
             time_windows: vec![],
             prize: crate::problem::DEFAULT_PRIZE,
@@ -643,6 +647,8 @@ mod tests {
             cost_travel: 42.0,
             cost_span: 0.0,
             cost_custom: 0.0,
+            break_count: 0,
+            break_duration: 0,
         }
     }
 
@@ -731,6 +737,40 @@ mod tests {
                 Box::new(Expr::Const(Value::Int(10))),
             ))),
             Verdict::Feasible
+        );
+    }
+
+    #[test]
+    fn break_fields_read_from_metrics() {
+        // A route with two breaks totalling 1800s exposes has_break / break_count
+        // / break_duration to the DSL.
+        let problem = problem();
+        let veh = vehicle();
+        let mut m = metrics();
+        m.break_count = 2;
+        m.break_duration = 1800;
+        let steps = [TaskRef::Job(0), TaskRef::Job(1)];
+        let view = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m };
+
+        // has_break → true → Feasible
+        assert_eq!(run(&prog(Expr::Field(Field::RouteHasBreak)), &view).unwrap(), Verdict::Feasible);
+        // break_count == 2 → Penalty(2)
+        assert_eq!(
+            run(&prog(Expr::Field(Field::RouteBreakCount)), &view).unwrap(),
+            Verdict::Penalty(2.0)
+        );
+        // break_duration == 1800 → Penalty(1800)
+        assert_eq!(
+            run(&prog(Expr::Field(Field::RouteBreakDuration)), &view).unwrap(),
+            Verdict::Penalty(1800.0)
+        );
+
+        // With no breaks, has_break → false → Infeasible.
+        let m0 = metrics();
+        let view0 = RouteView { problem: &problem, vehicle: &veh, steps: &steps, metrics: &m0 };
+        assert_eq!(
+            run(&prog(Expr::Field(Field::RouteHasBreak)), &view0).unwrap(),
+            Verdict::Infeasible
         );
     }
 

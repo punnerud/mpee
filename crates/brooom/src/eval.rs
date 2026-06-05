@@ -97,6 +97,11 @@ pub fn precompute(
             if !vehicle.has_skills(s.skills(problem)) {
                 return None;
             }
+            // Vehicle allowlist: a job may only ride a listed vehicle. Probe
+            // declines (the full evaluator is the authority and will reject).
+            if !s.description(problem).allows_vehicle(vehicle.id) {
+                return None;
+            }
             match s {
                 TaskRef::Pickup(i) => { seen.insert(*i); }
                 TaskRef::Delivery(i) => {

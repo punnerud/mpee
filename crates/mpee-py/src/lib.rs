@@ -577,7 +577,7 @@ impl Router {
                         id: (i + 1) as u64,
                         location: brooom::Location::from_index(i + 1),
                         kind: Default::default(), service: 0, setup: 0, release: 0,
-                        delivery: vec![1], pickup: vec![], skills: vec![], priority: 0,
+                        delivery: vec![1], pickup: vec![], skills: vec![], allowed_vehicles: None, priority: 0,
                         time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
                         description: None,
                     });
@@ -1014,7 +1014,7 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
             kind: Default::default(),
             service: 60, setup: 0, release: 0,
             delivery: vec![delivery], pickup: vec![],
-            skills: vec![], priority: 0,
+            skills: vec![], allowed_vehicles: None, priority: 0,
             time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
             description: None,
         });

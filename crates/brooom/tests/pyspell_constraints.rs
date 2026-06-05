@@ -96,6 +96,44 @@ fn dsl_precedence_before_orders_stops() {
 }
 
 #[test]
+fn dsl_break_fields_compile_and_shape_solve() {
+    let _lock = guard();
+    // A vehicle with a mandatory 600s break. The constraint `route.break_count
+    // >= 1` is a soft penalty (>0 → Penalty) only when no break ran; since the
+    // break always fits, every route satisfies it and no jobs are dropped. This
+    // proves route.break_count / route.has_break lower and read correctly.
+    const WITH_BREAK: &str = r#"{
+        "vehicles": [{
+            "id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10],
+            "time_window": [0, 100000],
+            "breaks": [{"id": 99, "service": 600, "time_windows": [[0, 100000]]}]
+        }],
+        "jobs": [
+            {"id": 10, "location": [10.10, 60.0], "delivery": [1]},
+            {"id": 20, "location": [10.20, 60.0], "delivery": [1]}
+        ]
+    }"#;
+    // Hard reject any route that did NOT take a break. With the break fitting,
+    // routes serving jobs always have a break, so both jobs stay.
+    let _g = brooom::pyspell::install_rust(&[
+        "len(route.job_ids) == 0 || route.has_break",
+    ])
+    .unwrap();
+
+    let mut problem = parse_input(WITH_BREAK).unwrap();
+    let sol = solve(&mut problem, Some(&HaversineMatrix::default()), SolverConfig::default()).unwrap();
+    assert_eq!(sol.unassigned.len(), 0, "routes take the break, so has_break holds");
+
+    // And the metrics agree: every non-empty route recorded exactly one break.
+    for r in &sol.routes {
+        if !r.steps.is_empty() {
+            assert_eq!(r.metrics.break_count, 1);
+            assert_eq!(r.metrics.break_duration, 600);
+        }
+    }
+}
+
+#[test]
 fn dsl_compile_error_is_returned_not_panicked() {
     let _lock = guard();
     assert!(brooom::pyspell::install_rust(&["route.nonsense_field > 1"]).is_err());

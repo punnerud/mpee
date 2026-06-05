@@ -293,7 +293,7 @@ fn solve_in_process(args: &Args, state: &Arc<RwLock<AppState>>) -> Result<()> {
             kind: Default::default(),
             service: 60, setup: 0, release: 0,
             delivery: vec![delivery], pickup: vec![],
-            skills: vec![], priority: 0,
+            skills: vec![], allowed_vehicles: None, priority: 0,
             time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
             description: None,
         });
