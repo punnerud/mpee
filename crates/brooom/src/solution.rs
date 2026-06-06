@@ -100,11 +100,13 @@ impl TaskRef {
 /// components only let you shape and inspect that number.
 ///
 /// For a genuine count-then-cost ordering, set
-/// `SolverConfig::objective_mode = ObjectiveMode::Lexicographic { primary:
-/// Vehicles, secondary: Cost }`: that runs a two-phase driver (phase 1 minimises
-/// vehicle count V*, phase 2 minimises cost with `max_vehicles(V*)` pinned as a
-/// hard cap). BEST-EFFORT caveat: V* is the metaheuristic's best-found count,
-/// not a proven optimum, and the stack is fixed at two levels (count → cost).
+/// `SolverConfig::objective_mode = ObjectiveMode::Lexicographic { levels:
+/// vec![LexObjective::Vehicles, LexObjective::Cost] }`: that runs an N-level
+/// driver (level 0 minimises vehicle count V*, level 1 minimises cost with
+/// `max_vehicles(V*)` pinned as a hard cap), warm-started level-to-level. The
+/// stack accepts any ordering of {Vehicles, UnassignedCount, Cost, Makespan,
+/// Distance}. BEST-EFFORT caveat: each level's achieved value is the
+/// metaheuristic's best-found, not a proven optimum.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RouteMetrics {
     pub start_time: Time,
