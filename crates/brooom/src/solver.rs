@@ -72,6 +72,11 @@ pub struct SolverConfig {
     /// exactly k; `Some((min, max))` a range — OR-Tools-style k-of-N disjunctions.
     /// Applies to every group; per-group differing cardinality is not yet exposed.
     pub group_cardinality: Option<(u32, u32)>,
+    /// Run the native structured-propagation pre-pass before search
+    /// ([`crate::propagate::tighten`]): tighten time windows, close precedence,
+    /// detect provably-unservable jobs. `true` (default) — it is sound (never
+    /// removes a feasible option) and speeds the search; set `false` to A/B it.
+    pub propagate: bool,
     /// Optional weighted-scalarization weights on the global cost components
     /// (travel / span / custom). `None` (or an all-1.0 set) leaves the objective
     /// exactly as today. When set with non-unit weights the solver registers a
@@ -258,6 +263,7 @@ impl Default for SolverConfig {
             fairness_metric: crate::global_constraint::FairnessMetric::Duration,
             balance_spread: None,
             group_cardinality: None,
+            propagate: true,
             objective_weights: None,
             objective_mode: ObjectiveMode::Scalar,
             soft_search: None,
@@ -299,6 +305,21 @@ pub fn solve_full(
     // from JSON now that we have the compact i32 runtime form. On 1000-node
     // instances this releases ~16 MB per matrix.
     problem.matrices.clear();
+    // Native structured propagation: tighten windows, close precedence, detect
+    // provably-unservable jobs. Sound (never removes a feasible option). Resolve
+    // `soft` exactly as the solver will, so window-end tightening / infeasibility
+    // flagging only fire when those bounds are actually hard.
+    if config.propagate {
+        let soft = config
+            .soft_search
+            .unwrap_or_else(|| problem_has_time_windows(problem));
+        let infeasible = crate::propagate::tighten(problem, &matrix, soft);
+        if config.verbose && !infeasible.is_empty() {
+            for inf in &infeasible {
+                eprintln!("brooom: propagation — job {} unservable: {}", inf.job_id, inf.reason);
+            }
+        }
+    }
     let solution = solve_with_matrix(problem, &matrix, &config);
     Ok(Solved { matrix, solution })
 }

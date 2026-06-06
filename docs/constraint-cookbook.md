@@ -264,9 +264,13 @@ Global (cross-route) rules read a `solution.*` namespace the same way.
 
 MPEE covers the full standard VRP constraint set as turnkey fields/options, plus
 code-defined AST constraints in **both** Rust and Python — typically less code
-than OR-Tools' callback/dimension boilerplate. What OR-Tools' CP-SAT still does
-that MPEE does not: **general constraint programming** with bidirectional
-domain propagation for arbitrary logic. For the rare *propagation-hard*
+than OR-Tools' callback/dimension boilerplate. MPEE also does **native structured
+constraint propagation** (a sound pre-pass that tightens time windows from depot
+travel + shift, closes precedence transitively, and proves unservable jobs up
+front with a reason — `crate::propagate`, on by default; `--no-propagate` to
+disable). What OR-Tools' CP-SAT still does that MPEE does not: **general**
+constraint programming with bidirectional domain propagation over *arbitrary*
+logic. For the rare *propagation-hard*
 sub-instance (tightly-coupled feasibility, thin feasible region) MPEE ships a
 **CP-SAT bridge** (`tools/cpsat_bridge/`) that exports the hard core to CP-SAT,
 solves it exactly, and warm-starts back into brooom for full-constraint polish.

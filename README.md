@@ -91,6 +91,7 @@ guide. (Each recipe is backed by a conformance test, so it can't rot.)
 | **Lexicographic objective** (N-level, e.g. vehicles → cost) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
 | **Custom accumulator dimensions** (fuel/resource, per-arc transit) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
 | **Soft cumul bounds** (slack-penalised over/under a dimension) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
+| **Constraint propagation** (temporal/precedence/resource) | ✅ native + ⚠️ CP via bridge | ❌ | ✅ CP-SAT | ⚠️ | ⚠️ |
 
 <sub>✅ built-in · ⚠️ partial or emulated · ❌ not available.
 Competitor columns reflect first-class support per their public docs. With

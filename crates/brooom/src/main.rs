@@ -245,6 +245,12 @@ struct Cli {
     /// a time-windowed problem where it would otherwise auto-enable.
     #[arg(long)]
     no_soft_tw: bool,
+
+    /// Disable the native structured-propagation pre-pass (time-window tightening,
+    /// precedence closure, up-front infeasibility detection). On by default; it is
+    /// sound (never drops a feasible job). Use this to A/B its effect.
+    #[arg(long)]
+    no_propagate: bool,
 }
 
 /// CLI objective selector (maps to `brooom::ObjectiveMode`).
@@ -513,6 +519,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             solver_options.soft_time_windows
         },
+        // Native structured propagation pre-pass — on unless --no-propagate.
+        propagate: !cli.no_propagate,
         ..Default::default()
     };
 

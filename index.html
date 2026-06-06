@@ -622,9 +622,14 @@ brooom -i problem.json --soft-tw                 # CLI
 r.solve(problem_json, constraints=["sum(1 for j in route if j.fragile) &lt;= 12"])
 # return a number instead of a bool → a *soft* penalty the search trades off.</code></pre>
     <p class="muted">
-      Honest scope vs OR-Tools: OR-Tools' CP-SAT is a full constraint-programming
-      solver (bidirectional propagation) — more general for arbitrary logic. MPEE
-      doesn't claim that. What MPEE gives you that OR-Tools doesn't: the same rich
+      Honest scope vs OR-Tools: MPEE does <strong>native structured constraint
+      propagation</strong> — a sound pre-pass that tightens time windows (from
+      depot travel + shift), closes precedence, and proves unservable jobs up
+      front — so it infers, not just evaluates. What OR-Tools' CP-SAT still does
+      that MPEE does not: <em>general</em> constraint programming with
+      bidirectional propagation over <em>arbitrary</em> logic. For that rare
+      propagation-hard case MPEE ships a CP-SAT bridge (export → solve exactly →
+      warm-start back). What MPEE gives you that OR-Tools doesn't: the same rich
       built-ins plus <em>code-defined</em> constraints in <em>both</em> Rust and
       Python, compiled to native, running in one process with the routing engine
       and the streamed distance matrix — no separate matrix build, no service mesh.

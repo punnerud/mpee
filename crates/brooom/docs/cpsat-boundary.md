@@ -101,7 +101,17 @@ the *rare* case. Pick by where the constraint actually lives:
 |------------------------------------------------------------------|--------------------------------------|
 | soft / preference / penalty ("avoid long routes", "prefer X")    | `constraint.rs` / `pyspell` (in-hot-loop, native, sandboxed) |
 | local-hard but feasible region is fat (capacity, single TW, skills, precedence within a route) | native dimensions + per-route/global hooks |
-| **propagation-hard**: tightly-coupled feasibility, thin region, greedy+LS stalls (TW chains, exact balance, coupled cardinality) | **export to CP-SAT** via `tools/cpsat_bridge` |
+| **structured deductive** (tighten TW from depot travel + shift, transitive precedence, prove a job unservable) | **native propagation pre-pass** — `crate::propagate` (sound, on by default) |
+| **propagation-hard, general**: tightly-coupled feasibility over *arbitrary* logic, thin region, greedy+LS stalls (general TW chains, exact balance, coupled cardinality) | **export to CP-SAT** via `tools/cpsat_bridge` |
+
+**Update (native propagation tier added).** `crate::propagate::tighten` is a
+*deductive* pre-pass — the one thing §1 said local search structurally lacked. It
+is sound (never removes a feasible option; the solution is unchanged — see
+`benchmarks/results/propagation.md`) and covers the *structured* temporal /
+precedence / resource constraints. It does **not** make brooom a general CP
+solver: arbitrary DSL/code constraints stay black boxes whose general propagation
+still goes through the bridge below. So the boundary moved — structured deduction
+is now native — but the §2 stance (no general CP in the hot loop) stands.
 
 The first two tiers are the existing, fast, native machinery and cover the
 overwhelming majority of real instances. The third tier is the bridge — used

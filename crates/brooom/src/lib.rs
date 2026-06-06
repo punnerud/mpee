@@ -14,6 +14,7 @@ pub mod matrix;
 pub mod solution;
 pub mod eval;
 pub mod granular;
+pub mod propagate;
 pub mod insertion;
 pub mod local_search;
 pub mod solver;
