@@ -399,11 +399,20 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     <table>
       <thead><tr><th>Scale</th><th>Result</th></tr></thead>
       <tbody>
+        <tr><td>N = 100–200 (small)</td><td><b>ties the best</b> (PyVRP) on tight-window C1/R1/C2 and reaches it <b>~2.5× faster</b> (≈4 s vs 10 s); OR-Tools sometimes can't even find a feasible solution in the budget. <b>Loses 2–5%</b> to PyVRP's HGS on <em>wide-window</em> R2/RC2 — the honest open gap.</td></tr>
         <tr><td>N = 1,000</td><td>beats the next-best solver (PyVRP) on <b>17 / 20</b> seeds, p&nbsp;≈&nbsp;10⁻⁷</td></tr>
         <tr><td>N = 50,000</td><td>the <b>only</b> tested solver that converges on a laptop</td></tr>
         <tr><td>Inner loop</td><td>the entire local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as <b>one GPU megakernel</b> — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration</td></tr>
       </tbody>
     </table>
+    <p class="muted" style="font-size:.88rem">
+      Same instance, same matrix, same budget through every solver — re-run it
+      yourself: <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom/benchmarks">crates/brooom/benchmarks</a>
+      (raw 4-way numbers in
+      <a href="https://github.com/punnerud/mpee/blob/main/crates/brooom/benchmarks/results/competitor_comparison.md">competitor_comparison.md</a>).
+      PyVRP (HGS) is state-of-the-art on small CVRPTW; brooom's edge is the
+      integrated stack, speed-to-good-answer, and scale — not beating HGS at n=100.
+    </p>
     <p class="muted" style="font-size:.88rem">
       End-to-end on this machine: 2,000 jobs / 50 vehicles in ~2 min (matrix 0.32 s);
       5,000 / 100 in ~9 min (matrix 4.10 s), both ≥99 % assigned. Full numbers in the
