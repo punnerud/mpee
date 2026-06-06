@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MPEE — Offline route calculations &amp; optimization</title>
-<meta name="description" content="MPEE is a self-contained Rust routing + delivery-optimization engine you drive from Python or a CLI. Download one operating area once, then compute routes, multi-vehicle VRP, and street geocoding fully offline — no API keys, no per-request billing, no data leaving your machine.">
+<meta name="description" content="MPEE is a self-contained Rust routing + delivery-optimization engine with four equal surfaces — native Rust, Python, a CLI, and pure JSON config. Download one operating area once, then compute routes, multi-vehicle VRP, and street geocoding fully offline — no API keys, no per-request billing, no data leaving your machine.">
 <link rel="canonical" href="https://punnerud.github.io/mpee/">
 
 <!-- Google tag (gtag.js) -->
@@ -20,7 +20,7 @@
 <!-- Open Graph / social -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="MPEE — Offline route calculations & optimization">
-<meta property="og:description" content="Offline routing, multi-vehicle VRP, and street geocoding for one downloaded area. Rust engine, Python + CLI, MIT.">
+<meta property="og:description" content="Offline routing, multi-vehicle VRP, and street geocoding for one downloaded area. Rust engine — use it from native Rust, Python, a CLI, or pure JSON. MIT.">
 <meta property="og:url" content="https://punnerud.github.io/mpee/">
 <meta name="twitter:card" content="summary">
 
@@ -36,7 +36,7 @@
   "alternateName": "Morten Punnerud-Engelstad Engine",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Linux, Windows",
-  "description": "A self-contained Rust routing and delivery-optimization engine driven from Python or a CLI. Offline point-to-point routing, multi-vehicle VRP, and street geocoding over one downloaded OpenStreetMap area.",
+  "description": "A self-contained Rust routing and delivery-optimization engine with four equal surfaces — native Rust, Python, a CLI, and pure JSON config. Offline point-to-point routing, multi-vehicle VRP, and street geocoding over one downloaded OpenStreetMap area.",
   "softwareVersion": "0.4.5",
   "license": "https://opensource.org/licenses/MIT",
   "url": "https://punnerud.github.io/mpee/",
@@ -211,6 +211,7 @@
 <nav class="toc">
   <div class="wrap">
     <a href="#what">What it is</a>
+    <a href="#surfaces">Surfaces</a>
     <a href="#benchmarks">Benchmarks</a>
     <a href="#install">Install</a>
     <a href="#quickstart">CLI</a>
@@ -247,6 +248,49 @@
       a route-anywhere-on-Earth offline map. There is no global tiling, by
       design: within your area, one cache is simpler and faster.</p>
     </blockquote>
+  </section>
+
+  <section id="surfaces">
+    <h2>Four ways to use one Rust engine</h2>
+    <p>
+      <strong>MPEE is a Rust engine, not a Python library.</strong> Routing, the
+      streamed matrix, the VRP solver, every constraint and objective — all live
+      in the <strong>brooom</strong> and <strong>dijeng</strong> Rust crates.
+      Python, the CLI, and the JSON config are <strong>thin surfaces over that
+      same core</strong>, with no feature difference between them.
+      <code>pip&nbsp;install&nbsp;mpee</code> is <strong>PyO3 bindings compiled
+      from the Rust crate</strong> — it runs the exact same native solver, not a
+      reimplementation (and so does the WebAssembly demo). Pick the front door
+      that fits how you ship:
+    </p>
+    <div class="grid">
+      <div class="card"><div class="ico">🦀</div><h3>Rust crate</h3>
+        <p>Embed it — lowest latency, native callbacks, compiles to WASM.</p>
+        <pre><code>use brooom::solver::{solve, SolverConfig};
+let sol = solve(&amp;mut problem, Some(&amp;matrix),
+                SolverConfig::default())?;</code></pre></div>
+      <div class="card"><div class="ico">🧩</div><h3>JSON config</h3>
+        <p>Drive it from any language — no code. Objectives, dimensions and caps go in an <code>options</code> block.</p>
+        <pre><code>{ "vehicles": [...], "jobs": [...],
+  "options": { "objective":
+    { "levels": ["vehicles","cost"] } } }</code></pre></div>
+      <div class="card"><div class="ico">⌨️</div><h3>CLI</h3>
+        <p>Scripts, batch jobs, CI — one self-contained binary.</p>
+        <pre><code>brooom -i problem.json \
+  --objective lexicographic \
+  --objective-levels vehicles,cost</code></pre></div>
+      <div class="card"><div class="ico">🐍</div><h3>Python</h3>
+        <p>Notebooks, glue code, the quickest start.</p>
+        <pre><code>from mpee import Router
+Router(cache).optimize(stops, vehicles=10,
+    objective=["unassigned","vehicles","cost"])</code></pre></div>
+    </div>
+    <p class="muted" style="font-size:.95rem">
+      Same goes for advanced features: an <strong>N-level lexicographic
+      objective</strong> and <strong>custom accumulator dimensions</strong>
+      (OR-Tools-style fuel/resource tracking) are reachable identically from all
+      four — see the <a href="https://github.com/punnerud/mpee#choosing-a-surface">README</a>.
+    </p>
   </section>
 
   <section id="benchmarks">
