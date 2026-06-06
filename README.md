@@ -95,8 +95,8 @@ lexicographic objective**, and **custom accumulator dimensions** (OR-Tools-style
 `RoutingDimension`s with a per-arc transit, soft bounds, and proactive pruning),
 MPEE covers the full standard VRP feature set plus code-defined constraints and
 objectives — in one streaming Rust process with no separate matrix step. Every
-row above is reachable from **Rust, Python, the CLI, and pure JSON** (see
-[Choosing a surface](#choosing-a-surface)). The one genuine remaining edge —
+row above is reachable from **Rust, Python, an HTTP API, the CLI, and pure JSON**
+(see [Choosing a surface](#choosing-a-surface)). The one genuine remaining edge —
 **CP-SAT-class general constraint *programming*** (bidirectional domain
 propagation) — is structurally outside a local-search solver; MPEE ships an
 honest [interop bridge](tools/cpsat_bridge/) that exports a propagation-hard
@@ -324,12 +324,21 @@ zero feature difference between them:
 | **Rust** (crate) | You embed the solver, want the lowest latency, native callbacks, or WASM. | `brooom::solver::solve`, `SolverConfig`, `brooom::dimension::CustomDimension` |
 | **JSON config** | You drive the solver from any language or a pipeline — no code. | a VROOM-style problem with an `"options"` block (objective, dimensions, caps) |
 | **CLI** | Scripts, batch jobs, CI. | `brooom -i problem.json --objective lexicographic …` (build `crates/brooom`) |
+| **HTTP API** | A service for other apps — sync or async. | `brooom --serve 8088` → `POST /solve` (add a `"webhook"` field for an async callback; poll `GET /jobs/<id>`) |
 | **Python** (`mpee`) | Notebooks, glue code, the quickest start. | `pip install mpee` → `Router.optimize(...)` / `.solve(...)` |
 
 The Python package is **PyO3 bindings compiled from the Rust crate** — it runs the
 exact same native solver, not a reimplementation. The same is true of the
-WebAssembly demo and the CLI. So "is this only for Python?" — no: Python is one of
-four equal front doors to one Rust engine.
+WebAssembly demo, the CLI, and the HTTP API. So "is this only for Python?" — no:
+Python is one of five equal front doors to one Rust engine.
+
+```bash
+# HTTP API: expose the solver, solve over HTTP (sync), or async with a webhook.
+brooom --serve 8088
+curl -X POST http://127.0.0.1:8088/solve --data-binary @problem.json          # sync → solution
+curl -X POST http://127.0.0.1:8088/solve \
+     -d '{"vehicles":[...],"jobs":[...],"webhook":"https://you.app/cb"}'        # async → 202 {job_id}, callback later
+```
 
 ```rust
 // Rust: the engine directly — lexicographic objective + a fuel dimension.
