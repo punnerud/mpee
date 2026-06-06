@@ -81,15 +81,27 @@ yourself: `cargo test -p brooom --test constraints`.
 | Soft (penalised) constraints | ✅ | ⚠️ | ✅ | ⚠️ | ✅ |
 | Custom constraints written in code (Rust **or** Python) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
 | Cross-route / global constraints in code | ✅ | ❌ | ✅ | ❌ | ✅ |
+| Disjunctions (explicit per-job drop penalty) | ✅ | ⚠️ | ✅ | ✅ | ✅ |
+| **Multi-objective** (weighted travel / span / distance) | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Lexicographic objective** (N-level, e.g. vehicles → cost) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
+| **Custom accumulator dimensions** (fuel/resource, per-arc transit) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
+| **Soft cumul bounds** (slack-penalised over/under a dimension) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
 
 <sub>✅ built-in · ⚠️ partial or emulated · ❌ not available.
 Competitor columns reflect first-class support per their public docs. With
 per-route custom constraints (pyspell), cross-route built-ins (max-vehicles,
-client-groups, fairness) and an arbitrary solution-level hook, MPEE now covers
-the full standard VRP feature set plus code-defined constraints, in one
-streaming Rust process with no separate matrix step. The remaining edge for
-Timefold/OR-Tools is breadth of *arbitrary* global constraints expressed in
-code; MPEE ships the common ones built-in and a Rust/Python hook for the rest.</sub>
+client-groups, fairness), an arbitrary solution-level hook, an **N-level
+lexicographic objective**, and **custom accumulator dimensions** (OR-Tools-style
+`RoutingDimension`s with a per-arc transit, soft bounds, and proactive pruning),
+MPEE covers the full standard VRP feature set plus code-defined constraints and
+objectives — in one streaming Rust process with no separate matrix step. Every
+row above is reachable from **Rust, Python, the CLI, and pure JSON** (see
+[Choosing a surface](#choosing-a-surface)). The one genuine remaining edge —
+**CP-SAT-class general constraint *programming*** (bidirectional domain
+propagation) — is structurally outside a local-search solver; MPEE ships an
+honest [interop bridge](tools/cpsat_bridge/) that exports a propagation-hard
+instance to OR-Tools CP-SAT and feeds the answer back as a warm start, rather
+than pretending to reimplement it.</sub>
 
 ### Custom constraints in code
 
@@ -196,11 +208,15 @@ Beyond the per-route hook, these are first-class — set a field or a solve knob
 | Variant | How |
 |---|---|
 | Prize-collecting / optional jobs | per-job `prize` (finite ⇒ optional, worth that much; default ⇒ mandatory) |
+| Disjunctions (explicit drop penalty) | per-job `disjunction_penalty` (cost of *dropping*, distinct from `prize`'s value-of-serving) |
 | Release times | per-job `release` (earliest service time, seconds) |
 | Client-groups (visit exactly one) | per-job `group` id |
 | Multi-trip / reloading | per-vehicle `max_trips > 1` (returns to depot to reload) |
 | Max-vehicles cap | solve option `max_vehicles` |
 | Fairness / balancing | solve options `fairness_weight` + `fairness_metric` ("duration"/"load") |
+| Multi-objective (weighted) | per-vehicle `span_cost` / `distance_weight` / `time_weight` |
+| **Lexicographic objective** | solve option `objective` = ordered levels (below) |
+| **Custom dimensions** (fuel/resource) | `dimensions` list with a per-arc transit (below) |
 
 ```python
 plan = router.solve(problem_json, max_vehicles=8, fairness_weight=2.0)
@@ -212,6 +228,74 @@ The built-in cross-route constraints (max-vehicles, client-groups, fairness) rid
 on a solution-level hook (`brooom::global_constraint`); a custom Rust/Python
 global is the escape hatch for anything else. Multi-trip and any global keep the
 solve on the CPU evaluator.
+
+#### Lexicographic objective (true N-level, not weighted)
+
+Optimise objectives **in strict priority order** — minimise the first; among the
+solutions that achieve it, minimise the second; and so on. This is a real
+two-phase-per-level search (each level pins its achieved value as a hard cap for
+the next, warm-starting from the previous level), not a weighted sum. Levels:
+`vehicles`, `unassigned`, `cost`, `makespan`, `distance`.
+
+```python
+# "Serve everyone first, then use as few vehicles as possible, then cut cost."
+plan = router.optimize(stops, vehicles=10, objective=["unassigned", "vehicles", "cost"])
+```
+
+```jsonc
+// …or in pure JSON, under the problem's "options":
+{ "vehicles": [...], "jobs": [...],
+  "options": { "objective": { "levels": ["vehicles", "cost"] } } }
+```
+
+```bash
+brooom -i problem.json --objective lexicographic --objective-levels vehicles,cost
+```
+
+The default is scalar (single weighted cost) — byte-identical to before when no
+`objective` is set. It is *best-effort* lexicographic: each level's pinned value
+is the metaheuristic's best, not a proven optimum.
+
+#### Custom accumulator dimensions (OR-Tools-style `RoutingDimension`)
+
+Track a quantity that accumulates along each route — fuel, a cooling budget, a
+custom resource — with a per-arc **transit** written as a sandboxed pyspell
+expression over the arc (`distance`, `duration`, `cumul`). Declare a `min`/`max`
+(hard) or `soft_max`/`soft_min` + `soft_weight` (penalty), and a monotonicity so
+the bound prunes *inside* the search:
+
+```jsonc
+{ "options": { "dimensions": [
+  { "name": "fuel", "transit": "distance / 10", "start": 500,
+    "min": 0, "monotonicity": "non_increasing" }   // a draining tank that must not hit empty
+] } }
+```
+
+```python
+plan = router.optimize(stops, vehicles=5, dimensions=[
+    {"name": "fuel", "transit": "distance / 10", "start": 500, "min": 0,
+     "monotonicity": "non_increasing"}])
+```
+
+A `non_increasing` dimension with a `min` (or `non_decreasing` with a `max`) is
+mirrored into the O(1) insertion probe, so a refuelling-impossible insertion is
+pruned before full evaluation. Soft bounds add a penalty to the route cost
+instead of rejecting. From Rust, build `brooom::dimension::CustomDimension` with
+`.draining()` / `.monotone()` / `.with_min()` / `.soft_max()` and a native
+closure, or compile the same expression with `brooom::pyspell`.
+
+#### When you actually need constraint *programming* (CP-SAT bridge)
+
+A few instances are propagation-hard — tightly-coupled time windows where greedy
++ local-search gets stuck and you need a solver that reasons *bidirectionally*
+over the constraint store. That is structurally outside a local-search VRP
+engine. Rather than fake it, MPEE ships an honest **interop bridge**
+([`tools/cpsat_bridge/`](tools/cpsat_bridge/)): export the brooom problem to an
+OR-Tools CP-SAT model, solve the hard sub-instance, and round-trip the exact tour
+back as a `--warm-start` for brooom to polish with the full constraint set.
+Covers multi-depot, multi-dimensional capacity, skills, multiple time windows,
+pickup & delivery, priority and groups; refuses anything outside that subset
+loudly. It stays offline tooling — never wired into the hot path.
 
 **JSON field shapes & notes.** Per-job `time_windows` is a list of `[start,end]`
 (seconds), e.g. `"time_windows": [[0,3600],[7200,9000]]`; a vehicle's shift is
@@ -227,10 +311,42 @@ group" (no manual hook). When reading a `Solution` in Rust, a route exposes
 currently needs each half modelled as a job (it errors rather than dropping a
 shipment).
 
+## Choosing a surface
+
+**MPEE is a Rust engine, not a Python library.** Everything — routing, the matrix
+stream, the VRP solver, every constraint and objective above — lives in the
+`brooom` / `dijeng` Rust crates. Python, the CLI, and the JSON `options` block are
+all **thin surfaces over that same core**; pick whichever fits how you ship, with
+zero feature difference between them:
+
+| Surface | Use it when | Entry point |
+|---|---|---|
+| **Rust** (crate) | You embed the solver, want the lowest latency, native callbacks, or WASM. | `brooom::solver::solve`, `SolverConfig`, `brooom::dimension::CustomDimension` |
+| **JSON config** | You drive the solver from any language or a pipeline — no code. | a VROOM-style problem with an `"options"` block (objective, dimensions, caps) |
+| **CLI** | Scripts, batch jobs, CI. | `brooom -i problem.json --objective lexicographic …` (build `crates/brooom`) |
+| **Python** (`mpee`) | Notebooks, glue code, the quickest start. | `pip install mpee` → `Router.optimize(...)` / `.solve(...)` |
+
+The Python package is **PyO3 bindings compiled from the Rust crate** — it runs the
+exact same native solver, not a reimplementation. The same is true of the
+WebAssembly demo and the CLI. So "is this only for Python?" — no: Python is one of
+four equal front doors to one Rust engine.
+
+```rust
+// Rust: the engine directly — lexicographic objective + a fuel dimension.
+use brooom::solver::{solve, SolverConfig, ObjectiveMode, LexObjective};
+let cfg = SolverConfig {
+    objective_mode: ObjectiveMode::Lexicographic {
+        levels: vec![LexObjective::Vehicles, LexObjective::Cost],
+    },
+    ..Default::default()
+};
+let solution = solve(&mut problem, Some(&matrix), cfg)?;
+```
+
 ## Install (Python / CLI)
 
-The fastest way to use the engine is the `mpee` Python package — a thin CLI
-and library over the same Rust core:
+The quickest way to *start* is the `mpee` Python package — but it's a thin CLI
+and library over the same Rust core, not a separate implementation:
 
 ```bash
 pip install mpee

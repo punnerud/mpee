@@ -247,6 +247,31 @@ print("unassigned:", plan["unassigned"])   # over-capacity / outside every windo
 `unassigned` (over capacity, outside all time windows, or no road to them) —
 it never invents an impossible route.
 
+### Objectives & custom dimensions
+
+Beyond constraints, two solve-level knobs shape *what* "best" means — both
+identical to the Rust `SolverConfig` API and the JSON `options` block:
+
+```python
+# Lexicographic: strict priority order, not a weighted sum.
+# "serve everyone → fewest vehicles → least cost". Levels: unassigned,
+# vehicles, cost, makespan, distance.
+plan = router.optimize(stops, vehicles=10, objective=["unassigned", "vehicles", "cost"])
+
+# Custom accumulator dimension (OR-Tools-style RoutingDimension): a draining
+# fuel tank that must never hit empty, with a per-arc transit (a sandboxed
+# expression over distance/duration/cumul).
+plan = router.optimize(stops, vehicles=5, dimensions=[
+    {"name": "fuel", "transit": "distance / 10", "start": 500,
+     "min": 0, "monotonicity": "non_increasing"}])
+```
+
+A `non_increasing`+`min` (or `non_decreasing`+`max`) dimension is pruned inside
+the insertion probe; `soft_max`/`soft_min` + `soft_weight` turn a bound into a
+penalty instead of a hard reject. Both knobs also accept the same shapes inside a
+problem's `"options"` for pure-JSON drivers. The default objective is scalar
+(single weighted cost), byte-identical to omitting it.
+
 ### Custom constraints in code
 
 When the built-ins aren't enough, pass `constraints=[...]` to `solve()`: each is
