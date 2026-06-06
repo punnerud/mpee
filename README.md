@@ -39,11 +39,21 @@ it**, which is where the speed and memory wins come from.
 
 | Scale | Result |
 |---|---|
+| N = 100–200 | **ties** the best (PyVRP) on tight-window C1/R1/C2 and reaches it ~2.5× faster; **#2 — behind PyVRP by 2–5 %** on wide-window R2/RC2; beats OR-Tools (which can fail feasibility) |
 | N = 1,000 | beats the next-best solver (PyVRP) on **17 / 20** seeds, p ≈ 10⁻⁷ |
 | N = 50,000 | the **only** tested solver that converges on a laptop |
 | Inner loop | the *entire* local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as **one GPU megakernel** — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration |
 
 <sub>End-to-end on this machine: 2,000 jobs / 50 vehicles solved in ~2 min (matrix 0.32 s); 5,000 / 100 in ~9 min (matrix 4.10 s), both ≥99 % assigned. ([full benchmarks](crates/brooom/README.md))</sub>
+
+> **Self-reported — independent validation welcome.** All numbers above are
+> measured on one machine (Apple M3 Pro) and have not been independently verified.
+> Not SOTA on raw solution quality (PyVRP's HGS-class ILS leads small-N wide-window);
+> our edge is the integrated single-engine stack, memory/scale, and speed. Every
+> benchmark is built to re-run on the same instances/budget through every solver —
+> see [`crates/brooom/benchmarks`](crates/brooom/benchmarks) (seeded real-map
+> generator + 4-way harness) and the honest gap analysis in
+> [`benchmarks/results/`](crates/brooom/benchmarks/results).
 
 > **Scope:** MPEE covers a single downloaded area — it isn't a
 > route-anywhere-on-Earth offline map. Pick the OSM extract that matches your
@@ -628,8 +638,9 @@ See the [Constraints](#constraints) matrix above.
   50k customers, OSRM-compatible HTTP server (`bench_osrm`, `serve`),
   correctness verified against full Dijeng. See
   [crates/dijeng/README.md](crates/dijeng/README.md).
-- **brooom**: GPU-accelerated VRP, beats PyVRP / Vroom / OR-Tools on
-  Solomon R1-1000 (p ≈ 3·10⁻⁸), Vroom-compatible I/O. See
+- **brooom**: GPU-accelerated VRP. Beats PyVRP / Vroom / OR-Tools at **large N**
+  (Solomon R1-1000, p ≈ 3·10⁻⁸); **#2 behind PyVRP at small N** (ties tight-window,
+  −2–5 % on wide-window R2/RC2). Vroom-compatible I/O. See
   [crates/brooom/README.md](crates/brooom/README.md).
 
 - **mpee-cli**: end-to-end VRP pipeline. The `download` / `build` /

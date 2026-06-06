@@ -445,6 +445,36 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       <a href="https://github.com/punnerud/mpee/tree/main/crates/dijeng">dijeng</a> and
       <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom">brooom</a> READMEs.
     </p>
+
+    <h3>Self-reported — reproduce &amp; validate it yourself</h3>
+    <p>
+      Honesty first: <strong>every number here is self-reported</strong>, measured
+      on one machine (Apple M3 Pro), and has <strong>not yet been independently
+      validated</strong>. So the benchmarks are built to be re-run by anyone —
+      same instances, same matrix, same time budget through every solver:
+    </p>
+    <pre><code># competitors (one venv; Python 3.12 has wheels)
+python3.12 -m venv .bench-venv && .bench-venv/bin/pip install pyvrp ortools
+
+# synthetic (Solomon) — 4-way, identical budget
+.bench-venv/bin/python crates/brooom/benchmarks/run_multi_bench.py \
+    --time-limit 10 crates/brooom/benchmarks/instances_solomon/r201.json
+
+# real maps — seed-reproducible (no data to download), real OSRM road distances
+python3 crates/brooom/benchmarks/gen_realmap.py --region sf --seed 11 --n 80 \
+    --matrix osrm --osrm-host &lt;host&gt;
+.bench-venv/bin/python crates/brooom/benchmarks/run_multi_bench.py instances_realmap/sf_s11_n80_osrm.json</code></pre>
+    <p class="muted" style="font-size:.88rem">
+      Where we stand, honestly: <strong>not</strong> state-of-the-art on raw
+      solution quality — PyVRP's HGS-class ILS still wins 2–5 % on wide-window
+      small-N (R2/RC2); we're #2 there (we beat OR-Tools, tie on tight-window
+      C1/R1/C2, and are ~2.5–5× faster to a good answer). Where we lead: the
+      integrated single-engine stack, memory/scale (50k on a laptop), and end-to-end
+      speed. Raw results + the honest gap analysis live in
+      <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom/benchmarks/results">benchmarks/results/</a>
+      (<code>competitor_comparison.md</code>, <code>beat_pyvrp.md</code>).
+      Independent benchmarks welcome — open an issue with your numbers.
+    </p>
   </section>
 
   <section id="install">
