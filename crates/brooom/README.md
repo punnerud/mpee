@@ -262,6 +262,11 @@ BROOOM_GPU_REPEATS=4 BROOOM_GPU_KICK=8 BROOOM_PENALTY_LS=1 \
 | `--exact-polish`        | off     | Brute-force solve routes ≤ 14 stops |
 | `--osrm-url`            | none    | OSRM /table endpoint for matrix |
 | `--mmm-knn PATH`        | none    | Path to MMM K-NN data (see integration.txt) |
+| `--objective`           | scalar  | `scalar` or `lexicographic` (N-level) |
+| `--objective-levels`    | none    | Comma list, highest priority first (e.g. `vehicles,cost`); implies `--objective lexicographic` |
+| `--options PATH`        | none    | JSON file with an `options` object (`objective` + `dimensions`), merged over the input's `options` |
+| `--dimensions JSON`     | none    | Inline JSON list of custom accumulator dimensions |
+| `--warm-start PATH`     | none    | Vroom-style solution JSON to seed local search (strictly safe) |
 
 ### Environment variables
 
@@ -271,6 +276,71 @@ BROOOM_GPU_REPEATS=4 BROOOM_GPU_KICK=8 BROOOM_PENALTY_LS=1 \
 | `BROOOM_GPU_KICK`       | Number of random task removes per ILS-kick (default 3) |
 | `BROOOM_PENALTY_LS`     | `=1` to enable penalty-LS in granular relocate |
 | `HGS_EDUCATE_KICK`      | Kick count during HGS educate (default 0) |
+
+### Objectives & custom dimensions
+
+Two solve-level knobs shape *what* "best" means and *what* accumulates along a
+route. Both are reachable identically from the Rust `SolverConfig` API, the
+`--objective` / `--dimensions` CLI flags, the JSON `options` block, and the
+Python bindings — same native code behind each.
+
+**Lexicographic objective (true N-level, not a weighted sum).** Optimise in
+strict priority order: minimise the first level; among solutions that achieve it,
+minimise the second; and so on. Each level pins its achieved value as a hard cap
+for the next and warm-starts from the previous level's solution. Levels:
+`vehicles`, `unassigned`, `cost`, `makespan`, `distance`.
+
+```bash
+# "Use as few vehicles as possible, then cut cost within that fleet size."
+brooom -i problem.json --objective lexicographic --objective-levels vehicles,cost
+```
+
+```rust
+use brooom::{solver::{solve, SolverConfig, ObjectiveMode, LexObjective}};
+let cfg = SolverConfig {
+    objective_mode: ObjectiveMode::Lexicographic {
+        levels: vec![LexObjective::Vehicles, LexObjective::Cost],
+    },
+    ..Default::default()
+};
+let sol = solve(&mut problem, Some(&matrix), cfg)?;
+```
+
+The default is `Scalar` (single weighted cost), byte-identical to before. It is
+*best-effort* lexicographic: each pinned value is the metaheuristic's best, not a
+proven optimum.
+
+**Custom accumulator dimensions (OR-Tools-style `RoutingDimension`).** Track a
+quantity that accumulates along each route — fuel, a cooling budget, a resource —
+via a per-arc transit. Declare hard `min`/`max`, soft (`soft_max`/`soft_min` +
+`soft_weight`), and a monotonicity so the bound prunes inside the insertion probe.
+
+```jsonc
+// options.dimensions — a draining fuel tank that must not hit empty.
+{ "options": { "dimensions": [
+  { "name": "fuel", "transit": "distance / 10", "start": 500,
+    "min": 0, "monotonicity": "non_increasing" } ] } }
+```
+
+```rust
+use brooom::dimension::{ArcCtx, CustomDimension, DimensionGuard};
+use std::sync::Arc;
+let fuel = CustomDimension::new("fuel", Arc::new(|c: &ArcCtx| -(c.distance / 10)))
+    .with_start(500).with_min(0).draining();
+let _g = DimensionGuard::install(vec![fuel]); // RAII — cleared on drop
+```
+
+From a sandboxed string (JSON/CLI/Python) the transit is a pyspell expression over
+the arc (`distance`, `duration`, `cumul`), compiled to native code — never
+arbitrary code. A `non_increasing`+`min` (or `non_decreasing`+`max`) dimension is
+mirrored into the O(1) probe; soft bounds add a penalty instead of rejecting. A
+shared cross-route resource (e.g. a depot loading dock) is a solution-level global
+— enforced post-hoc, not in-routing.
+
+> For the propagation-hard class a local-search solver can't close well (tightly
+> coupled time windows), see the honest [CP-SAT interop bridge](../../tools/cpsat_bridge/):
+> export the instance to OR-Tools CP-SAT and round-trip the tour back as a
+> `--warm-start`.
 
 ---
 
