@@ -414,11 +414,36 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
 
   <section id="install">
     <h2>Install</h2>
+    <p>One engine, install it for whichever surface you use.</p>
+
+    <h3>Python</h3>
     <pre><code>pip install mpee</code></pre>
     <p class="muted">
       Prebuilt wheel for macOS (arm64); Linux/Windows install from the source
       distribution (needs a Rust toolchain) until multi-platform wheels are
       published. Python 3.8+. No Rust toolchain needed for the macOS wheel.
+    </p>
+
+    <h3>Rust (native crates)</h3>
+    <pre><code># in your Cargo.toml project
+cargo add brooom      # the VRP solver (constraints, objectives, soft-TW)
+cargo add dijeng      # contraction-hierarchy routing + distance matrix</code></pre>
+    <p class="muted">
+      Embed the engine directly — native constraint callbacks, no FFI, compiles
+      to WASM. <code>brooom</code> is the solver; <code>dijeng</code> is the
+      routing/matrix engine. See <a href="https://github.com/punnerud/mpee">the
+      crates</a>.
+    </p>
+
+    <h3>CLI &amp; HTTP API</h3>
+    <pre><code># build the binary from source (one Rust toolchain needed)
+cargo install --git https://github.com/punnerud/mpee brooom
+brooom -i problem.json -o solution.json     # CLI solve
+brooom --serve 8088                          # HTTP API on :8088 (POST /solve)</code></pre>
+    <p class="muted">
+      The same <code>brooom</code> binary is the CLI, the HTTP API server, and the
+      JSON-config runner — pick the surface, the engine is identical. The Python
+      wheel bundles it too (<code>mpee</code> CLI).
     </p>
   </section>
 
