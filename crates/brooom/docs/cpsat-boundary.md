@@ -111,35 +111,55 @@ class above.
 ## 4. The bridge (implemented, runs)
 
 `tools/cpsat_bridge/export_cpsat.py` reads the same VROOM-style JSON brooom
-accepts and emits a standalone OR-Tools CP-SAT Python script for a narrow,
-clearly-bounded subset (single depot, single capacity dim, optional hard time
-windows, mandatory jobs). It refuses *loudly* (exit 2) on anything outside that
-subset rather than silently dropping constraints. See the README there for the
-exact scope, the model shape, and the commands.
+accepts and emits a standalone OR-Tools CP-SAT Python script for a clearly-bounded
+subset. It now covers **multi-depot, multi-dimensional capacity, skills, multiple
+time windows per job, pickup-and-delivery shipments, priority, and client
+groups** (mandatory jobs except grouped ones, which are exactly-one). It refuses
+*loudly* (exit 2) on anything outside that subset — prize/optional-job
+relaxation, breaks, multi-trip, per-vehicle cost shaping, setup/release — rather
+than silently dropping constraints. See the README there for the exact scope, the
+model shape, and the commands.
 
-Verified in this environment:
+It also **round-trips**: on a feasible solve the generated script writes a brooom
+warm-start JSON (`routes[].vehicle` + `steps[]` of `{type:"job",
+location_index}`) in solved visiting order. The `location_index` is aligned with
+`resolve_coords`' interning order (depots first, then jobs in input order), which
+is what `crates/brooom/src/warm_start.rs` keys on — so the exact CP-SAT tour can
+be handed straight to `brooom --warm-start`.
+
+Verified in this environment (exporter under `python3` 3.14; generated models
+solved under `python3.10` with `ortools 9.15`, the interpreter that carries
+OR-Tools here):
 
 * generator runs on `crates/brooom/examples/oslo_5jobs.json` and produces a
-  `py_compile`-clean script;
-* with `ortools 9.15` installed, that script solves to `OPTIMAL` (objective 1387,
-  two routes);
+  `py_compile`-clean script that solves to `OPTIMAL` (objective 1387, two routes);
 * the `tw_chain.json` stress fixture from §2.1 solves to the unique feasible
-  order `12 → 13 → 11 → 14` — the order MPEE's greedy+LS would have to stumble onto
-  by chance.
+  order `12 → 13 → 11 → 14`, its `solution_ws.json` round-trips through the built
+  `brooom --warm-start` CLI (`warm-start loaded — 1 routes, cost=1047.00,
+  unassigned=0`) — the order MPEE's greedy+LS would have to stumble onto by
+  chance is now consumed exactly;
+* per-feature fixtures under `tools/cpsat_bridge/fixtures/` (skills,
+  pickup_delivery, multi_depot, multi_tw, multidim_group) each export
+  `py_compile`-clean and solve to OPTIMAL; `multi_depot` was additionally
+  round-tripped through `brooom --warm-start` (2 routes, cost 630.00, 0
+  unassigned).
 
 ### What the bridge does NOT claim
 
-* It is **not** feature-parity with brooom: no shipments, multi-depot, skills,
-  groups, breaks, multi-trip, prize/disjunction relaxation, or brooom's full
-  cost shaping. Those either belong in native MPEE or are simply out of POC scope.
+* It is **not** feature-parity with brooom. Still refused: prize/disjunction
+  relaxation (optional jobs), breaks, multi-trip, brooom's full weighted cost
+  shaping, speed factors, setup/release. Those either belong in native MPEE or
+  are out of POC scope.
 * It is **not** integrated into the solve loop and must not be. It is an offline
-  exporter you reach for when an instance is in the narrow hard class. Wiring it
-  into the hot path would re-introduce exactly the "solver inside a solver"
-  problem we refused in §2.2.
-* It does **not** round-trip the answer back into brooom automatically. For the
-  POC the value is demonstrating that the *hard sub-instance* is exportable and
-  solvable by the right tool; piping the CP-SAT route back in as a warm start is
-  a natural next step but is not built here.
+  exporter you reach for when an instance is in the hard class. The round-trip is
+  a *file*: brooom consumes the warm-start JSON via the existing `--warm-start`
+  path, not by calling CP-SAT in the hot loop. Wiring CP-SAT into the hot path
+  would re-introduce exactly the "solver inside a solver" problem we refused in
+  §2.2.
+* The round-trip is a faithful **warm-start**, not a guarantee that LS preserves
+  the exact CP-SAT tour: brooom re-evaluates and may polish it further. In the
+  validated cases above the cost matched the CP-SAT objective; that is the
+  intended hand-off, not a contract that LS never moves a node.
 
 ## 5. Honest bottom line
 

@@ -1,0 +1,12 @@
+{
+  "description": "multi-dimensional capacity + client group (exactly one of group 1)",
+  "vehicles": [
+    {"id": 1, "start": [10.75, 59.91], "end": [10.75, 59.91], "capacity": [4, 4]}
+  ],
+  "jobs": [
+    {"id": 11, "location": [10.76, 59.91], "service": 60, "delivery": [2, 1]},
+    {"id": 12, "location": [10.77, 59.92], "service": 60, "delivery": [1, 2]},
+    {"id": 13, "location": [10.74, 59.90], "service": 60, "delivery": [1, 1], "group": 1},
+    {"id": 14, "location": [10.78, 59.93], "service": 60, "delivery": [1, 1], "group": 1}
+  ]
+}

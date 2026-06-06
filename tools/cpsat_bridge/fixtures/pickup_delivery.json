@@ -1,0 +1,16 @@
+{
+  "description": "shipment: pickup then delivery on the same vehicle, ordered",
+  "vehicles": [
+    {"id": 1, "start": [10.75, 59.91], "end": [10.75, 59.91], "capacity": [5]}
+  ],
+  "jobs": [
+    {"id": 21, "location": [10.78, 59.93], "service": 60, "delivery": [1]}
+  ],
+  "shipments": [
+    {
+      "pickup": {"id": 31, "location": [10.76, 59.91], "service": 60, "pickup": [2]},
+      "delivery": {"id": 32, "location": [10.74, 59.90], "service": 60, "delivery": [2]},
+      "amount": [2]
+    }
+  ]
+}
