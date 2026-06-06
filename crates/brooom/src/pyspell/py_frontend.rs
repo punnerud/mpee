@@ -9,8 +9,11 @@
 use rustpython_parser::{ast, Parse};
 
 use super::error::DslError;
-use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, UnOp, Value};
-use super::lower::{builtin_from, finish, finish_global, index_base, resolve_field, Ctx};
+use super::ir::{ArcProgram, BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, UnOp, Value};
+use super::lower::{
+    builtin_from, finish, finish_arc, finish_global, index_base, resolve_bare_arc, resolve_field,
+    Ctx,
+};
 
 pub fn compile_python(src: &str) -> Result<super::ir::Program, DslError> {
     let expr = ast::Expr::parse(src, "<constraint>").map_err(|e| DslError::Parse(e.to_string()))?;
@@ -28,6 +31,16 @@ pub fn compile_python_global(src: &str) -> Result<GlobalProgram, DslError> {
     Ok(finish_global(ctx, ret))
 }
 
+/// Compile a **dimension-transit** expression from Python-expression syntax. The
+/// expression reads `arc.*` fields (or their bare aliases `distance`/`duration`/
+/// `cumul`/`from`/`to`/`arrival`) and yields the integer cumul delta for one arc.
+pub fn compile_python_arc(src: &str) -> Result<ArcProgram, DslError> {
+    let expr = ast::Expr::parse(src, "<transit>").map_err(|e| DslError::Parse(e.to_string()))?;
+    let mut ctx = Ctx::new_arc();
+    let ret = lower(&expr, &mut ctx)?;
+    Ok(finish_arc(ctx, ret))
+}
+
 fn lower(e: &ast::Expr, ctx: &mut Ctx) -> Result<Expr, DslError> {
     match e {
         ast::Expr::Constant(c) => lower_const(&c.value),
@@ -36,6 +49,18 @@ fn lower(e: &ast::Expr, ctx: &mut Ctx) -> Result<Expr, DslError> {
             let name = n.id.as_str();
             if let Some(&slot) = ctx.locals.get(name) {
                 Ok(Expr::Local(slot))
+            } else if ctx.in_arc {
+                // Inside a transit expression a bare arc-field name resolves
+                // directly (e.g. `distance / 10`); `arc` alone still needs a field.
+                if let Some(e) = resolve_bare_arc(name) {
+                    Ok(e)
+                } else if name == "arc" {
+                    Err(DslError::Forbidden(
+                        "`arc` must be used with a field, e.g. `arc.distance`".into(),
+                    ))
+                } else {
+                    Err(DslError::UnknownName(name.to_string()))
+                }
             } else if name == "route" || name == "vehicle" || name == "solution" {
                 Err(DslError::Forbidden(format!(
                     "`{name}` must be used with a field, e.g. `{name}.<field>`"

@@ -91,6 +91,40 @@ def _load_stops(path: str) -> list[tuple[float, float]]:
     return stops
 
 
+def _parse_objective_arg(spec):
+    """Map the --objective CLI value to the `objective=` argument of
+    Router.optimize. `None`/"scalar" → None (default scalar). "lexicographic"
+    → that string. Anything else is treated as a comma-separated list of level
+    names (e.g. "vehicles,cost") → a Python list → lexicographic in that order."""
+    if spec is None:
+        return None
+    s = spec.strip()
+    if s.lower() in ("", "scalar"):
+        return None
+    if s.lower() == "lexicographic":
+        return "lexicographic"
+    return [tok.strip() for tok in s.split(",") if tok.strip()]
+
+
+def _parse_dimensions_arg(spec):
+    """Map --dimensions to the `dimensions=` argument. The value is either a
+    path to a JSON file or an inline JSON string; in both cases it must parse to
+    a list of dimension dicts (the options.dimensions schema). None → None."""
+    if spec is None:
+        return None
+    text = spec
+    p = Path(spec)
+    if p.exists():
+        text = p.read_text()
+    try:
+        dims = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"error: --dimensions is not valid JSON: {e}")
+    if not isinstance(dims, list):
+        raise SystemExit("error: --dimensions must be a JSON list of dimension objects")
+    return dims
+
+
 def _add_cache_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cache", metavar="PREFIX",
                    help="cache prefix = the .osm.pbf path; loads PREFIX.pp + "
@@ -130,8 +164,14 @@ def cmd_optimize(args) -> int:
     stops = _load_stops(args.stops)
     depot = _latlon(args.depot) if args.depot else None
     r = _open_router(pp, ch)
+    # Objective: a comma list of level names → lexicographic; "scalar"
+    # (or absent) keeps today's behaviour. Dimensions: a JSON file/string
+    # in the options.dimensions schema (a list of dicts).
+    objective = _parse_objective_arg(args.objective)
+    dimensions = _parse_dimensions_arg(getattr(args, "dimensions", None))
     plan = r.optimize(stops, vehicles=args.vehicles, capacity=args.capacity,
-                      depot=depot, time_limit_s=args.time)
+                      depot=depot, time_limit_s=args.time,
+                      objective=objective, dimensions=dimensions)
     if args.json:
         print(json.dumps(plan))
         return 0
@@ -265,6 +305,13 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--capacity", type=int, default=1_000_000)
     po.add_argument("--depot", help="LAT,LON (default: centroid of stops)")
     po.add_argument("--time", type=float, default=5.0, help="solve time budget (s)")
+    po.add_argument("--objective", default=None,
+                    help="'scalar' (default), 'lexicographic', or a comma list of "
+                         "level names (e.g. vehicles,cost). Levels: unassigned, "
+                         "vehicles, cost, makespan, distance")
+    po.add_argument("--dimensions", default=None,
+                    help="custom accumulator dimensions: a JSON file path or inline "
+                         "JSON list in the options.dimensions schema")
     po.add_argument("--json", action="store_true", help="emit JSON")
     _add_cache_args(po)
     po.set_defaults(func=cmd_optimize)

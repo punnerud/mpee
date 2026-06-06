@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use super::error::DslError;
 use super::ir::{
-    Builtin, CmpOp, Expr, Field, GlobalProgram, LetBinding, ListField, Program, SolutionField,
-    Value, DEFAULT_MAX_STEPS,
+    ArcField, ArcProgram, Builtin, CmpOp, Expr, Field, GlobalProgram, LetBinding, ListField,
+    Program, SolutionField, Value, DEFAULT_MAX_STEPS,
 };
 
 pub(crate) struct Ctx {
@@ -22,6 +22,10 @@ pub(crate) struct Ctx {
     /// dimension registry when the context is created (dimensions are registered
     /// before constraints are compiled, exactly like the constraint hook).
     pub dim_names: Vec<String>,
+    /// True while compiling a dimension-transit expression: a bare identifier
+    /// that names an arc field (`distance`, `duration`, `cumul`, …) resolves to
+    /// an [`ArcField`] instead of being rejected as an unknown name.
+    pub in_arc: bool,
 }
 
 impl Ctx {
@@ -32,7 +36,14 @@ impl Ctx {
             body: Vec::new(),
             reads: Vec::new(),
             dim_names: crate::dimension::dimension_names(),
+            in_arc: false,
         }
+    }
+    /// A context for compiling a dimension-transit expression.
+    pub fn new_arc() -> Self {
+        let mut c = Ctx::new();
+        c.in_arc = true;
+        c
     }
     pub fn declare(&mut self, name: String) -> u16 {
         let slot = self.next_slot;
@@ -91,6 +102,12 @@ pub(crate) fn resolve_field(base: &str, field: &str, ctx: &mut Ctx) -> Result<Ex
             "capacity" => Ok(Expr::ListField(ListField::VehicleCapacity)),
             _ => Err(DslError::UnknownField { base: "vehicle", field: field.to_string() }),
         },
+        // Arc fields, only meaningful inside a dimension-transit program. The
+        // evaluator's context (route vs solution vs arc) decides whether they read.
+        "arc" => arc_field(field).map(Expr::ArcField).ok_or(DslError::UnknownField {
+            base: "arc",
+            field: field.to_string(),
+        }),
         // Cross-route fields, only meaningful inside a global program. The
         // evaluator's context (route vs solution) decides whether they read.
         "solution" => {
@@ -121,6 +138,28 @@ pub(crate) fn index_base(base: Expr) -> Expr {
     } else {
         base
     }
+}
+
+/// Map an `arc.<field>` name to its [`ArcField`]. Returns `None` for unknowns.
+fn arc_field(field: &str) -> Option<ArcField> {
+    Some(match field {
+        "from" => ArcField::ArcFrom,
+        "to" => ArcField::ArcTo,
+        "cumul" | "cumul_before" => ArcField::ArcCumulBefore,
+        "arrival" => ArcField::ArcArrival,
+        "distance" => ArcField::ArcDistance,
+        "duration" => ArcField::ArcDuration,
+        _ => return None,
+    })
+}
+
+/// Resolve a *bare* identifier inside a dimension-transit expression to an
+/// [`ArcField`], so a transit can be written `distance / 10` rather than
+/// `arc.distance / 10`. Returns `None` if the name is not an arc field (the
+/// caller then falls back to its usual "unknown name" handling). The qualified
+/// `arc.<field>` form is also accepted (via [`resolve_field`]) and is identical.
+pub(crate) fn resolve_bare_arc(name: &str) -> Option<Expr> {
+    arc_field(name).map(Expr::ArcField)
 }
 
 pub(crate) fn builtin_from(name: &str) -> Result<Builtin, DslError> {
@@ -162,6 +201,12 @@ pub(crate) fn finish(ctx: Ctx, ret: Expr) -> Program {
 /// Globals run only on the cold path, so they carry no probe metadata.
 pub(crate) fn finish_global(ctx: Ctx, ret: Expr) -> GlobalProgram {
     GlobalProgram { body: ctx.body, ret, n_locals: ctx.next_slot, max_steps: DEFAULT_MAX_STEPS }
+}
+
+/// Assemble an [`ArcProgram`] from a finished context and return expression.
+/// Transit programs read `arc.*` only, so they carry no probe metadata.
+pub(crate) fn finish_arc(ctx: Ctx, ret: Expr) -> ArcProgram {
+    ArcProgram { body: ctx.body, ret, n_locals: ctx.next_slot, max_steps: DEFAULT_MAX_STEPS }
 }
 
 /// A single `field <= const` / `field < const` on a probe-visible field can be
