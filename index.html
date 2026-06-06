@@ -527,8 +527,14 @@ mpee.Router.build(pbf, profile="car", progress=True, force=False) -> dict
 
 # routing (need a .ch):
 r.route(from_lat, from_lon, to_lat, to_lon, geometry=False) -> dict
-r.optimize(stops, vehicles=1, capacity=1_000_000, depot=None, time_limit_s=5.0) -> dict
-r.solve(problem_json, time_limit_s=5.0) -> dict     # VROOM-style JSON
+r.optimize(stops, vehicles=1, capacity=1_000_000, depot=None, time_limit_s=5.0,
+           objective=None, dimensions=None) -> dict
+r.solve(problem_json, time_limit_s=5.0, constraints=None, max_vehicles=None,
+        fairness_weight=0.0, objective=None, dimensions=None) -> dict   # VROOM-style JSON
+# objective: None/"scalar" (default) or a level list, e.g. ["vehicles","cost"]
+#            (levels: unassigned, vehicles, cost, makespan, distance) — lexicographic
+# dimensions: [{"name","transit","start","min","max","monotonicity","soft_max",…}]
+#            transit is a sandboxed expr over distance/duration/cumul (OR-Tools-style)
 r.table(points) -> dict                              # N×N durations + distances
 r.snap(lat, lon) -> (lat, lon)
 r.bbox() -> dict
