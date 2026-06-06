@@ -1,10 +1,5 @@
 instance,solver,cost,time_s,routes,unassigned,error
-r1_2000_s1,brooom_gpu,,0.0,,,"Command '['/Users/punnerud/Downloads/brooom/target/release/brooom', '-i', '/Users/punnerud/Downloads/brooom/benchmarks/instances/r1_2000_s1.json', '-o', '/Users/punnerud/Downloads/brooom/benchmarks/re"
-r1_2000_s1,pyvrp,21443,123.33,132,0,
-r1_2000_s1,ortools,25827,120.02,134,0,
-r1_2000_s2,brooom_gpu,,0.0,,,"Command '['/Users/punnerud/Downloads/brooom/target/release/brooom', '-i', '/Users/punnerud/Downloads/brooom/benchmarks/instances/r1_2000_s2.json', '-o', '/Users/punnerud/Downloads/brooom/benchmarks/re"
-r1_2000_s2,pyvrp,21039,123.21,131,0,
-r1_2000_s2,ortools,25517,120.11,132,0,
-r1_2000_s3,brooom_gpu,,0.0,,,"Command '['/Users/punnerud/Downloads/brooom/target/release/brooom', '-i', '/Users/punnerud/Downloads/brooom/benchmarks/instances/r1_2000_s3.json', '-o', '/Users/punnerud/Downloads/brooom/benchmarks/re"
-r1_2000_s3,pyvrp,21029,123.17,131,0,
-r1_2000_s3,ortools,24815,120.02,132,0,
+sf_s3_n20_osrm,vroom,9102,0.02,5,0,
+sf_s3_n20_osrm,brooom,9102.012161999999,0.1,5,0,
+sf_s3_n20_osrm,ortools,9102,5.0,5,0,
+sf_s3_n20_osrm,pyvrp,9102,5.0,5,0,
