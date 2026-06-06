@@ -55,14 +55,27 @@ pub fn load_warm_start(
         serde_json::from_slice(&bytes).map_err(|e| Error::Other(format!("warm-start: parse: {e}")))?;
 
     // Lookup: location_index → job_idx. Multiple jobs at the same location
-    // are unusual but possible; we take the first match. Shipments are not
-    // supported in warm-start v1 (no PD-pair tracking).
+    // are unusual but possible; we take the first match.
     let loc_to_job: std::collections::HashMap<usize, usize> = problem
         .jobs
         .iter()
         .enumerate()
         .filter_map(|(i, j)| j.location.index.map(|li| (li, i)))
         .collect();
+
+    // Lookup: location_index → (shipment_idx, is_pickup), so a warm-start can
+    // carry pickup&delivery shipments (e.g. from the CP-SAT bridge). A location
+    // that is both a job and a shipment half is resolved as a job (above) first.
+    let mut loc_to_ship: std::collections::HashMap<usize, (usize, bool)> =
+        std::collections::HashMap::new();
+    for (i, s) in problem.shipments.iter().enumerate() {
+        if let Some(li) = s.pickup.location.index {
+            loc_to_ship.entry(li).or_insert((i, true));
+        }
+        if let Some(li) = s.delivery.location.index {
+            loc_to_ship.entry(li).or_insert((i, false));
+        }
+    }
 
     let veh_id_to_idx: std::collections::HashMap<u64, usize> = problem
         .vehicles
@@ -86,12 +99,20 @@ pub fn load_warm_start(
                 let li = s.location_index.ok_or_else(|| {
                     Error::Other("warm-start: job step missing location_index".into())
                 })?;
-                let job_idx = loc_to_job
-                    .get(&li)
-                    .copied()
-                    .ok_or_else(|| Error::Other(format!("warm-start: no job at location {li}")))?;
-                steps.push(TaskRef::Job(job_idx));
-                visited_jobs.insert(job_idx);
+                if let Some(&job_idx) = loc_to_job.get(&li) {
+                    steps.push(TaskRef::Job(job_idx));
+                    visited_jobs.insert(job_idx);
+                } else if let Some(&(si, is_pickup)) = loc_to_ship.get(&li) {
+                    steps.push(if is_pickup {
+                        TaskRef::Pickup(si)
+                    } else {
+                        TaskRef::Delivery(si)
+                    });
+                } else {
+                    return Err(Error::Other(format!(
+                        "warm-start: no job or shipment half at location {li}"
+                    )));
+                }
             }
             // Ignore start/end/break/etc — re-derived by evaluate_route.
         }

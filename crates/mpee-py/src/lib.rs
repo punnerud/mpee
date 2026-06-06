@@ -796,7 +796,7 @@ impl Router {
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
-    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None, soft_tw = None))]
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None, soft_tw = None, balance_spread = None, group_cardinality = None))]
     #[allow(clippy::too_many_arguments)]
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
@@ -804,6 +804,7 @@ impl Router {
         max_vehicles: Option<usize>, fairness_weight: f64, fairness_metric: &str,
         objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
         soft_tw: Option<bool>,
+        balance_spread: Option<i64>, group_cardinality: Option<(u32, u32)>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
@@ -896,6 +897,9 @@ impl Router {
                     // Penalty-managed soft constraints: None ⇒ AUTO (on when the
                     // problem has time windows), Some(_) forces it on/off.
                     soft_search: soft_tw,
+                    // HARD balance cap + k-of-N group cardinality (constraint parity).
+                    balance_spread,
+                    group_cardinality,
                     ..Default::default()
                 };
                 let t = std::time::Instant::now();

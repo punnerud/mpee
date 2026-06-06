@@ -397,6 +397,22 @@ fn evaluate_route_with_buf(
         }
     }
 
+    // First-class precedence: for each (a, b) where both job ids appear on THIS
+    // route, a must precede b. Guarded by a non-empty list, so pure-CVRP routes
+    // pay nothing. O(pairs × route) — precedence lists are small in practice.
+    if !problem.precedence.is_empty() {
+        let pos_of = |job_id: u64| -> Option<usize> {
+            steps.iter().position(|s| matches!(s, TaskRef::Job(_)) && s.description(problem).id == job_id)
+        };
+        for &(a, b) in &problem.precedence {
+            if let (Some(pa), Some(pb)) = (pos_of(a), pos_of(b)) {
+                if pa > pb {
+                    return Err("precedence violated (a after b on the same route)");
+                }
+            }
+        }
+    }
+
     let vw = vehicle.time_window();
     let speed = vehicle.speed_factor.max(0.01);
 

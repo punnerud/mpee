@@ -59,6 +59,10 @@ plus driver breaks, backhaul and multi-depot — all checked in one evaluator
 (`crates/brooom/src/solution.rs`) and proven by a conformance suite you can run
 yourself: `cargo test -p brooom --test constraints`.
 
+📖 **[Constraint cookbook](docs/constraint-cookbook.md)** — one copy-paste
+runnable recipe per constraint, plus a "pick your constraint by problem shape"
+guide. (Each recipe is backed by a conformance test, so it can't rot.)
+
 | Constraint | MPEE (brooom) | VROOM | OR-Tools | PyVRP | Timefold |
 |---|:--:|:--:|:--:|:--:|:--:|
 | Multi-dimensional capacity (weight + volume + …) | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -71,12 +75,12 @@ yourself: `cargo test -p brooom --test constraints`.
 | Max route duration / distance / stops | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Multi-depot** (distinct per-vehicle start/end) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Prize-collecting / optional jobs (per-job prize) | ✅ | ⚠️ | ✅ | ✅ prizes | ✅ |
-| **Precedence / sequencing** (A before B, first/last) | ✅ DSL | ❌ | ✅ | ⚠️ | ✅ |
+| **Precedence / sequencing** (A before B) | ✅ field + DSL | ❌ | ✅ | ⚠️ | ✅ |
 | **Release times** (earliest service per job) | ✅ | ⚠️ | ✅ | ✅ | ✅ |
 | **Multi-trip / reloading** (return to depot, reload) | ✅ | ❌ | ✅ | ✅ | ✅ |
 | **Max-vehicles cap** | ✅ | ⚠️ | ✅ | ✅ | ✅ |
-| **Client-groups** (visit exactly one of a set) | ✅ | ❌ | ✅ | ✅ | ✅ |
-| **Fairness / balancing** (duration or load) | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Client-groups** (visit *k of N* of a set) | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Fairness / balancing** (soft **and** hard cap) | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Setup time, fixed + per-hour vehicle cost | ✅ | ✅ | ✅ | ⚠️ | ✅ |
 | Soft (penalised) constraints | ✅ | ⚠️ | ✅ | ⚠️ | ✅ |
 | **Soft time windows / capacity / duration** (serve late, charge a penalty) | ✅ | ❌ | ✅ | ⚠️ | ✅ |

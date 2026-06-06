@@ -408,6 +408,38 @@ pub fn fairness(weight: Cost, metric: FairnessMetric) -> Arc<GlobalConstraintFn>
     })
 }
 
+/// HARD balance: cap the spread (max − min) of the chosen metric across used
+/// routes at `max_spread`. Overage is charged a `HARD`-scaled penalty, so the
+/// search treats it as a real constraint (an over-spread plan is out-ranked by
+/// any within-spread one) rather than a soft preference — this is the answer to
+/// "fairness is soft-only". Turns the fairness row from ⚠️ to a hard ✅ when you
+/// need guaranteed balance; the soft [`fairness`] term remains for gentle nudging.
+///
+/// CAVEAT (same HARD-magnitude assumption as the other cap globals): `HARD`
+/// (1e12) is assumed to out-rank any realistic routing-cost difference. Set the
+/// cap to a reachable spread — an impossibly tight cap makes every plan equally
+/// "infeasible" and the search loses its gradient.
+pub fn balance_spread_cap(max_spread: i64, metric: FairnessMetric) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| {
+        let vals: Vec<i64> = (0..v.route_count())
+            .filter(|&i| !v.routes[i].steps.is_empty())
+            .map(|i| match metric {
+                FairnessMetric::Duration => v.duration(i),
+                FairnessMetric::Load => v.load(i),
+            })
+            .collect();
+        if vals.len() < 2 {
+            return 0.0;
+        }
+        let spread = *vals.iter().max().unwrap() - *vals.iter().min().unwrap();
+        if spread > max_spread {
+            HARD * (spread - max_spread) as Cost
+        } else {
+            0.0
+        }
+    })
+}
+
 /// A shared cross-route resource: peak concurrent **depot usage** (e.g. a
 /// loading-dock / yard capacity), penalised post-hoc at the solution level.
 ///
