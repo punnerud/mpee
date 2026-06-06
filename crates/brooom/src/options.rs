@@ -33,6 +33,11 @@ pub struct SolverOptions {
     pub objective: Option<ObjectiveOpt>,
     /// Custom accumulator dimensions. Absent / empty ⇒ none registered.
     pub dimensions: Vec<DimensionOpt>,
+    /// Penalty-managed soft constraints (PyVRP-style time-warp). `null`/absent =
+    /// AUTO (on when the problem has time windows). `true`/`false` force it. Maps
+    /// to [`crate::solver::SolverConfig::soft_search`].
+    #[serde(default)]
+    pub soft_time_windows: Option<bool>,
 }
 
 /// `options.objective`: a bare `"scalar"` string or a `{ "levels": [...] }` map.

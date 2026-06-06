@@ -728,6 +728,9 @@ mod tests {
             cost_custom: 0.0,
             break_count: 0,
             break_duration: 0,
+            tw_excess: 0.0,
+            load_excess: 0.0,
+            dur_excess: 0.0,
         }
     }
 

@@ -78,6 +78,19 @@ pub struct SolverConfig {
     /// phase 1 minimises the vehicle count, phase 2 re-solves minimising cost
     /// with the phase-1 vehicle count pinned as a hard cap. See [`ObjectiveMode`].
     pub objective_mode: ObjectiveMode,
+    /// Penalty-managed soft constraints (PyVRP-style time-warp). When the search
+    /// runs in soft mode the ILS may pass through time-window / capacity /
+    /// duration-infeasible solutions — each violation is charged at an adaptive
+    /// weight instead of being rejected — and the best *hard-feasible* solution
+    /// seen is returned. This lets the search cross the infeasible ridges that
+    /// trap a feasible-only local search on time-constrained instances.
+    ///
+    /// `None` (default) = AUTO: on when the problem has time windows, off
+    /// otherwise. `Some(true)`/`Some(false)` force it on/off. The returned
+    /// solution is always hard-feasible, so the worst case equals the
+    /// feasible-only result. Structural constraints (skills, precedence, …) stay
+    /// hard regardless. See [`crate::solution::set_soft_penalties`].
+    pub soft_search: Option<bool>,
 }
 
 /// Selects scalar (default) vs. N-level lexicographic optimisation.
@@ -235,6 +248,7 @@ impl Default for SolverConfig {
             fairness_metric: crate::global_constraint::FairnessMetric::Duration,
             objective_weights: None,
             objective_mode: ObjectiveMode::Scalar,
+            soft_search: None,
         }
     }
 }
@@ -385,6 +399,18 @@ fn solve_scalar(problem: &Problem, matrix: &Matrix, config: &SolverConfig) -> So
     solve_scalar_with_extra_global(problem, matrix, config, Vec::new())
 }
 
+/// True if the problem carries any real **job** time window — the trigger for
+/// AUTO soft search. We deliberately key on customer delivery windows, NOT a
+/// vehicle's shift window: nearly every vehicle has a finite shift, so triggering
+/// on that would auto-soften capacity/duration on ordinary CVRP problems and
+/// change long-standing hard-capacity semantics. A job with only the universal
+/// window does not count.
+fn problem_has_time_windows(problem: &Problem) -> bool {
+    problem.jobs.iter().any(|j| {
+        j.time_windows.iter().any(|w| w != &crate::problem::TimeWindow::FOREVER)
+    })
+}
+
 /// Backing implementation for the scalar solve, optionally installing extra
 /// global constraints (used by the lexicographic driver to add the active
 /// level's bias penalty plus all prior levels' HARD caps). An empty
@@ -442,10 +468,46 @@ fn solve_scalar_with_extra_global(
         .time_limit_ms
         .map(|ms| Instant::now() + std::time::Duration::from_millis(ms));
 
+    // Penalty-managed soft constraints (OR-Tools soft-bound semantics). AUTO
+    // (None) turns it on when the problem has time windows; Some(_) forces it.
+    // When on, the whole search runs in penalised space: a stop may be served
+    // slightly late, or a vehicle slightly over capacity / duration, charged
+    // `λ × violation` instead of being rejected. λ is FIXED and high (≈50× the
+    // per-second travel cost, clamped), derived once from a reference solution:
+    //   * on a fully-feasible instance no violation ever lowers the penalised
+    //     cost, so the search is identical to hard mode (no quality regression);
+    //   * on an over-constrained instance, serving a stop a little late costs
+    //     `λ × lateness`, which is far below the drop prize, so the solver serves
+    //     it rather than leaving it unassigned.
+    // (We deliberately do NOT use infeasibility as a search *bridge* to better
+    // hard-feasible solutions à la PyVRP — measured on Solomon, that regressed
+    // R/RC at our ILS budget; see benchmarks/results.)
+    let soft_on = config.soft_search.unwrap_or_else(|| problem_has_time_windows(problem));
+    let soft_weights = if soft_on {
+        let ref_sol = greedy_insertion(problem, matrix);
+        let denom = (ref_sol.summary.travel_time + ref_sol.summary.service_time).max(1) as f64;
+        let scale = (ref_sol.summary.cost / denom).max(1e-6);
+        // λ high enough that no violation is ever beneficial on a feasible
+        // instance (so it stays byte-identical to hard), yet far below the drop
+        // prize (DEFAULT_PRIZE ≈ 1e9) so serving a stop late always beats dropping
+        // it. The scale (per-second travel cost) × 1000 sits comfortably between.
+        let lam = (scale * 1000.0).clamp(10.0, 1.0e5);
+        Some(crate::solution::SoftWeights { tw: lam, load: lam, dur: lam })
+    } else {
+        None
+    };
+    if config.verbose && soft_on {
+        let w = soft_weights.unwrap();
+        eprintln!("brooom: penalty-managed soft constraints ON (λ≈{:.1}, time/load/duration)", w.tw);
+    }
+
     // For each of K seeds: insertion → LS → ILS-kick loop. Best across all
     // attempts wins. With K=1 and ils_iters=0 this is the original baseline;
     // any larger setting trades wall time for cost.
     let solve_one = |seed: u64| -> Solution {
+        // Construction runs in HARD mode so each seed starts from a clean
+        // feasible base (rayon may reuse a worker thread that left soft armed).
+        crate::solution::set_soft_penalties(None);
         // Diversify starting solutions across multi-start variants:
         //   seed=0     → deterministic greedy cheapest (baseline)
         //   even seeds → seeded greedy (shuffled within priority)
@@ -497,7 +559,14 @@ fn solve_scalar_with_extra_global(
             }
         }
 
-        // ILS: destroy-and-repair, track best ever.
+        // Arm soft penalties for the ILS (construction above stayed hard). With a
+        // fixed high λ this leaves a feasible instance's trajectory unchanged and
+        // lets an over-constrained one serve stops late instead of dropping them.
+        if let Some(w) = soft_weights {
+            crate::solution::set_soft_penalties(Some(w));
+        }
+
+        // ILS: destroy-and-repair, track best ever (penalised cost when soft).
         if ils_iters > 0 && ils_kick > 0.0 {
             let mut best_cost = sol.summary.cost;
             let mut best_sol = sol.clone();
@@ -556,8 +625,18 @@ fn solve_scalar_with_extra_global(
     // a separate top-level gpu_polish on the merged solution.
     // Custom constraints run only on the CPU evaluator, so skip GPU polishing
     // when any are registered (the megakernel can't call arbitrary closures).
+    // Arm soft penalties for the serial polish too, so it never re-rejects a
+    // legitimately-served-late route (and can pull a dropped stop in late via the
+    // repair pass). On a feasible instance the high λ keeps the polish identical
+    // to hard mode. Cleared at the end of the solve.
+    if let Some(w) = soft_weights {
+        crate::solution::set_soft_penalties(Some(w));
+    }
+
+    // GPU polish uses a hard-only megakernel (no soft penalties), so skip it when
+    // soft constraints are active — a hard pass would re-reject served-late routes.
     #[cfg(feature = "gpu")]
-    if config.use_gpu && best.routes.len() > 0 && matrix.n >= 500
+    if config.use_gpu && !soft_on && best.routes.len() > 0 && matrix.n >= 500
         && !crate::constraint::has_constraints()
         && !crate::global_constraint::has_global()
         && !problem.any_multi_trip()
@@ -644,6 +723,9 @@ fn solve_scalar_with_extra_global(
             best.summary.cost
         );
     }
+    // Disarm soft penalties — the solve is complete and any later evaluation
+    // (output rendering, callers) must see hard semantics.
+    crate::solution::set_soft_penalties(None);
     best
 }
 

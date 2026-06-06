@@ -79,6 +79,7 @@ yourself: `cargo test -p brooom --test constraints`.
 | **Fairness / balancing** (duration or load) | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Setup time, fixed + per-hour vehicle cost | ✅ | ✅ | ✅ | ⚠️ | ✅ |
 | Soft (penalised) constraints | ✅ | ⚠️ | ✅ | ⚠️ | ✅ |
+| **Soft time windows / capacity / duration** (serve late, charge a penalty) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
 | Custom constraints written in code (Rust **or** Python) | ✅ | ❌ | ✅ | ⚠️ | ✅ |
 | Cross-route / global constraints in code | ✅ | ❌ | ✅ | ❌ | ✅ |
 | Disjunctions (explicit per-job drop penalty) | ✅ | ⚠️ | ✅ | ✅ | ✅ |
@@ -217,6 +218,7 @@ Beyond the per-route hook, these are first-class — set a field or a solve knob
 | Multi-objective (weighted) | per-vehicle `span_cost` / `distance_weight` / `time_weight` |
 | **Lexicographic objective** | solve option `objective` = ordered levels (below) |
 | **Custom dimensions** (fuel/resource) | `dimensions` list with a per-arc transit (below) |
+| **Soft time windows / capacity / duration** | solve option `soft_tw` (CLI `--soft-tw`, JSON `options.soft_time_windows`); below |
 
 ```python
 plan = router.solve(problem_json, max_vehicles=8, fairness_weight=2.0)
@@ -228,6 +230,30 @@ The built-in cross-route constraints (max-vehicles, client-groups, fairness) rid
 on a solution-level hook (`brooom::global_constraint`); a custom Rust/Python
 global is the escape hatch for anything else. Multi-trip and any global keep the
 solve on the CPU evaluator.
+
+#### Soft time windows / capacity / duration (serve late, don't drop)
+
+OR-Tools-style soft bounds: rather than dropping a stop that can't be served
+inside its window (or that would overload a vehicle, or overrun the shift), serve
+it and charge `λ × violation`. Turn it on with `soft_tw` (Python
+`router.solve(..., soft_tw=True)`, CLI `--soft-tw`, JSON
+`"options": {"soft_time_windows": true}`). It **auto-enables** whenever a problem
+has job time windows, and `--no-soft-tw` forces it off.
+
+λ is fixed and high (≈1000× the per-second travel cost, far below the drop prize),
+so the behaviour is a strict improvement:
+
+* On a **feasible** instance no violation ever lowers the cost, so the result is
+  byte-identical to the hard solve (verified across Solomon C/R/RC — 0.00% delta,
+  see [`benchmarks/results/soft_tw_ab.md`](crates/brooom/benchmarks/results/soft_tw_ab.md)).
+* On an **over-constrained** instance it serves the stops that hard mode would
+  abandon, paying a small lateness penalty instead of the (far larger) drop cost
+  — e.g. a tightened Solomon r101 goes from 2 dropped stops to 0, at 5.3× lower
+  objective.
+
+Structural constraints stay hard even in soft mode (skills, precedence,
+pickup-before-delivery, reachability, max-distance). Proven by
+[`crates/brooom/tests/soft_penalty.rs`](crates/brooom/tests/soft_penalty.rs).
 
 #### Lexicographic objective (true N-level, not weighted)
 
