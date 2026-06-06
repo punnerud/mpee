@@ -204,9 +204,14 @@ pub fn solve_decomposed(
     }
 
     // Solve clusters in parallel (native) or serially (wasm, no rayon).
+    // Disable the small-N LAHC boost for cluster sub-solves: a decomposed large-N
+    // instance must keep the proven large-N trajectory (the headline N≥1000 win),
+    // so clusters use the greedy path exactly as before.
+    let mut sub_cfg = config.clone();
+    sub_cfg.allow_lahc = false;
     let solve_cluster = |c: usize| -> Solution {
         let sub = subproblem(problem, &jobs_by_cluster[c], &veh_by_cluster[c]);
-        solve_with_matrix(&sub, matrix, config)
+        solve_with_matrix(&sub, matrix, &sub_cfg)
     };
     #[cfg(feature = "parallel")]
     let sub_solutions: Vec<Solution> = (0..assn.k).into_par_iter().map(solve_cluster).collect();

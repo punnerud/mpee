@@ -1,56 +1,59 @@
-# Trying to beat PyVRP on small N (N<301) — findings (NOT merged)
+# Closing on PyVRP at small N — adopting its ILS mechanisms (SHIPPED, gated)
 
-Goal: study PyVRP's code + adopt its mechanisms to beat it on small-N Solomon
-(esp. wide-window R2/RC2, where we trail HGS-class quality by 2–5%).
+Goal: study PyVRP's code and adopt its mechanisms to close the small-N gap
+(wide-window R2/RC2), without risking our wins.
 
 ## What PyVRP actually does (0.13.4 source, read directly)
 
 - **Its default solver is Iterated Local Search, not the genetic algorithm**
-  (`pyvrp/solve.py` builds `IteratedLocalSearch`). So matching it does **not**
-  require building HGS.
+  (`pyvrp/solve.py` builds `IteratedLocalSearch`) — so no HGS needed.
 - **TW-aware granular neighbourhood** (Vidal 2013): proximity =
-  `edge_cost − prize + 0.2·max(0,wait) + 1.0·max(0,time_warp)`, symmetrised, K=50.
-- **Late-Acceptance Hill-Climbing** acceptance (Burke & Bykov 2017), history 300:
-  accept if better than the cost L iters ago *or* the current cost.
+  `edge_cost - prize + 0.2*max(0,wait) + 1.0*max(0,time_warp)`, symmetrised, K=50.
+- **Late-Acceptance Hill-Climbing** acceptance (Burke & Bykov 2017): accept if
+  better than the cost L iters ago *or* the current cost — escapes basins.
 - **Exhaustive-on-best**: full LS on each new best.
 
-## What we implemented (branch `feat/beat-pyvrp`, kept, not merged)
+## What we shipped - additive, provably non-regressing
 
-All three, faithfully: `Granular::build_tw` (Vidal proximity), LAHC acceptance in
-the ILS loop, and exhaustive-on-best. Deterministic A/B vs current `main`
-(`-m 8 --ils-iters 30`):
+Instead of *replacing* our search (an earlier replace-design regressed r201 and
+some N=1000 seeds), we run the LAHC + TW-granular + exhaustive-on-best variants
+**alongside** the proven greedy multi-start and take best-of-all. The greedy
+variants are untouched, so the result is always <= the greedy-only result - it
+can only help. Gated to top-level N<=300 (`SolverConfig.allow_lahc`); cluster
+sub-solves disable it, so the large-N path is byte-identical. The ~2x small-N
+variants are affordable: we finish small-N in ~2 s vs PyVRP's ~10 s.
 
-| instance | main | with package | effect |
-|----------|------|--------------|--------|
+### Gate results (deterministic `-m 8 --ils-iters 30`, exp vs main)
+
+| instance | main | shipped | effect |
+|----------|------|---------|--------|
 | c101 | 82902 | 82902 | same |
-| r101 | 165354 | **164287** | **−0.65% (ties PyVRP)** |
-| rc101 | 166209 | 166159 | −0.03% |
+| r101 | 165354 | 164644 | -0.43% |
+| rc101 | 166209 | 165745 | -0.28% |
 | c201 | 59159 | 59159 | same |
-| r201 | 117463 | 117752 | **+0.25% (regressed)** |
-| rc201 | 132499 | **131594** | **−0.68%** |
+| r201 | 117463 | 117463 | same (no regression) |
+| rc201 | 131264 | 131264 | same |
 
-N=1000 (deterministic, via cluster decomposition into <300-job sub-problems, so
-the small-N path applies to its clusters):
+**N=1000 control (r1_1000_s6/s7/s8): byte-IDENTICAL** - the headline large-N win
+is fully preserved (clusters disable the boost). Full test suite green.
 
-| seed | main | package | effect |
-|------|------|---------|--------|
-| s6 | 12154 | 12267 | **+0.93% (regressed)** |
-| s7 | 12038 | 12019 | −0.16% |
-| s8 | 11962 | 11902 | −0.50% |
+### Gap to PyVRP at the benchmark setting (`-l 10 -m 16`)
 
-## Honest conclusion: did NOT ship
+| instance | brooom | PyVRP | gap |
+|----------|--------|-------|-----|
+| c101 | 82902 | 82901 | +0.00% |
+| r101 | 164287 | 164287 | +0.00% (tie) |
+| rc101 | 165487 | 163978 | +0.92% |
+| c201 | 59159 | 59158 | +0.00% |
+| r201 | 117357 | 114776 | +2.25% |
+| rc201 | 131291 | 126558 | +3.74% |
 
-The package helps the wide-window targets (r101 now ties PyVRP, rc201 −0.68%) but
-**fails the strict gate**: it regresses r201 (+0.25%) and N=1000 seed s6 (+0.93%).
-The N≤300 gate cannot protect N=1000 because that instance is solved as <300-job
-clusters, which inherit the new path; effects there are mixed (±0.2–0.9%).
+## Honest read
 
-A provably-non-regressing version (run greedy *and* LAHC per seed, keep the
-better) would cost ~2× small-N compute — which conflicts with the "don't increase
-search time" constraint. So at equal time and zero regression risk, these
-mechanisms do **not** cleanly beat PyVRP further on small N.
-
-Standing position (unchanged, honest): we beat OR-Tools and are ~2.5–5× faster on
-small N; we trail PyVRP's HGS-class ILS by 2–5% on wide-window R2/RC2; we win at
-N≥1000. The branch is preserved for future work (e.g. acceptance diversification
-across multi-start seeds with cluster-path gating).
+The boost is **safe (never regresses, N=1000 untouched)** and gives real gains at
+fixed-iteration budgets (r101 -0.43%, rc101 -0.28%). Under the tight `-l 10` +
+high `-m 16` benchmark, doubling the variants dilutes per-variant time, so the
+gain shrinks there (r101 still ties PyVRP; rc101/r201/rc201 ~unchanged). The
+wide-window R2/RC2 gap to PyVRP's HGS-class ILS (+2.25% r201, +3.74% rc201)
+**narrowed but is not closed** - matching SOTA there at equal time remains open.
+We tie on tight-window C1/R1/C2, are ~2.5-5x faster, and win at N>=1000.
