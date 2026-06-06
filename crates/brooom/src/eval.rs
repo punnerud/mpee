@@ -179,19 +179,28 @@ pub fn precompute(
         let job = s.description(problem);
         let here = job.location.index?;
 
+        let mut arc_dur: i64 = 0;
+        let mut arc_dist: i64 = 0;
         if let Some(p) = prev_loc {
             let raw = matrix.duration(p, here);
             let dur = ((raw as f64) * speed).round() as i64;
+            arc_dur = dur;
+            arc_dist = matrix.distance(p, here);
             t += dur;
             travel_total += dur;
-            distance_total += matrix.distance(p, here);
+            distance_total += arc_dist;
         }
         // Record the dimension arc here (after travel, before setup/service) to
-        // match the evaluator's arrival timing exactly.
+        // match the evaluator's arrival timing exactly. Distance/duration are the
+        // physical arc cost, threaded into the transit callback's `ArcCtx`.
         if track_probe_dims {
             match prev_loc {
-                Some(p) => dim_arcs.push(crate::dimension::Arc2 { from: p, to: here, arrival: t }),
-                None => dim_arcs.push(crate::dimension::Arc2 { from: here, to: here, arrival: t }),
+                Some(p) => dim_arcs.push(crate::dimension::Arc2 {
+                    from: p, to: here, arrival: t, distance: arc_dist, duration: arc_dur,
+                }),
+                None => dim_arcs.push(crate::dimension::Arc2 {
+                    from: here, to: here, arrival: t, distance: 0, duration: 0,
+                }),
             }
         }
         let do_setup = match prev_loc {
@@ -246,11 +255,14 @@ pub fn precompute(
     if let (Some(p), Some(e)) = (prev_loc, end_idx) {
         let raw = matrix.duration(p, e);
         let dur = ((raw as f64) * speed).round() as i64;
+        let dist = matrix.distance(p, e);
         t += dur;
         travel_total += dur;
-        distance_total += matrix.distance(p, e);
+        distance_total += dist;
         if track_probe_dims {
-            dim_arcs.push(crate::dimension::Arc2 { from: p, to: e, arrival: t });
+            dim_arcs.push(crate::dimension::Arc2 {
+                from: p, to: e, arrival: t, distance: dist, duration: dur,
+            });
         }
     }
     if t > vw.end { return None; }
@@ -260,12 +272,17 @@ pub fn precompute(
     if crate::constraint::probe_violates(travel_total, distance_total, t - vw.start) {
         return None;
     }
-    // P5 probe mirror: prune a candidate whose monotone custom-dimension cumul
-    // would breach its declared max — the same proactive prune as above, now for
-    // a prefix-accumulated resource. Prune-only: a non-monotone or unbounded
-    // dimension is skipped entirely and its bound is still honoured at full
-    // `evaluate_route` (the P5 caveat, narrowed to non-probe-expressible dims).
-    if track_probe_dims && crate::dimension::probe_breaches_monotone_max(&dim_arcs) {
+    // P5 probe mirror (both directions): prune a candidate whose monotone
+    // custom-dimension cumul would breach its declared bound — the same proactive
+    // prune as above, now for a prefix-accumulated resource. A NonDecreasing dim's
+    // `max` (peak) and a NonIncreasing/draining dim's `min` (floor) are both
+    // mirrorable. Prune-only: a Monotonicity::None or non-matching-bound dimension
+    // is skipped entirely and its bound is still honoured at full `evaluate_route`
+    // (the P5 caveat, narrowed to non-probe-expressible dims).
+    if track_probe_dims
+        && (crate::dimension::probe_breaches_monotone_max(&dim_arcs)
+            || crate::dimension::probe_breaches_monotone_min(&dim_arcs))
+    {
         #[cfg(test)]
         crate::dimension::PROBE_PRUNE_COUNT
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
