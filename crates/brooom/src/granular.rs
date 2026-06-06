@@ -11,6 +11,7 @@
 //! optima; higher K → closer to vanilla LS.
 
 use crate::matrix::Matrix;
+use crate::problem::{Problem, TimeWindow};
 
 #[derive(Debug, Clone)]
 pub struct Granular {
@@ -42,6 +43,95 @@ impl Granular {
                 buf.truncate(k_eff);
             }
             buf.sort_unstable_by_key(|x| x.0);
+            for (r, &(_, j)) in buf.iter().enumerate() {
+                near[i * k_eff + r] = j;
+            }
+            counts[i] = buf.len() as u32;
+        }
+        Self { k: k_eff, near, counts, n }
+    }
+
+    /// Time-window-aware granular neighbourhood (Vidal et al. 2013, the proximity
+    /// PyVRP uses). Instead of raw duration, the proximity of an ordered pair
+    /// (i→j) adds penalties for the *minimum* waiting time and time warp implied
+    /// by serving j right after i:
+    ///
+    /// ```text
+    /// prox(i,j) = dur(i,j)
+    ///           + W_WAIT · max(0, early[j] − dur(i,j) − service[i] − late[i])
+    ///           + W_WARP · max(0, early[i] + service[i] + dur(i,j) − late[j])
+    /// ```
+    ///
+    /// with `W_WAIT = 0.2`, `W_WARP = 1.0` (PyVRP defaults), symmetrised via
+    /// `min(P, Pᵀ)`. So neighbours are clients that are *temporally* compatible,
+    /// not merely close — the lever that helps time-windowed (R/RC) instances.
+    /// For a window-less problem all penalties collapse to 0 and this is
+    /// byte-identical to [`Granular::build`] (pure distance), so CVRP behaviour is
+    /// unchanged. Depot locations get no neighbours and are never neighbours
+    /// (matching PyVRP). The `prize` reward term is omitted — our default prize is
+    /// a huge mandatory-sentinel that would swamp the metric.
+    pub fn build_tw(matrix: &Matrix, k: usize, problem: &Problem) -> Self {
+        const W_WAIT: f64 = 0.2;
+        const W_WARP: f64 = 1.0;
+        let n = matrix.n;
+        let k_eff = k.min(n.saturating_sub(1)).max(1);
+
+        // Per-location time-window data. Defaults (no client at a location ⇒ a
+        // depot): the universal window + no service, and `is_client = false`.
+        let mut early = vec![0i64; n];
+        let mut late = vec![TimeWindow::FOREVER.end; n];
+        let mut service = vec![0i64; n];
+        let mut is_client = vec![false; n];
+        let mut set_loc = |loc: Option<usize>, tws: &[TimeWindow], svc: i64| {
+            if let Some(li) = loc {
+                if li < n {
+                    is_client[li] = true;
+                    service[li] = svc;
+                    if let Some(w) = tws.first() {
+                        early[li] = w.start;
+                        late[li] = w.end;
+                    }
+                }
+            }
+        };
+        for j in &problem.jobs {
+            set_loc(j.location.index, &j.time_windows, j.service);
+        }
+        for s in &problem.shipments {
+            set_loc(s.pickup.location.index, &s.pickup.time_windows, s.pickup.service);
+            set_loc(s.delivery.location.index, &s.delivery.time_windows, s.delivery.service);
+        }
+
+        let prox = |i: usize, j: usize| -> f64 {
+            let d = matrix.durations[i * n + j] as f64;
+            let min_wait = early[j] as f64 - d - service[i] as f64 - late[i] as f64;
+            let min_warp = early[i] as f64 + service[i] as f64 + d - late[j] as f64;
+            d + W_WAIT * min_wait.max(0.0) + W_WARP * min_warp.max(0.0)
+        };
+
+        let mut near: Vec<u32> = vec![0u32; n * k_eff];
+        let mut counts: Vec<u32> = vec![0u32; n];
+        let mut buf: Vec<(f64, u32)> = Vec::with_capacity(n);
+        for i in 0..n {
+            // Depots have no neighbours (Vidal/PyVRP).
+            if !is_client[i] {
+                counts[i] = 0;
+                continue;
+            }
+            buf.clear();
+            for j in 0..n {
+                if j == i || !is_client[j] {
+                    continue; // clients do not neighbour depots
+                }
+                // Symmetrise: min(prox(i,j), prox(j,i)).
+                let p = prox(i, j).min(prox(j, i));
+                buf.push((p, j as u32));
+            }
+            if buf.len() > k_eff {
+                buf.select_nth_unstable_by(k_eff - 1, |a, b| a.0.total_cmp(&b.0));
+                buf.truncate(k_eff);
+            }
+            buf.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
             for (r, &(_, j)) in buf.iter().enumerate() {
                 near[i * k_eff + r] = j;
             }
