@@ -18,6 +18,8 @@ use brooom::{
     solver::{solve_full, SolverConfig},
 };
 
+mod serve;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum RoutingEngine {
     Haversine,
@@ -34,6 +36,16 @@ struct Cli {
     /// Output JSON file. Use `-` or omit for stdout.
     #[arg(short = 'o', long)]
     output: Option<String>,
+
+    /// Expose the solver as an HTTP API on this port instead of solving once.
+    /// `POST /solve` takes the same JSON as `-i` (incl. `options`) and returns
+    /// the solution; add a `"webhook":"<url>"` field for an async callback.
+    #[arg(long)]
+    serve: Option<u16>,
+
+    /// Host/interface to bind when `--serve` is set.
+    #[arg(long, default_value = "127.0.0.1")]
+    serve_host: String,
 
     /// Routing engine for matrix building (skipped if matrix is in input).
     #[arg(short = 'r', long, value_enum, default_value_t = RoutingEngine::Haversine)]
@@ -315,6 +327,24 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    // `--serve <port>`: run the HTTP API instead of a one-shot solve.
+    if let Some(port) = cli.serve {
+        let cfg = serve::ServeConfig {
+            host: cli.serve_host.clone(),
+            port,
+            time_limit_s: cli.time_limit_s,
+            use_osrm: matches!(cli.routing, RoutingEngine::Osrm),
+            osrm_host: cli.osrm_host.clone(),
+            osrm_profile: cli.osrm_profile.clone(),
+            speed_mps: cli.speed_kmh * 1000.0 / 3600.0,
+            detour: cli.detour,
+            verbose: cli.verbose,
+        };
+        serve::run(cfg)?;
+        return Ok(());
+    }
+
     let t_main_start = std::time::Instant::now();
 
     // Streaming parse keeps peak memory low — for million-cell matrices the
