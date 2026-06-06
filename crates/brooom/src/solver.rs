@@ -716,6 +716,21 @@ fn solve_scalar_with_extra_global(
         );
     }
 
+    // R2/RC2 over-consolidation lever: on wide-window instances the cheaper plan
+    // spreads onto more, shorter routes, but greedy+LS tends to pack into a few
+    // long ones. Pull short interior segments onto fresh vehicles when it lowers
+    // cost, then re-LS — keeping the result only if the whole solution improved.
+    // Small-N only + revert-guarded, so it can never regress the N≥1000 win (an
+    // earlier route-opening attempt cost +0.6% there) or any instance it touches.
+    let pre_spread = best.summary.cost;
+    spread_polish(&mut best, problem, matrix, granular.as_ref(), &config);
+    if config.verbose && best.summary.cost + 1e-9 < pre_spread {
+        eprintln!(
+            "brooom: spread pass: {:.2} → {:.2} (Δ={:.2})",
+            pre_spread, best.summary.cost, pre_spread - best.summary.cost
+        );
+    }
+
     // Final guaranteed-assignment pass. The ILS `kick` drops empty routes and
     // only reinserts into surviving ones, so when vehicles outnumber demand a
     // feasible job can get stranded in `unassigned` instead of opening a spare
@@ -843,6 +858,110 @@ fn enforce_max_vehicles(sol: &mut Solution, problem: &Problem, cap: usize) {
 
 /// Hard-enforce "exactly one served member per client group": keep the
 /// lowest-index served member of each group, evict the rest to `unassigned`.
+/// R2/RC2 over-consolidation lever — see the call site. Greedily pulls a short
+/// interior segment (1–3 stops) onto a fresh unused vehicle whenever that lowers
+/// cost, then re-runs local search; keeps the result only if the whole solution
+/// improved (otherwise reverts). Guarded to small instances so it never touches
+/// the large-N path. Safe by construction: it can only ever lower `best`'s cost.
+fn spread_polish(
+    sol: &mut Solution,
+    problem: &Problem,
+    matrix: &Matrix,
+    granular: Option<&Granular>,
+    config: &SolverConfig,
+) {
+    use crate::solution::{evaluate_route, Route, RouteMetrics};
+    use std::collections::HashSet;
+
+    // Small instances only — large N keeps the existing, tuned behaviour.
+    if problem.jobs.len() > 300 {
+        return;
+    }
+    let snapshot = sol.clone();
+    let before = sol.summary.cost;
+    let mut moved_any = false;
+
+    loop {
+        let used: HashSet<usize> = sol.routes.iter().map(|r| r.vehicle_idx).collect();
+        let unused: Vec<usize> = (0..problem.vehicles.len())
+            .filter(|v| !used.contains(v))
+            .collect();
+        if unused.is_empty() {
+            break;
+        }
+
+        // Best (r1, seg_start, seg_len, v2, rest_metrics, seg_metrics, delta).
+        let mut best_move: Option<(usize, usize, usize, usize, RouteMetrics, RouteMetrics, f64)> =
+            None;
+        for r1 in 0..sol.routes.len() {
+            let route = &sol.routes[r1];
+            let veh1 = &problem.vehicles[route.vehicle_idx];
+            let cur = route.metrics.cost;
+            let n = route.steps.len();
+            if n < 2 {
+                continue;
+            }
+            let max_seg = 3.min(n - 1);
+            for seglen in 1..=max_seg {
+                for i in 0..=(n - seglen) {
+                    let mut rest: Vec<TaskRef> = Vec::with_capacity(n - seglen);
+                    rest.extend_from_slice(&route.steps[..i]);
+                    rest.extend_from_slice(&route.steps[i + seglen..]);
+                    if rest.is_empty() {
+                        continue; // emptying a whole route is consolidation, not spread
+                    }
+                    let m1 = match evaluate_route(problem, matrix, veh1, &rest) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let seg = &route.steps[i..i + seglen];
+                    for &v2 in &unused {
+                        let veh2 = &problem.vehicles[v2];
+                        if !seg.iter().all(|t| veh2.has_skills(t.skills(problem))) {
+                            continue;
+                        }
+                        if !seg.iter().all(|t| t.description(problem).allows_vehicle(veh2.id)) {
+                            continue;
+                        }
+                        let m2 = match evaluate_route(problem, matrix, veh2, seg) {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
+                        let delta = (m1.cost + m2.cost) - cur;
+                        if delta < -1e-9 && best_move.as_ref().map_or(true, |b| delta < b.6) {
+                            best_move = Some((r1, i, seglen, v2, m1, m2, delta));
+                        }
+                    }
+                }
+            }
+        }
+
+        match best_move {
+            Some((r1, i, seglen, v2, m1, m2, _)) => {
+                let seg: Vec<TaskRef> = sol.routes[r1].steps[i..i + seglen].to_vec();
+                let mut rest: Vec<TaskRef> = Vec::with_capacity(sol.routes[r1].steps.len() - seglen);
+                rest.extend_from_slice(&sol.routes[r1].steps[..i]);
+                rest.extend_from_slice(&sol.routes[r1].steps[i + seglen..]);
+                sol.routes[r1].steps = rest;
+                sol.routes[r1].metrics = m1;
+                sol.routes.push(Route { vehicle_idx: v2, steps: seg, metrics: m2 });
+                moved_any = true;
+            }
+            None => break,
+        }
+    }
+
+    if moved_any {
+        // Let LS re-optimise around the freshly-opened routes, then keep the
+        // result only if the whole solution actually got cheaper.
+        local_search(problem, matrix, sol, config.max_local_search_passes, granular);
+        sol.recompute_summary(problem);
+        if sol.summary.cost >= before - 1e-9 {
+            *sol = snapshot;
+        }
+    }
+}
+
 fn enforce_groups(sol: &mut Solution, problem: &Problem, matrix: &Matrix, max_per_group: usize) {
     use std::collections::{HashMap, HashSet};
     let keep = max_per_group.max(1);
