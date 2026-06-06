@@ -796,7 +796,7 @@ impl Router {
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
-    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None, soft_tw = None, balance_spread = None, group_cardinality = None))]
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None, soft_tw = None, balance_spread = None, group_cardinality = None, propagate = true))]
     #[allow(clippy::too_many_arguments)]
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
@@ -805,6 +805,7 @@ impl Router {
         objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
         soft_tw: Option<bool>,
         balance_spread: Option<i64>, group_cardinality: Option<(u32, u32)>,
+        propagate: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
@@ -900,8 +901,19 @@ impl Router {
                     // HARD balance cap + k-of-N group cardinality (constraint parity).
                     balance_spread,
                     group_cardinality,
+                    propagate,
                     ..Default::default()
                 };
+                // mpee-py calls solve_with_matrix directly (bypassing solve_full),
+                // so run the propagation pre-pass here too when enabled.
+                if cfg.propagate {
+                    let soft = cfg.soft_search.unwrap_or_else(|| {
+                        problem.jobs.iter().any(|j| {
+                            j.time_windows.iter().any(|w| w != &brooom::problem::TimeWindow::FOREVER)
+                        })
+                    });
+                    let _ = brooom::propagate::tighten(&mut problem, &matrix, soft);
+                }
                 let t = std::time::Instant::now();
                 let sol = brooom::solver::solve_with_matrix(&problem, &matrix, &cfg);
                 Ok((sol, ji, vs, ve, snapped, n, dur_i, dist_i, t.elapsed().as_secs_f64()))
