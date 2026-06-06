@@ -1,0 +1,12 @@
+{
+  "description": "skills: only the skilled vehicle may serve the skilled job",
+  "vehicles": [
+    {"id": 1, "start": [10.75, 59.91], "end": [10.75, 59.91], "capacity": [10], "skills": [7]},
+    {"id": 2, "start": [10.75, 59.91], "end": [10.75, 59.91], "capacity": [10], "skills": []}
+  ],
+  "jobs": [
+    {"id": 11, "location": [10.76, 59.91], "service": 60, "delivery": [1], "skills": [7]},
+    {"id": 12, "location": [10.77, 59.92], "service": 60, "delivery": [1]},
+    {"id": 13, "location": [10.74, 59.90], "service": 60, "delivery": [1]}
+  ]
+}
