@@ -80,48 +80,134 @@ pub struct SolverConfig {
     pub objective_mode: ObjectiveMode,
 }
 
-/// Selects scalar (default) vs. two-phase lexicographic optimisation.
+/// Selects scalar (default) vs. N-level lexicographic optimisation.
 ///
 /// `Scalar` is byte-identical to the historical solver: a single aggregated
 /// cost is minimised and the secondary "use fewer vehicles" preference is only
 /// whatever the cost function happens to encode.
 ///
-/// `Lexicographic { Vehicles, Cost }` is a real two-phase driver:
-///   * **Phase 1** minimises the PRIMARY objective — number of vehicles/routes
-///     used — by running the search with a large per-vehicle fixed cost so the
-///     metaheuristic packs jobs onto as few routes as feasible, then reads back
-///     `vehicles_used` as V*.
-///   * **Phase 2** re-solves minimising the SECONDARY objective (cost) while
-///     pinning `max_vehicles(V*)` as a HARD cap, so the search can lower travel
-///     cost but can never regress the primary objective.
+/// `Lexicographic { levels }` is a real N-LEVEL driver over an ordered stack of
+/// [`LexObjective`]s, highest priority first. For each level `i`:
+///   * install that level's *bias penalty* global (e.g. a large per-vehicle
+///     fixed cost for `Vehicles`) and solve — warm-started from the previous
+///     level's solution so there is no cold re-solve;
+///   * read back the achieved value `A_i` of that level's measure;
+///   * install that level's *HARD cap* global (`measure ≤ A_i`) for every
+///     subsequent level, so a lower-priority level can never regress a
+///     higher-priority one.
 ///
-/// HONEST CAVEAT: V* is the metaheuristic's *best-found* vehicle count, NOT a
+/// The final level minimises its own measure with all prior caps pinned. The
+/// classic two-level `[Vehicles, Cost]` ordering is just the N=2 case.
+///
+/// HONEST CAVEAT: each `A_i` is the metaheuristic's *best-found* value, NOT a
 /// proven optimum, so this is best-effort lexicographic (the standard practical
-/// meaning), not exact lexicographic. It is also fixed at two levels
-/// (count → cost); a general N-level lexicographic stack is a further
-/// generalisation not implemented here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// meaning), not exact. The cap globals also ride on the HARD-magnitude
+/// assumption (one unit of any capped measure out-ranks any cost a later level
+/// could shave) — see the cap functions in `global_constraint.rs`. Arbitrary
+/// orderings are now supported (no longer a fall-back-to-scalar for anything
+/// other than `[Vehicles, Cost]`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ObjectiveMode {
     /// Today's behaviour: minimise one aggregated cost scalar.
     #[default]
     Scalar,
-    /// Two-phase: minimise `primary` first, then `secondary` with the primary
-    /// held at its phase-1 best as a hard constraint.
-    Lexicographic {
-        primary: LexObjective,
-        secondary: LexObjective,
-    },
+    /// N-level lexicographic: minimise `levels[0]` first, then `levels[1]` with
+    /// `levels[0]` pinned at its achieved value, and so on. Ordered highest
+    /// priority first. An empty stack degrades to a plain scalar solve.
+    Lexicographic { levels: Vec<LexObjective> },
 }
 
-/// The objectives a lexicographic phase can optimise. Today only the
-/// `(Vehicles, Cost)` ordering is wired end-to-end; the enum is spelled out so
-/// the intent reads clearly and so a future N-level stack has names to use.
+/// The objectives a lexicographic level can optimise. Every variant supplies a
+/// bias-penalty global (drives the measure down while it is the active level),
+/// a HARD cap global (pins the achieved value for later levels), and a measure
+/// read off the solution. See the per-variant helpers on the enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexObjective {
     /// Number of vehicles/routes used (`vehicles_used`).
     Vehicles,
-    /// Aggregated travel/operating cost (`summary.cost`).
+    /// Number of unassigned single jobs (`unassigned_count`).
+    UnassignedCount,
+    /// Aggregated travel/operating cost (summed route cost).
     Cost,
+    /// Makespan: the longest route duration (max end-start over routes).
+    Makespan,
+    /// Total distance summed across all routes.
+    Distance,
+}
+
+/// A level's achieved value, kept in the measure's native units so the matching
+/// cap global can pin it exactly. Vehicles/UnassignedCount are integer counts;
+/// Cost is the float route-cost sum; Makespan/Distance are integer seconds/metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LexMeasure {
+    Count(usize),
+    Cost(f64),
+    Int(i64),
+}
+
+impl LexObjective {
+    /// The bias-penalty global installed while this level is the active
+    /// objective. `penalty` is the HARD-scaled magnitude the driver picks so the
+    /// measure dominates lower-priority terms during this level's solve.
+    fn bias_penalty(&self, penalty: crate::problem::Cost) -> std::sync::Arc<crate::global_constraint::GlobalConstraintFn> {
+        use crate::global_constraint as gc;
+        match self {
+            LexObjective::Vehicles => gc::vehicle_count_penalty(penalty),
+            LexObjective::UnassignedCount => gc::unassigned_count_penalty(penalty),
+            LexObjective::Cost => {
+                // The base objective already *is* route cost; no extra bias is
+                // needed to make the search minimise it. Install a zero global
+                // so the level still has a registered (no-op) presence.
+                std::sync::Arc::new(|_: &gc::SolutionView| 0.0)
+            }
+            LexObjective::Makespan => gc::makespan_penalty(penalty),
+            LexObjective::Distance => gc::distance_penalty(penalty),
+        }
+    }
+
+    /// Read this level's achieved measure off `sol`.
+    fn measure(&self, sol: &Solution) -> LexMeasure {
+        match self {
+            LexObjective::Vehicles => {
+                LexMeasure::Count(sol.routes.iter().filter(|r| !r.steps.is_empty()).count())
+            }
+            LexObjective::UnassignedCount => LexMeasure::Count(
+                sol.unassigned.iter().filter(|t| matches!(t, TaskRef::Job(_))).count(),
+            ),
+            LexObjective::Cost => {
+                LexMeasure::Cost(sol.routes.iter().map(|r| r.metrics.cost).sum())
+            }
+            LexObjective::Makespan => LexMeasure::Int(
+                sol.routes
+                    .iter()
+                    .filter(|r| !r.steps.is_empty())
+                    .map(|r| r.metrics.end_time - r.metrics.start_time)
+                    .max()
+                    .unwrap_or(0),
+            ),
+            LexObjective::Distance => {
+                LexMeasure::Int(sol.routes.iter().map(|r| r.metrics.distance).sum())
+            }
+        }
+    }
+
+    /// The HARD cap global pinning `achieved` for every subsequent level. A
+    /// small epsilon slack is added so float noise on a re-evaluated previous
+    /// solution can't make it look infeasible against its own cap.
+    fn cap(&self, achieved: LexMeasure) -> std::sync::Arc<crate::global_constraint::GlobalConstraintFn> {
+        use crate::global_constraint as gc;
+        match (self, achieved) {
+            (LexObjective::Vehicles, LexMeasure::Count(c)) => gc::max_vehicles(c),
+            (LexObjective::UnassignedCount, LexMeasure::Count(c)) => gc::unassigned_count_cap(c),
+            (LexObjective::Cost, LexMeasure::Cost(c)) => gc::cost_cap(c + 1e-6),
+            (LexObjective::Makespan, LexMeasure::Int(c)) => gc::makespan_cap(c),
+            (LexObjective::Distance, LexMeasure::Int(c)) => gc::distance_cap(c),
+            // Mismatched measure/objective never happens (measure() and cap()
+            // are always called with the same objective). Install a no-op rather
+            // than panic so a future variant addition fails soft.
+            _ => std::sync::Arc::new(|_: &gc::SolutionView| 0.0),
+        }
+    }
 }
 
 impl Default for SolverConfig {
@@ -198,137 +284,116 @@ pub fn solve_full(
 /// baseline so we can never beat-then-lose; seeds 1..K shuffle pending tasks
 /// within priority class to give LS distinct starting points.
 pub fn solve_with_matrix(problem: &Problem, matrix: &Matrix, config: &SolverConfig) -> Solution {
-    match config.objective_mode {
+    match &config.objective_mode {
         // Default path: byte-identical to the historical single-scalar solver.
         ObjectiveMode::Scalar => solve_scalar(problem, matrix, config),
-        ObjectiveMode::Lexicographic { primary, secondary } => {
-            solve_lexicographic(problem, matrix, config, primary, secondary)
+        ObjectiveMode::Lexicographic { levels } => {
+            solve_lexicographic(problem, matrix, config, levels)
         }
     }
 }
 
-/// Two-phase lexicographic driver: minimise `primary` (phase 1), then minimise
-/// `secondary` (phase 2) with the phase-1 primary value pinned as a hard cap so
-/// phase 2 can never regress it.
+/// N-level lexicographic driver over an ordered `levels` stack (highest
+/// priority first). For each level `i`:
+///   1. install level `i`'s *bias penalty* plus the HARD caps of all PRIOR
+///      levels, warm-started from the previous level's solution;
+///   2. solve, and read back the achieved measure `A_i`;
+///   3. add level `i`'s HARD cap (`measure ≤ A_i`) to the pinned-cap set so
+///      every later level is forced to respect it.
+/// The final level minimises its own measure with every prior cap pinned.
 ///
-/// Only the `(Vehicles, Cost)` ordering is wired end-to-end today; any other
-/// pairing falls back to a plain scalar solve (documented best-effort).
+/// WARM-START HANDOFF: each level feeds the previous level's `Solution` as
+/// `config.warm_start`. The warm-start contract is strictly safe (best-of-K in
+/// `solve_scalar_with_extra_global` only adopts it if it wins), so this removes
+/// the cold re-solve without ever regressing a level.
 ///
-/// HONEST CAVEAT: V* (the phase-1 vehicle count) is the metaheuristic's
-/// best-found value, NOT a proven optimum — so this is *best-effort*
-/// lexicographic, the standard practical meaning, not exact. And it is two
-/// fixed levels (count → cost); a general N-level stack is future work.
+/// HONEST CAVEAT: each `A_i` is the metaheuristic's best-found value, NOT a
+/// proven optimum — best-effort lexicographic (the standard practical meaning),
+/// not exact. The cap globals ride on the HARD-magnitude assumption: one unit of
+/// a capped measure is assumed to out-rank any cost a lower-priority level could
+/// shave (true for all practical instances; see `global_constraint.rs`).
+/// Arbitrary orderings are supported — no fall-back-to-scalar.
 fn solve_lexicographic(
     problem: &Problem,
     matrix: &Matrix,
     config: &SolverConfig,
-    primary: LexObjective,
-    secondary: LexObjective,
+    levels: &[LexObjective],
 ) -> Solution {
-    // Only the canonical "minimise vehicles, then cost" ordering is supported
-    // end-to-end. Anything else degrades gracefully to a scalar solve rather
-    // than silently doing the wrong thing.
-    if primary != LexObjective::Vehicles || secondary != LexObjective::Cost {
+    // An empty stack has no objective to optimise — degrade to a plain scalar
+    // solve (byte-identical to the default path).
+    if levels.is_empty() {
         return solve_scalar(problem, matrix, config);
     }
 
-    // Penalty magnitude for phase 1. It must dominate any realistic travel-cost
-    // difference between solutions that differ by one vehicle, so the search
-    // always trades cost for a fewer-vehicle plan. We reuse the global-constraint
-    // HARD scale (1e12), which already out-ranks any real route cost.
-    let phase1_penalty = crate::global_constraint::HARD;
+    // Bias magnitude for the active level. It must dominate any realistic
+    // difference in the lower-priority objectives between solutions that differ
+    // by one unit of this level's measure. We reuse the global-constraint HARD
+    // scale (1e12), which already out-ranks any real route cost / prize.
+    let bias = crate::global_constraint::HARD;
 
-    // --- Phase 1: minimise vehicle count -----------------------------------
-    // Run the normal scalar solver but with a large per-vehicle penalty so the
-    // metaheuristic consolidates onto as few routes as feasible. Read back V*.
-    let phase1_cfg = SolverConfig {
-        objective_mode: ObjectiveMode::Scalar,
-        // Layer the vehicle-count penalty on top of any user objective weights
-        // by routing through a dedicated phase-1 global. We can't express that
-        // through `objective_weights` (which only scales cost components), so we
-        // install it directly in the scalar solve via a sentinel field below.
-        ..config.clone()
-    };
-    let phase1 = solve_scalar_with_extra_global(
-        problem,
-        matrix,
-        &phase1_cfg,
-        Some(crate::global_constraint::vehicle_count_penalty(phase1_penalty)),
-    );
-    let v_star = phase1.routes.iter().filter(|r| !r.steps.is_empty()).count();
+    // HARD caps pinned by all already-solved levels (highest priority first).
+    let mut pinned_caps: Vec<std::sync::Arc<crate::global_constraint::GlobalConstraintFn>> =
+        Vec::new();
+    // Carries the previous level's solution into the next level's warm-start.
+    let mut prev: Option<Solution> = None;
 
-    if config.verbose {
-        eprintln!(
-            "brooom: lexicographic phase 1 — V*={} vehicles (cost={:.2})",
-            v_star, phase1.summary.cost
-        );
-    }
+    for (i, level) in levels.iter().enumerate() {
+        let is_last = i + 1 == levels.len();
 
-    // V*==0 means no jobs were served at all; nothing for phase 2 to refine.
-    if v_star == 0 {
-        return phase1;
-    }
+        // Per-level globals: every prior level's HARD cap, plus this level's bias
+        // penalty (a no-op zero global for `Cost`, whose bias *is* the base
+        // objective). The cap set guarantees no higher-priority level regresses.
+        let mut extra = pinned_caps.clone();
+        extra.push(level.bias_penalty(bias));
 
-    // --- Phase 2: minimise cost with vehicles pinned at V* -----------------
-    // Install max_vehicles(V*) as a HARD cap so the cost-minimising search can
-    // never open a (V*+1)-th route. Phase 2 keeps the user's real objective
-    // (no count penalty), so it is free to lower travel cost within the cap.
-    let phase2_cfg = SolverConfig {
-        objective_mode: ObjectiveMode::Scalar,
-        max_vehicles: Some(match config.max_vehicles {
-            // Respect a stricter user cap if one was set; V* can't exceed it
-            // because phase 1 also honoured it, but min() is the safe contract.
-            Some(user_cap) => v_star.min(user_cap),
-            None => v_star,
-        }),
-        ..config.clone()
-    };
-    let mut phase2 = solve_scalar(problem, matrix, &phase2_cfg);
+        // Warm-start from the previous level's solution. Strictly safe: seed 0
+        // adopts it only if best-of-K keeps it, so a level can never come back
+        // worse than the warm start it was handed.
+        let level_cfg = SolverConfig {
+            objective_mode: ObjectiveMode::Scalar,
+            warm_start: prev.clone().or_else(|| config.warm_start.clone()),
+            ..config.clone()
+        };
 
-    let v_phase2 = phase2.routes.iter().filter(|r| !r.steps.is_empty()).count();
+        let sol = solve_scalar_with_extra_global(problem, matrix, &level_cfg, extra);
+        let achieved = level.measure(&sol);
 
-    // Phase 2 must never exceed the phase-1 vehicle count. The max_vehicles cap
-    // + enforce_max_vehicles already guarantee this, but if for any reason
-    // phase 2 came back worse on the PRIMARY objective (more vehicles) or on the
-    // SECONDARY at equal vehicles (higher cost), fall back to phase 1's plan so
-    // lexicographic is monotone-safe by construction.
-    let worse_primary = v_phase2 > v_star;
-    let worse_secondary_at_equal =
-        v_phase2 == v_star && phase2.summary.cost > phase1.summary.cost + 1e-6;
-    if worse_primary || worse_secondary_at_equal {
         if config.verbose {
             eprintln!(
-                "brooom: lexicographic phase 2 not better (v={} cost={:.2}) — keeping phase 1 (v={} cost={:.2})",
-                v_phase2, phase2.summary.cost, v_star, phase1.summary.cost
+                "brooom: lexicographic level {} ({:?}) — achieved {:?} (cost={:.2}){}",
+                i, level, achieved, sol.summary.cost,
+                if is_last { " [final]" } else { "" }
             );
         }
-        return phase1;
+
+        // Pin this level's achieved value for every subsequent level.
+        if !is_last {
+            pinned_caps.push(level.cap(achieved));
+        }
+        prev = Some(sol);
     }
 
-    if config.verbose {
-        eprintln!(
-            "brooom: lexicographic phase 2 — v={} cost={:.2} (V* held at {})",
-            v_phase2, phase2.summary.cost, v_star
-        );
-    }
-    phase2.recompute_summary(problem);
-    phase2
+    // `prev` is always `Some` here (levels is non-empty and the loop ran).
+    let mut best = prev.expect("non-empty levels solved at least one level");
+    best.recompute_summary(problem);
+    best
 }
 
 /// The historical single-scalar solve. Extracted verbatim from the old
 /// `solve_with_matrix` body so the default path is byte-identical.
 fn solve_scalar(problem: &Problem, matrix: &Matrix, config: &SolverConfig) -> Solution {
-    solve_scalar_with_extra_global(problem, matrix, config, None)
+    solve_scalar_with_extra_global(problem, matrix, config, Vec::new())
 }
 
-/// Backing implementation for the scalar solve, optionally installing one extra
-/// global constraint (used by phase 1 of the lexicographic driver to add the
-/// per-vehicle penalty). `extra_global == None` is exactly the historical path.
+/// Backing implementation for the scalar solve, optionally installing extra
+/// global constraints (used by the lexicographic driver to add the active
+/// level's bias penalty plus all prior levels' HARD caps). An empty
+/// `extra_globals` is exactly the historical path.
 fn solve_scalar_with_extra_global(
     problem: &Problem,
     matrix: &Matrix,
     config: &SolverConfig,
-    extra_global: Option<std::sync::Arc<crate::global_constraint::GlobalConstraintFn>>,
+    extra_globals: Vec<std::sync::Arc<crate::global_constraint::GlobalConstraintFn>>,
 ) -> Solution {
     // Drop any stale eval cache from a previous solve. Worker threads each
     // have their own thread-local cache; rayon will warm them as it spawns.
@@ -356,12 +421,10 @@ fn solve_scalar_with_extra_global(
     if problem.jobs.iter().any(|j| j.group.is_some()) {
         globals.push(crate::global_constraint::exactly_one_per_group());
     }
-    // Phase-1 lexicographic driver injects a per-vehicle penalty here so the
-    // search consolidates routes. `None` (every non-lexicographic solve) leaves
-    // the registered globals exactly as today.
-    if let Some(g) = extra_global {
-        globals.push(g);
-    }
+    // The lexicographic driver injects the active level's bias penalty plus all
+    // prior levels' HARD caps here. An empty list (every non-lexicographic
+    // solve) leaves the registered globals exactly as today.
+    globals.extend(extra_globals);
     let _global_guard = (!globals.is_empty())
         .then(|| crate::global_constraint::GlobalConstraintGuard::install(globals));
 

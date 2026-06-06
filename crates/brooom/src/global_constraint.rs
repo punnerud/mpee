@@ -64,6 +64,30 @@ impl SolutionView<'_> {
             .map(|s| s.description(self.problem).delivery.first().copied().unwrap_or(0))
             .sum()
     }
+    /// Makespan: the longest route duration (max over routes of end-start), i.e.
+    /// when the last vehicle gets home. 0 when no route is used. This is the
+    /// classic min-max objective: minimising it balances the slowest route down.
+    pub fn makespan(&self) -> i64 {
+        self.routes
+            .iter()
+            .filter(|r| !r.steps.is_empty())
+            .map(|r| r.metrics.end_time - r.metrics.start_time)
+            .max()
+            .unwrap_or(0)
+    }
+    /// Total distance summed across all routes (metres in the matrix's unit).
+    pub fn total_distance(&self) -> i64 {
+        self.routes.iter().map(|r| r.metrics.distance).sum()
+    }
+    /// Number of unassigned *single jobs* (shipment halves excluded — they are
+    /// not independently droppable). This is the count a `UnassignedCount`
+    /// lexicographic level minimises.
+    pub fn unassigned_count(&self) -> usize {
+        self.unassigned
+            .iter()
+            .filter(|t| matches!(t, TaskRef::Job(_)))
+            .count()
+    }
 }
 
 pub type GlobalConstraintFn = dyn Fn(&SolutionView) -> Cost + Send + Sync;
@@ -153,6 +177,104 @@ pub fn max_vehicles(cap: usize) -> Arc<GlobalConstraintFn> {
 /// only during phase 1 and removed before phase 2 re-solves for cost.
 pub fn vehicle_count_penalty(penalty: Cost) -> Arc<GlobalConstraintFn> {
     Arc::new(move |v: &SolutionView| penalty * v.vehicles_used() as Cost)
+}
+
+// ------------------------------------------------------------------------
+// N-level lexicographic objective globals (Phase 1 engine extension).
+//
+// Each lexicographic level needs two flavours of global:
+//   * a *bias penalty* installed while that level is the active objective, so
+//     the metaheuristic drives the measure down (analogue of
+//     `vehicle_count_penalty`); and
+//   * a *hard cap* installed for ALL subsequent levels, pinning the achieved
+//     value A_i so a later level can never regress it (analogue of
+//     `max_vehicles`).
+//
+// CAVEAT (HARD-magnitude assumption): the cap globals charge a `HARD`-scaled
+// penalty per unit over the cap. `HARD` (1e12) is assumed to out-rank any
+// realistic route cost / prize the lower-priority levels minimise, exactly as
+// `max_vehicles` and the group constraints already assume. If a single unit of
+// the capped measure could legitimately exceed `HARD` in objective terms the
+// pin would be only soft — true for all practical instances but stated here.
+// ------------------------------------------------------------------------
+
+/// Charge a flat `penalty` per unassigned single job. Drives a lexicographic
+/// `UnassignedCount` level to serve as many jobs as feasible. Soft + additive,
+/// so it composes with the other globals. Note the base objective already
+/// charges each unassigned job its `prize`; this adds an extra uniform pressure
+/// on top so the *count* (not the prize-weighted value) is what is minimised.
+pub fn unassigned_count_penalty(penalty: Cost) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| penalty * v.unassigned_count() as Cost)
+}
+
+/// HARD cap on the number of unassigned single jobs: charge `HARD` per job over
+/// `cap`. Pins a `UnassignedCount` level's achieved value for later levels.
+pub fn unassigned_count_cap(cap: usize) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| {
+        let u = v.unassigned_count();
+        if u > cap {
+            HARD * (u - cap) as Cost
+        } else {
+            0.0
+        }
+    })
+}
+
+/// HARD cap on the summed route cost: charge `HARD`-scaled penalty when the
+/// total route cost exceeds `cap`. Pins a `Cost` level's achieved value for
+/// later levels. The overage is scaled by `HARD` (a tiny multiplier keeps the
+/// penalty finite yet dominating) so even a sub-unit cost regression is
+/// out-ranked. `cap` is the level's measured cost plus a small epsilon slack,
+/// chosen by the driver, to avoid pinning so tight that floating-point noise
+/// makes the previous solution itself look infeasible.
+pub fn cost_cap(cap: Cost) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| {
+        let total: Cost = v.routes.iter().map(|r| r.metrics.cost).sum();
+        if total > cap {
+            HARD * (total - cap)
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Bias penalty for a `Makespan` level: charge `penalty` per second of the
+/// longest route's duration, driving the search to balance the slowest route
+/// down. Soft + additive.
+pub fn makespan_penalty(penalty: Cost) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| penalty * v.makespan() as Cost)
+}
+
+/// HARD cap on makespan (longest route duration, seconds): charge `HARD` per
+/// second over `cap`. Pins a `Makespan` level's achieved value for later levels.
+pub fn makespan_cap(cap: i64) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| {
+        let m = v.makespan();
+        if m > cap {
+            HARD * (m - cap) as Cost
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Bias penalty for a `Distance` level: charge `penalty` per metre of total
+/// distance summed across routes. Soft + additive.
+pub fn distance_penalty(penalty: Cost) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| penalty * v.total_distance() as Cost)
+}
+
+/// HARD cap on total distance (metres): charge `HARD` per metre over `cap`.
+/// Pins a `Distance` level's achieved value for later levels.
+pub fn distance_cap(cap: i64) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| {
+        let d = v.total_distance();
+        if d > cap {
+            HARD * (d - cap) as Cost
+        } else {
+            0.0
+        }
+    })
 }
 
 /// Penalize any client-group whose number of served members falls outside
