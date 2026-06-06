@@ -413,6 +413,32 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       PyVRP (HGS) is state-of-the-art on small CVRPTW; brooom's edge is the
       integrated stack, speed-to-good-answer, and scale — not beating HGS at n=100.
     </p>
+
+    <h3>Real maps, not just synthetic <span class="muted" style="font-weight:400">· real OSM road distances, seed-reproducible</span></h3>
+    <p>
+      The numbers above use the classic synthetic Solomon set. We also benchmark on
+      <strong>real road networks</strong>: a generator picks delivery addresses
+      inside a real city's bounding box <strong>from a seed</strong> (so anyone
+      reproduces the exact instance — no data to download), builds the matrix from
+      <strong>real OSRM road distances</strong>, and runs every engine on it. One
+      run — San Francisco, seed 11, 80 stops, real roads, 10 s:
+    </p>
+    <table>
+      <thead><tr><th>Solver</th><th>Cost</th><th>Δ vs best</th><th>Time</th></tr></thead>
+      <tbody>
+        <tr><td><b>brooom (MPEE)</b></td><td>28218</td><td>+2.1%</td><td><b>1.9 s</b></td></tr>
+        <tr><td>OR-Tools</td><td>28105</td><td>+1.7%</td><td>10 s</td></tr>
+        <tr><td>PyVRP (HGS)</td><td><b>27632</b></td><td>+0.0%</td><td>10 s</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="font-size:.88rem">
+      Same story on real roads: ~2% behind HGS on quality, but the answer lands in
+      <b>1.9 s vs 10 s</b>. Reproduce exactly:
+      <code>python3 gen_realmap.py --region sf --seed 11 --n 80 --matrix osrm --osrm-host &lt;host&gt;</code>
+      then <code>run_multi_bench.py</code> over the result. Regions: sf, oslo,
+      london, nyc. brooom can also share OSRM's matrix (<code>--routing osrm</code>)
+      for a like-for-like comparison.
+    </p>
     <p class="muted" style="font-size:.88rem">
       End-to-end on this machine: 2,000 jobs / 50 vehicles in ~2 min (matrix 0.32 s);
       5,000 / 100 in ~9 min (matrix 4.10 s), both ≥99 % assigned. Full numbers in the
