@@ -41,7 +41,9 @@ use crate::global_constraint::{
 };
 
 pub use error::DslError;
-pub use ir::{GlobalProgram, Program};
+pub use ir::{ArcProgram, GlobalProgram, Program};
+
+use crate::dimension::{ArcCtx, TransitFn};
 
 /// Compile + install a set of Rust-syntax constraints for the duration of the
 /// returned guard, registering their probe bounds so the fast insertion probe
@@ -96,6 +98,27 @@ pub fn compiled_python(src: &str) -> Result<(Arc<CustomConstraintFn>, Option<Pro
     let program = Arc::new(py_frontend::compile_python(src)?);
     let bound = probe_bound_of(&program);
     Ok((wrap(program), bound))
+}
+
+/// Compile a **dimension-transit** expression (Rust syntax) into a native
+/// [`TransitFn`] suitable for [`crate::dimension::CustomDimension::new`]. The
+/// expression reads `arc.*` (or bare `distance`/`duration`/`cumul`/…) and yields
+/// the integer cumul delta for an arc. A runtime error (step-budget overrun, type
+/// error) is mapped to a `0` delta so a buggy transit can never panic the solver.
+pub fn arc_transit_from_rust(src: &str) -> Result<Arc<TransitFn>, DslError> {
+    let program = Arc::new(rust_frontend::compile_rust_arc(src)?);
+    Ok(wrap_arc(program))
+}
+
+/// Python-syntax counterpart of [`arc_transit_from_rust`].
+#[cfg(feature = "pyspell-python")]
+pub fn arc_transit_from_python(src: &str) -> Result<Arc<TransitFn>, DslError> {
+    let program = Arc::new(py_frontend::compile_python_arc(src)?);
+    Ok(wrap_arc(program))
+}
+
+fn wrap_arc(program: Arc<ArcProgram>) -> Arc<TransitFn> {
+    Arc::new(move |ctx: &ArcCtx| eval::run_arc(&program, ctx).unwrap_or(0))
 }
 
 /// Probe bound a program can contribute to the fast insertion probe, if it is a

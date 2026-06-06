@@ -298,6 +298,65 @@ fn wrap_py_constraint(cb: Py<PyAny>) -> Arc<brooom::constraint::CustomConstraint
     })
 }
 
+/// Parse the Python `objective=` argument into a [`brooom::ObjectiveMode`].
+/// Accepts `None` (default scalar), the string `"scalar"`/`"lexicographic"`, or
+/// a list of level-name strings (e.g. `["vehicles", "cost"]`) → lexicographic.
+/// Reuses brooom's name→level mapping so every surface agrees on the spelling.
+fn parse_objective(py: Python<'_>, objective: Option<Py<PyAny>>) -> PyResult<brooom::ObjectiveMode> {
+    let Some(obj) = objective else { return Ok(brooom::ObjectiveMode::Scalar) };
+    // A bare string: "scalar" | "lexicographic".
+    if let Ok(s) = obj.extract::<String>(py) {
+        return match s.trim().to_ascii_lowercase().as_str() {
+            "scalar" => Ok(brooom::ObjectiveMode::Scalar),
+            "lexicographic" => Ok(brooom::ObjectiveMode::Lexicographic { levels: Vec::new() }),
+            other => Err(PyRuntimeError::new_err(format!(
+                "objective {other:?} must be \"scalar\", \"lexicographic\", or a list of level names"
+            ))),
+        };
+    }
+    // A list of level names → lexicographic in that order.
+    if let Ok(names) = obj.extract::<Vec<String>>(py) {
+        let levels = names
+            .iter()
+            .map(|n| brooom::options::lex_objective_from_name(n))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| PyRuntimeError::new_err(format!("objective: {e}")))?;
+        return Ok(brooom::ObjectiveMode::Lexicographic { levels });
+    }
+    Err(PyRuntimeError::new_err(
+        "objective must be a string (\"scalar\"/\"lexicographic\") or a list of level-name strings",
+    ))
+}
+
+/// Parse the Python `dimensions=` argument (a list of dicts in the
+/// `options.dimensions` schema) into compiled [`brooom::CustomDimension`]s by
+/// round-tripping through `brooom::SolverOptions` — so the Python surface uses the
+/// exact same parser, transit DSL, and defaults as the JSON/CLI surfaces.
+fn parse_dimensions(
+    py: Python<'_>,
+    dimensions: Option<Vec<Py<PyAny>>>,
+) -> PyResult<Vec<brooom::CustomDimension>> {
+    let Some(dims) = dimensions else { return Ok(Vec::new()) };
+    if dims.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Convert each dict to JSON via the `json` module, then assemble an
+    // {"dimensions": [...]} options object and reuse brooom's SolverOptions.
+    let json_mod = py.import_bound("json")?;
+    let mut items = Vec::with_capacity(dims.len());
+    for d in dims {
+        let s: String = json_mod.call_method1("dumps", (d,))?.extract()?;
+        let v: serde_json::Value = serde_json::from_str(&s)
+            .map_err(|e| PyRuntimeError::new_err(format!("dimension JSON: {e}")))?;
+        items.push(v);
+    }
+    let opts_val = serde_json::json!({ "dimensions": serde_json::Value::Array(items) });
+    let opts = brooom::SolverOptions::from_value(Some(&opts_val))
+        .map_err(|e| PyRuntimeError::new_err(format!("dimensions: {e}")))?;
+    opts.build_dimensions()
+        .map_err(|e| PyRuntimeError::new_err(format!("dimensions: {e}")))
+}
+
 #[pymethods]
 impl Router {
     /// Open a prebuilt cache pair. `pp_path` is the `.pp` file, `ch_path`
@@ -524,18 +583,42 @@ impl Router {
     /// centroid of the stops). Returns a dict with one entry per used
     /// vehicle (ordered stops + leg distances) plus totals and any
     /// unassigned stops.
+    ///
+    /// `objective` selects the optimisation mode: `None`/`"scalar"` (default,
+    /// today's behaviour), `"lexicographic"`, or a list of level names
+    /// (`["vehicles", "cost"]`, `["unassigned", "vehicles", "cost"]`, …) for
+    /// N-level lexicographic search (levels: `unassigned`, `vehicles`, `cost`,
+    /// `makespan`, `distance`). `dimensions` is a list of custom accumulator
+    /// dimensions in the JSON `options.dimensions` schema — each a dict with a
+    /// `name`, a pyspell `transit` expression over the arc context (`distance`,
+    /// `duration`, `cumul`/`cumul_before`, `from`, `to`, `arrival`), and optional
+    /// `start`/`min`/`max`/`soft_max`/`soft_min`/`soft_weight`/`monotonicity`.
     #[pyo3(signature = (
         stops, vehicles = 1, capacity = 1_000_000i64, depot = None,
-        time_limit_s = 5.0, use_gpu = false,
+        time_limit_s = 5.0, use_gpu = false, objective = None, dimensions = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn optimize<'py>(
         &self, py: Python<'py>,
         stops: Vec<(f32, f32)>, vehicles: usize, capacity: i64,
         depot: Option<(f32, f32)>, time_limit_s: f64, use_gpu: bool,
+        objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         if stops.is_empty() { return Err(PyRuntimeError::new_err("no stops given")); }
         if vehicles == 0 { return Err(PyRuntimeError::new_err("vehicles must be >= 1")); }
+
+        // Map the optional objective/dimensions args to the same engine surfaces
+        // the JSON/CLI paths use. Default (both None) reproduces today's behaviour.
+        let objective_mode = parse_objective(py, objective)?;
+        let dims = parse_dimensions(py, dimensions)?;
+        // Install the custom dimensions for the duration of this solve; the guard
+        // clears the global registry on drop. Empty list ⇒ a no-op (guard is None).
+        let _dim_guard = if dims.is_empty() {
+            None
+        } else {
+            Some(brooom::DimensionGuard::install(dims))
+        };
 
         // Depot defaults to the centroid of the stops.
         let depot = depot.unwrap_or_else(|| {
@@ -568,7 +651,9 @@ impl Router {
                         capacity: vec![capacity],
                         skills: vec![], time_window: None, speed_factor: 1.0,
                         max_tasks: None, max_travel_time: None, max_distance: None,
-                        fixed: 0.0, per_hour: 3600.0, profile: "car".into(),
+                        fixed: 0.0, per_hour: 3600.0,
+                        span_cost: 0.0, distance_weight: 0.0, time_weight: 1.0,
+                        profile: "car".into(),
                         breaks: vec![], max_trips: 1, description: None,
                     });
                 }
@@ -578,7 +663,8 @@ impl Router {
                         location: brooom::Location::from_index(i + 1),
                         kind: Default::default(), service: 0, setup: 0, release: 0,
                         delivery: vec![1], pickup: vec![], skills: vec![], allowed_vehicles: None, priority: 0,
-                        time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
+                        time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE,
+                        disjunction_penalty: None, group: None,
                         description: None,
                     });
                 }
@@ -589,6 +675,7 @@ impl Router {
                     time_limit_ms: Some((time_limit_s * 1000.0) as u64),
                     verbose: false,
                     use_gpu,
+                    objective_mode: objective_mode.clone(),
                     ..Default::default()
                 };
                 let t = std::time::Instant::now();
@@ -695,23 +782,38 @@ impl Router {
     ///
     /// Keyword args: `constraints=[...]` (DSL strings and/or Python callables),
     /// `max_vehicles`, `fairness_weight` + `fairness_metric` ("duration"/"load"),
-    /// `use_gpu`, `time_limit_s`. (Top-level `shipments` are not yet routed by
+    /// `use_gpu`, `time_limit_s`, `objective` (`"scalar"` | `"lexicographic"` | a
+    /// list of level names) and `dimensions` (list of dicts in the JSON
+    /// `options.dimensions` schema). (Top-level `shipments` are not yet routed by
     /// this binding — model each half as a job, or use the Rust API.)
     ///
     /// Locations carry `[lon, lat]` coords and
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
-    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration"))]
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None))]
+    #[allow(clippy::too_many_arguments)]
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
         constraints: Option<Vec<Py<PyAny>>>,
         max_vehicles: Option<usize>, fairness_weight: f64, fairness_metric: &str,
+        objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
             .map_err(|e| PyRuntimeError::new_err(format!("problem JSON: {e}")))?;
         problem.validate().map_err(|e| PyRuntimeError::new_err(format!("invalid problem: {e}")))?;
+
+        // Map optional objective/dimensions to the engine surfaces (same parser as
+        // the JSON/CLI paths). Both None ⇒ today's behaviour. The dimension guard
+        // is held until method end, scoping the registration to this solve.
+        let objective_mode = parse_objective(py, objective)?;
+        let dims = parse_dimensions(py, dimensions)?;
+        let _dim_guard = if dims.is_empty() {
+            None
+        } else {
+            Some(brooom::DimensionGuard::install(dims))
+        };
 
         // The Python binding routes only `jobs` (it snaps/indexes jobs + vehicle
         // depots, and the result builder surfaces job stops). Top-level VROOM
@@ -784,6 +886,7 @@ impl Router {
                     max_vehicles,
                     fairness_weight,
                     fairness_metric,
+                    objective_mode: objective_mode.clone(),
                     ..Default::default()
                 };
                 let t = std::time::Instant::now();
@@ -1015,7 +1118,8 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
             service: 60, setup: 0, release: 0,
             delivery: vec![delivery], pickup: vec![],
             skills: vec![], allowed_vehicles: None, priority: 0,
-            time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
+            time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE,
+            disjunction_penalty: None, group: None,
             description: None,
         });
     }
@@ -1033,6 +1137,7 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
             max_travel_time: max_tt,
             max_distance: max_d,
             fixed: 0.0, per_hour: 3600.0,
+            span_cost: 0.0, distance_weight: 0.0, time_weight: 1.0,
             profile: "car".into(), breaks: vec![], max_trips: 1, description: None,
         });
     }

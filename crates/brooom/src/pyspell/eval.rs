@@ -9,10 +9,12 @@ use std::sync::Arc;
 use crate::constraint::{RouteView, Verdict};
 use crate::global_constraint::SolutionView;
 
+use crate::dimension::ArcCtx;
+
 use super::error::DslError;
 use super::ir::{
-    BinOp, BoolOp, Builtin, CmpOp, Expr, Field, GlobalProgram, ListField, Program, SolutionField,
-    UnOp, Value,
+    ArcField, ArcProgram, BinOp, BoolOp, Builtin, CmpOp, Expr, Field, GlobalProgram, ListField,
+    Program, SolutionField, UnOp, Value,
 };
 
 /// The data a tree-walk reads its leaf fields from. A per-route program walks a
@@ -25,6 +27,9 @@ trait Frame {
     fn read_field(&self, fld: Field) -> Result<Value, DslError>;
     fn read_list_field(&self, lf: ListField) -> Result<Value, DslError>;
     fn read_solution_field(&self, sf: SolutionField) -> Result<Value, DslError>;
+    fn read_arc_field(&self, _af: ArcField) -> Result<Value, DslError> {
+        Err(DslError::Type("`arc.*` is only available in a dimension-transit expression".into()))
+    }
 }
 
 struct RouteFrame<'a> {
@@ -72,6 +77,67 @@ impl Frame for GlobalFrame<'_> {
     }
     fn read_solution_field(&self, sf: SolutionField) -> Result<Value, DslError> {
         Ok(read_solution_field(sf, self.view))
+    }
+}
+
+struct ArcFrame<'a> {
+    ctx: &'a ArcCtx,
+    locals: Vec<Value>,
+    budget: u32,
+}
+
+impl Frame for ArcFrame<'_> {
+    fn budget(&mut self) -> &mut u32 {
+        &mut self.budget
+    }
+    fn locals(&self) -> &[Value] {
+        &self.locals
+    }
+    fn read_field(&self, _fld: Field) -> Result<Value, DslError> {
+        Err(DslError::Type("`route.*`/`vehicle.*` is not available in a transit expression".into()))
+    }
+    fn read_list_field(&self, _lf: ListField) -> Result<Value, DslError> {
+        Err(DslError::Type("list fields are not available in a transit expression".into()))
+    }
+    fn read_solution_field(&self, _sf: SolutionField) -> Result<Value, DslError> {
+        Err(DslError::Type("`solution.*` is not available in a transit expression".into()))
+    }
+    fn read_arc_field(&self, af: ArcField) -> Result<Value, DslError> {
+        Ok(read_arc_field(af, self.ctx))
+    }
+}
+
+/// Evaluate a compiled transit program against one arc, returning the integer
+/// cumul delta. A bool result maps to 1/0; a float is truncated toward zero
+/// (cumuls are integers, matching [`crate::dimension`]). A runtime/sandbox error
+/// (budget, type) surfaces to the caller, which treats it as a 0 delta.
+pub fn run_arc(program: &ArcProgram, ctx: &ArcCtx) -> Result<i64, DslError> {
+    let mut f = ArcFrame {
+        ctx,
+        locals: vec![Value::Int(0); program.n_locals as usize],
+        budget: program.max_steps,
+    };
+    for b in &program.body {
+        let v = eval(&b.expr, &mut f)?;
+        f.locals[b.slot as usize] = v;
+    }
+    let out = eval(&program.ret, &mut f)?;
+    Ok(match out {
+        Value::Int(n) => n,
+        Value::Float(x) => x as i64,
+        Value::Bool(b) => b as i64,
+        Value::List(_) => return Err(DslError::ResultType),
+    })
+}
+
+fn read_arc_field(af: ArcField, ctx: &ArcCtx) -> Value {
+    match af {
+        ArcField::ArcFrom => Value::Int(ctx.from as i64),
+        ArcField::ArcTo => Value::Int(ctx.to as i64),
+        ArcField::ArcCumulBefore => Value::Int(ctx.cumul_before),
+        ArcField::ArcArrival => Value::Int(ctx.arrival),
+        ArcField::ArcDistance => Value::Int(ctx.distance),
+        ArcField::ArcDuration => Value::Int(ctx.duration),
     }
 }
 
@@ -146,6 +212,7 @@ fn eval(e: &Expr, f: &mut dyn Frame) -> Result<Value, DslError> {
         Expr::Local(i) => Ok(f.locals()[*i as usize].clone()),
         Expr::Field(fld) => f.read_field(*fld),
         Expr::SolutionField(sf) => f.read_solution_field(*sf),
+        Expr::ArcField(af) => f.read_arc_field(*af),
         Expr::ListField(lf) => f.read_list_field(*lf),
         Expr::Bin(op, a, b) => {
             let (x, y) = (eval(a, f)?, eval(b, f)?);

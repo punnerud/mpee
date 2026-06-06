@@ -91,6 +91,28 @@ pub enum SolutionField {
     AverageDuration,
 }
 
+/// Scalar fields readable from a single arc context (`ArcCtx`), used only by a
+/// **dimension transit** program. A transit expression maps the physical arc
+/// (`from`/`to` matrix indices, `distance`/`duration`, `arrival`) plus the
+/// dimension's own running `cumul_before` to the integer delta to add to the
+/// cumul. It reads neither `route.*`/`vehicle.*` nor `solution.*` — its own
+/// namespace, so the three contexts never alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArcField {
+    /// Matrix index of the arc origin (`arc.from` / `from`).
+    ArcFrom,
+    /// Matrix index of the arc destination (`arc.to` / `to`).
+    ArcTo,
+    /// The dimension's cumul value *before* this arc (`cumul` / `cumul_before`).
+    ArcCumulBefore,
+    /// Arrival time at the destination (`arc.arrival` / `arrival`).
+    ArcArrival,
+    /// Physical matrix distance of this arc (`arc.distance` / `distance`).
+    ArcDistance,
+    /// Speed-scaled travel duration of this arc (`arc.duration` / `duration`).
+    ArcDuration,
+}
+
 /// List-valued fields (kept separate so they're never read as scalars).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListField {
@@ -165,6 +187,8 @@ pub enum Expr {
     Field(Field),
     /// A `solution.*` scalar — only valid inside a global program.
     SolutionField(SolutionField),
+    /// An `arc.*` scalar — only valid inside a dimension-transit program.
+    ArcField(ArcField),
     ListField(ListField),
     Local(u16),
     Bin(BinOp, Box<Expr>, Box<Expr>),
@@ -204,6 +228,20 @@ pub struct Program {
 /// probe-mirroring metadata.
 #[derive(Clone, Debug)]
 pub struct GlobalProgram {
+    pub body: Vec<LetBinding>,
+    pub ret: Expr,
+    pub n_locals: u16,
+    pub max_steps: u32,
+}
+
+/// A compiled **dimension-transit** program. Structurally identical to
+/// [`Program`] but evaluated against an [`crate::dimension::ArcCtx`] instead of a
+/// `RouteView`: it reads `arc.*` fields (`distance`, `duration`, `cumul_before`,
+/// `from`, `to`, `arrival`) and returns the integer cumul delta for that arc.
+/// Runs on the hot route-eval path (once per arc), so it carries the same step
+/// budget guard as the constraint programs.
+#[derive(Clone, Debug)]
+pub struct ArcProgram {
     pub body: Vec<LetBinding>,
     pub ret: Expr,
     pub n_locals: u16,

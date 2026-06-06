@@ -294,7 +294,8 @@ fn solve_in_process(args: &Args, state: &Arc<RwLock<AppState>>) -> Result<()> {
             service: 60, setup: 0, release: 0,
             delivery: vec![delivery], pickup: vec![],
             skills: vec![], allowed_vehicles: None, priority: 0,
-            time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE, group: None,
+            time_windows: vec![], prize: brooom::problem::DEFAULT_PRIZE,
+            disjunction_penalty: None, group: None,
             description: None,
         });
     }
@@ -308,6 +309,7 @@ fn solve_in_process(args: &Args, state: &Arc<RwLock<AppState>>) -> Result<()> {
             speed_factor: 1.0,
             max_tasks: None, max_travel_time: None, max_distance: None,
             fixed: 0.0, per_hour: 3600.0,
+            span_cost: 0.0, distance_weight: 0.0, time_weight: 1.0,
             profile: "car".into(), breaks: vec![], max_trips: 1, description: None,
         });
     }

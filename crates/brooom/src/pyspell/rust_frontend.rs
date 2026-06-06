@@ -5,25 +5,40 @@
 use syn::{BinOp as SBin, Expr as SExpr, Lit, Member, Stmt, UnOp as SUn};
 
 use super::error::DslError;
-use super::ir::{BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, LetBinding, Program, UnOp, Value};
-use super::lower::{builtin_from, finish, finish_global, index_base, resolve_field, Ctx};
+use super::ir::{
+    ArcProgram, BinOp, BoolOp, Builtin, CmpOp, Expr, GlobalProgram, LetBinding, Program, UnOp,
+    Value,
+};
+use super::lower::{
+    builtin_from, finish, finish_arc, finish_global, index_base, resolve_bare_arc, resolve_field,
+    Ctx,
+};
 
 pub fn compile_rust(src: &str) -> Result<Program, DslError> {
-    let (ctx, ret) = compile_body(src)?;
+    let (ctx, ret) = compile_body(src, false)?;
     Ok(finish(ctx, ret))
 }
 
 /// Compile a **global** (cross-route) constraint from Rust-expression syntax. It
 /// reads `solution.*` fields and is evaluated against the whole solution.
 pub fn compile_rust_global(src: &str) -> Result<GlobalProgram, DslError> {
-    let (ctx, ret) = compile_body(src)?;
+    let (ctx, ret) = compile_body(src, false)?;
     Ok(finish_global(ctx, ret))
 }
 
+/// Compile a **dimension-transit** expression from Rust-expression syntax. It
+/// reads `arc.*` fields (or the bare aliases `distance`/`duration`/`cumul`/…) and
+/// returns the integer cumul delta for one arc.
+pub fn compile_rust_arc(src: &str) -> Result<ArcProgram, DslError> {
+    let (ctx, ret) = compile_body(src, true)?;
+    Ok(finish_arc(ctx, ret))
+}
+
 /// Shared parse + lower: `let` bindings then a trailing expression. The same
-/// expression subset serves both per-route and global programs; which fields
-/// are legal is decided at evaluation time by the frame's context.
-fn compile_body(src: &str) -> Result<(Ctx, Expr), DslError> {
+/// expression subset serves per-route, global, and arc-transit programs; which
+/// fields are legal is decided at evaluation time by the frame's context. `arc`
+/// selects the dimension-transit namespace (bare arc-field aliases).
+fn compile_body(src: &str, arc: bool) -> Result<(Ctx, Expr), DslError> {
     // Wrap as a block so `let` bindings + a trailing expression parse.
     let block = syn::parse_str::<syn::Block>(&format!("{{ {src} }}"))
         .map_err(|e| DslError::Parse(e.to_string()))?;
@@ -32,7 +47,7 @@ fn compile_body(src: &str) -> Result<(Ctx, Expr), DslError> {
         return Err(DslError::Parse("empty constraint".into()));
     }
 
-    let mut ctx = Ctx::new();
+    let mut ctx = if arc { Ctx::new_arc() } else { Ctx::new() };
     let mut ret: Option<Expr> = None;
 
     for (i, stmt) in block.stmts.iter().enumerate() {
@@ -137,6 +152,16 @@ fn lower(e: &SExpr, ctx: &mut Ctx) -> Result<Expr, DslError> {
                 .ok_or_else(|| DslError::Forbidden("path expression".into()))?;
             if let Some(&slot) = ctx.locals.get(&name) {
                 Ok(Expr::Local(slot))
+            } else if ctx.in_arc {
+                if let Some(e) = resolve_bare_arc(&name) {
+                    Ok(e)
+                } else if name == "arc" {
+                    Err(DslError::Forbidden(
+                        "`arc` must be used with a field, e.g. `arc.distance`".into(),
+                    ))
+                } else {
+                    Err(DslError::UnknownName(name))
+                }
             } else if name == "route" || name == "vehicle" || name == "solution" {
                 Err(DslError::Forbidden(format!(
                     "`{name}` must be used with a field, e.g. `{name}.<field>`"

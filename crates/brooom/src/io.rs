@@ -279,6 +279,25 @@ pub fn parse_input_reader<R: std::io::Read>(reader: R) -> Result<Problem> {
     Ok(v.into())
 }
 
+/// Parse both the problem AND its `options` object (objective + dimensions).
+/// The `options` key is parsed into a [`crate::options::SolverOptions`]; absent
+/// `options` yields the default (scalar objective, no dimensions), so the
+/// returned problem is byte-identical to [`parse_input`]'s.
+pub fn parse_input_with_options(json: &str) -> Result<(Problem, crate::options::SolverOptions)> {
+    let v: VroomInput = serde_json::from_str(json)?;
+    let opts = crate::options::SolverOptions::from_value(v.options.as_ref())?;
+    Ok((v.into(), opts))
+}
+
+/// Streaming counterpart of [`parse_input_with_options`].
+pub fn parse_input_reader_with_options<R: std::io::Read>(
+    reader: R,
+) -> Result<(Problem, crate::options::SolverOptions)> {
+    let v: VroomInput = serde_json::from_reader(reader)?;
+    let opts = crate::options::SolverOptions::from_value(v.options.as_ref())?;
+    Ok((v.into(), opts))
+}
+
 // =========================================================================
 // OUTPUT
 // =========================================================================

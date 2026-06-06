@@ -189,6 +189,121 @@ struct Cli {
     /// you want fine perturbations, not full destroy-and-rebuild.
     #[arg(long)]
     population_kick: Option<f64>,
+
+    /// Objective mode: `scalar` (default, today's behaviour) or `lexicographic`
+    /// (N-level). With `lexicographic`, supply the level order via
+    /// `--objective-levels`. The input JSON's `options.objective` is also
+    /// honoured; an explicit flag here overrides it.
+    #[arg(long, value_enum, default_value_t = ObjectiveArg::Scalar)]
+    objective: ObjectiveArg,
+
+    /// Comma-separated lexicographic level order, highest priority first
+    /// (e.g. `vehicles,cost` or `unassigned,vehicles,cost`). Implies
+    /// `--objective lexicographic`. Levels: unassigned, vehicles, cost,
+    /// makespan, distance.
+    #[arg(long)]
+    objective_levels: Option<String>,
+
+    /// Path to a JSON file with an `options` object (the same schema as the
+    /// input's `options`: `{ "objective": ..., "dimensions": [...] }`). Merged
+    /// on top of any `options` embedded in the input JSON.
+    #[arg(long)]
+    options: Option<String>,
+
+    /// Inline JSON for `options.dimensions` (a list of dimension objects). Merged
+    /// on top of any dimensions from the input/`--options`.
+    #[arg(long)]
+    dimensions: Option<String>,
+}
+
+/// CLI objective selector (maps to `brooom::ObjectiveMode`).
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ObjectiveArg {
+    Scalar,
+    Lexicographic,
+}
+
+/// Merge the input JSON's `options` (already parsed into a `SolverOptions`) with
+/// an optional external `--options <file.json>` object and the CLI objective /
+/// dimensions flags, in increasing precedence. Returns the effective options.
+///
+/// The merge is done on raw JSON values so the external file/flags can override
+/// individual keys (`objective`, `dimensions`) without clobbering the others.
+fn build_effective_options(
+    cli: &Cli,
+    file_options: brooom::SolverOptions,
+) -> Result<brooom::SolverOptions, Box<dyn std::error::Error>> {
+    // Re-serialize the input-derived options to a JSON object we can merge into.
+    // (It round-trips through the same serde shapes, so this is lossless.)
+    let mut merged: serde_json::Map<String, serde_json::Value> =
+        match serde_json::to_value(&file_options)? {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+
+    // (2) `--options <file.json>`: top-level keys override the input's.
+    if let Some(path) = cli.options.as_deref() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("--options {path}: {e}"))?;
+        let val: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("--options {path}: {e}"))?;
+        if let serde_json::Value::Object(m) = val {
+            for (k, v) in m {
+                merged.insert(k, v);
+            }
+        } else {
+            return Err(format!("--options {path}: expected a JSON object").into());
+        }
+    }
+
+    // (3a) `--objective` / `--objective-levels` flags override the objective key.
+    //   * an explicit `--objective-levels` list always means lexicographic;
+    //   * `--objective lexicographic` without levels keeps any levels already set
+    //     (from the input/--options), else an empty (degrade-to-scalar) stack;
+    //   * `--objective scalar` (the default) only overrides when the user did not
+    //     also pass `--objective-levels`, so the input's objective survives unless
+    //     the user explicitly asked for scalar.
+    if let Some(list) = cli.objective_levels.as_deref() {
+        let levels: Vec<serde_json::Value> = list
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::Value::String(s.to_string()))
+            .collect();
+        merged.insert(
+            "objective".into(),
+            serde_json::json!({ "levels": levels }),
+        );
+    } else if cli.objective == ObjectiveArg::Lexicographic {
+        // Lexicographic requested but no levels: keep an existing objective if it
+        // already carries levels; otherwise install an empty lexicographic stack.
+        let keep_existing = matches!(
+            merged.get("objective"),
+            Some(serde_json::Value::Object(o)) if o.contains_key("levels")
+        );
+        if !keep_existing {
+            merged.insert(
+                "objective".into(),
+                serde_json::json!({ "levels": [] }),
+            );
+        }
+    } else if std::env::args().any(|a| a == "--objective") {
+        // The user explicitly passed `--objective scalar`: force scalar.
+        merged.insert("objective".into(), serde_json::Value::String("scalar".into()));
+    }
+
+    // (3b) `--dimensions <json>` replaces the dimensions array.
+    if let Some(dims_json) = cli.dimensions.as_deref() {
+        let val: serde_json::Value = serde_json::from_str(dims_json)
+            .map_err(|e| format!("--dimensions: {e}"))?;
+        if !val.is_array() {
+            return Err("--dimensions: expected a JSON array of dimension objects".into());
+        }
+        merged.insert("dimensions".into(), val);
+    }
+
+    let opts = brooom::SolverOptions::from_value(Some(&serde_json::Value::Object(merged)))?;
+    Ok(opts)
 }
 
 fn main() {
@@ -203,14 +318,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let t_main_start = std::time::Instant::now();
 
     // Streaming parse keeps peak memory low — for million-cell matrices the
-    // full file as a String would dominate the working set.
-    let mut problem = match cli.input.as_deref() {
-        None | Some("-") => brooom::io::parse_input_reader(std::io::stdin().lock())?,
+    // full file as a String would dominate the working set. We also capture the
+    // input's `options` object (objective + dimensions); absent ⇒ defaults.
+    let (mut problem, file_options) = match cli.input.as_deref() {
+        None | Some("-") => {
+            brooom::io::parse_input_reader_with_options(std::io::stdin().lock())?
+        }
         Some(path) => {
             let f = std::fs::File::open(path)?;
-            brooom::io::parse_input_reader(std::io::BufReader::new(f))?
+            brooom::io::parse_input_reader_with_options(std::io::BufReader::new(f))?
         }
     };
+
+    // Build the effective solver options by merging, in increasing precedence:
+    //   1. the input JSON's `options` object,
+    //   2. an external `--options <file.json>` object,
+    //   3. CLI flags (`--objective`/`--objective-levels`, `--dimensions`).
+    // Absent everything ⇒ scalar objective, no dimensions (today's behaviour).
+    let solver_options = build_effective_options(&cli, file_options)?;
+    let objective_mode = solver_options
+        .objective_mode()
+        .map_err(|e| format!("{e}"))?;
+    // Compile any declared dimensions up front so a bad transit fails before the
+    // solve, not mid-search. Install them for the whole run via a guard.
+    let dimensions = solver_options
+        .build_dimensions()
+        .map_err(|e| format!("{e}"))?;
+    let _dim_guard = (!dimensions.is_empty())
+        .then(|| brooom::DimensionGuard::install(dimensions));
 
     let source: Box<dyn MatrixSource> = match cli.routing {
         RoutingEngine::Haversine => Box::new(HaversineMatrix {
@@ -317,6 +452,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         verbose: cli.verbose,
         warm_start: None,
         use_gpu: cli.gpu,
+        objective_mode: objective_mode.clone(),
         ..Default::default()
     };
 
