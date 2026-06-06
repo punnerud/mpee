@@ -133,6 +133,7 @@ fn subproblem(parent: &Problem, jobs: &[Job], vehicles: &[Vehicle]) -> Problem {
         vehicles: vehicles.to_vec(),
         shipments: Vec::new(),
         matrices: HashMap::new(),
+        precedence: parent.precedence.clone(),
         description: parent.description.clone(),
     }
 }

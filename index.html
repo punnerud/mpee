@@ -240,6 +240,7 @@
     <a href="#python">Python</a>
     <a href="#geocoding">Geocoding</a>
     <a href="#vrp">Constraints</a>
+    <a href="#cookbook">Cookbook</a>
     <a href="#how">How it works</a>
     <a href="#agents">For agents</a>
   </div>
@@ -602,6 +603,37 @@ r.solve(problem_json, constraints=["sum(1 for j in route if j.fragile) &lt;= 12"
       built-ins plus <em>code-defined</em> constraints in <em>both</em> Rust and
       Python, compiled to native, running in one process with the routing engine
       and the streamed distance matrix — no separate matrix build, no service mesh.
+    </p>
+  </section>
+
+  <section id="cookbook">
+    <h2>Constraint cookbook</h2>
+    <p>
+      One copy-paste recipe per constraint — the full set is in
+      <a href="https://github.com/punnerud/mpee/blob/main/docs/constraint-cookbook.md">docs/constraint-cookbook.md</a>
+      (each recipe is backed by a conformance test, so it can't rot). A few of the
+      most-asked:
+    </p>
+    <pre><code># Precedence — job 30 before job 10 on the same route (first-class field)
+{ "precedence": [[30, 10]], "vehicles": [...], "jobs": [...] }
+
+# Client groups — serve exactly k of N (k-of-N disjunction)
+router.solve(problem_json, group_cardinality=(2, 2))   # + "group": 7 on the jobs
+
+# Hard balance — cap the spread of route load (not just a soft nudge)
+router.solve(problem_json, balance_spread=0, fairness_metric="load")
+
+# Soft time windows — serve late for a penalty instead of dropping
+router.solve(problem_json, soft_tw=True)
+
+# Any rule, in code — parsed to a sandboxed AST, run natively in the hot loop
+router.solve(problem_json, constraints=["sum(1 for j in route if j.fragile) &lt;= 12"])</code></pre>
+    <p class="muted">
+      Pick by problem shape: optional stop → <code>prize</code>; choose-one-of-set
+      → <code>group</code>; drop-with-penalty → <code>disjunction_penalty</code>;
+      rank objectives → <code>objective=[...]</code> (lexicographic); track
+      fuel/battery → <code>dimensions</code>. The cookbook has the decision table
+      and a runnable JSON for every row of the comparison matrix above.
     </p>
   </section>
 

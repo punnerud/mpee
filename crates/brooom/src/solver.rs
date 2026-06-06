@@ -62,6 +62,16 @@ pub struct SolverConfig {
     pub fairness_weight: f64,
     /// Which per-route quantity fairness balances (duration or load).
     pub fairness_metric: crate::global_constraint::FairnessMetric,
+    /// HARD balance: cap the spread (max − min) of `fairness_metric` across used
+    /// routes. `None` (default) = no hard cap. Unlike `fairness_weight` (a soft
+    /// nudge), this is enforced as a HARD global so the search guarantees the
+    /// balance. See [`crate::global_constraint::balance_spread_cap`].
+    pub balance_spread: Option<i64>,
+    /// Client-group cardinality `(min, max)` served per group. `None` (default)
+    /// = exactly-one-per-group (the historical behaviour). `Some((k, k))` forces
+    /// exactly k; `Some((min, max))` a range — OR-Tools-style k-of-N disjunctions.
+    /// Applies to every group; per-group differing cardinality is not yet exposed.
+    pub group_cardinality: Option<(u32, u32)>,
     /// Optional weighted-scalarization weights on the global cost components
     /// (travel / span / custom). `None` (or an all-1.0 set) leaves the objective
     /// exactly as today. When set with non-unit weights the solver registers a
@@ -246,6 +256,8 @@ impl Default for SolverConfig {
             max_vehicles: None,
             fairness_weight: 0.0,
             fairness_metric: crate::global_constraint::FairnessMetric::Duration,
+            balance_spread: None,
+            group_cardinality: None,
             objective_weights: None,
             objective_mode: ObjectiveMode::Scalar,
             soft_search: None,
@@ -435,6 +447,9 @@ fn solve_scalar_with_extra_global(
     if config.fairness_weight > 0.0 {
         globals.push(crate::global_constraint::fairness(config.fairness_weight, config.fairness_metric));
     }
+    if let Some(max_spread) = config.balance_spread {
+        globals.push(crate::global_constraint::balance_spread_cap(max_spread, config.fairness_metric));
+    }
     // Weighted-scalarization objective weights: register only when non-identity,
     // so default solves keep their exact historical objective. Multiplies each
     // global cost component before LS converges. NOT lexicographic — see
@@ -445,7 +460,10 @@ fn solve_scalar_with_extra_global(
         }
     }
     if problem.jobs.iter().any(|j| j.group.is_some()) {
-        globals.push(crate::global_constraint::exactly_one_per_group());
+        globals.push(match config.group_cardinality {
+            Some((min, max)) => crate::global_constraint::k_of_n_per_group(min, max),
+            None => crate::global_constraint::exactly_one_per_group(),
+        });
     }
     // The lexicographic driver injects the active level's bias penalty plus all
     // prior levels' HARD caps here. An empty list (every non-lexicographic
@@ -711,7 +729,8 @@ fn solve_scalar_with_extra_global(
         enforce_max_vehicles(&mut best, problem, cap);
     }
     if problem.jobs.iter().any(|j| j.group.is_some()) {
-        enforce_groups(&mut best, problem, matrix);
+        let max_per_group = config.group_cardinality.map(|(_, mx)| mx as usize).unwrap_or(1);
+        enforce_groups(&mut best, problem, matrix, max_per_group);
     }
 
     if config.verbose {
@@ -803,8 +822,9 @@ fn enforce_max_vehicles(sol: &mut Solution, problem: &Problem, cap: usize) {
 
 /// Hard-enforce "exactly one served member per client group": keep the
 /// lowest-index served member of each group, evict the rest to `unassigned`.
-fn enforce_groups(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
+fn enforce_groups(sol: &mut Solution, problem: &Problem, matrix: &Matrix, max_per_group: usize) {
     use std::collections::{HashMap, HashSet};
+    let keep = max_per_group.max(1);
     let mut served_by_group: HashMap<u32, Vec<usize>> = HashMap::new();
     for r in &sol.routes {
         for s in &r.steps {
@@ -815,11 +835,15 @@ fn enforce_groups(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
             }
         }
     }
+    // Hard-trim any group with more than `keep` served members down to `keep`
+    // (the search's k-of-N global already steers toward the target; this is the
+    // final guarantee of the upper bound). The lower bound can't be enforced by
+    // trimming, so it relies on the global penalty during search.
     let mut to_remove: HashSet<usize> = HashSet::new();
     for (_g, mut js) in served_by_group {
-        if js.len() > 1 {
+        if js.len() > keep {
             js.sort_unstable();
-            for &ji in js.iter().skip(1) {
+            for &ji in js.iter().skip(keep) {
                 to_remove.insert(ji);
             }
         }

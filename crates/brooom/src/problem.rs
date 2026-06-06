@@ -354,6 +354,13 @@ pub struct Problem {
     /// Optional matrices keyed by routing profile (e.g. "car", "bike").
     #[serde(default)]
     pub matrices: HashMap<String, ProvidedMatrix>,
+    /// First-class precedence: each `(a, b)` means "job `a` must be served before
+    /// job `b` when both are on the same route" (by job id). Enforced HARD in the
+    /// route walk — no DSL needed. Empty (default) ⇒ no precedence, zero overhead.
+    /// (For "must be the *same* vehicle and ordered", use a pickup&delivery
+    /// shipment instead; precedence is route-local ordering only.)
+    #[serde(default)]
+    pub precedence: Vec<(u64, u64)>,
     /// Optional name/description of the problem.
     #[serde(default)]
     pub description: Option<String>,

@@ -70,6 +70,10 @@ pub struct VroomInput {
     pub matrices: HashMap<String, ProvidedMatrix>,
     #[serde(default)]
     pub options: Option<serde_json::Value>,
+    /// First-class precedence pairs `[a, b]` (job id a before job id b on the same
+    /// route). Maps to [`Problem::precedence`].
+    #[serde(default)]
+    pub precedence: Vec<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +266,7 @@ impl From<VroomInput> for Problem {
             }).collect(),
             vehicles: v.vehicles.iter().map(vehicle_from).collect(),
             matrices: v.matrices,
+            precedence: v.precedence.clone(),
             description: None,
         }
     }
