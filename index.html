@@ -550,6 +550,59 @@ mpee crossing "Prinsens gate" "Kongens gate" --near 63.43,10.40 --radius-km 5 --
       work week by giving each driver one vehicle per day bound to that day's
       shift window.
     </p>
+
+    <h3 style="margin-top:1.6rem">The full constraint set — built in</h3>
+    <p>
+      Beyond the table above, every standard VRP variant is first-class — a field
+      or a solve option, no plugins:
+      <strong>pickup &amp; delivery</strong> (paired, same vehicle),
+      <strong>backhaul</strong>, <strong>driver breaks</strong>,
+      <strong>multi-trip / reloading</strong>, <strong>multi-depot</strong>,
+      <strong>release times</strong>, <strong>prize-collecting / optional jobs</strong>,
+      <strong>disjunctions</strong> (explicit drop penalty),
+      <strong>client-groups</strong> (visit one of a set),
+      <strong>max-vehicles cap</strong>, <strong>fairness / load balancing</strong>,
+      <strong>N-level lexicographic objectives</strong>, and
+      <strong>custom accumulator dimensions</strong> (OR-Tools-style fuel/resource
+      with per-arc transit and soft cumul bounds).
+    </p>
+
+    <h3 style="margin-top:1.4rem">Soft time windows — serve late, don't drop</h3>
+    <p>
+      OR-Tools-style soft bounds: when a stop can't be served inside its window
+      (or would overload a vehicle, or overrun the shift), MPEE can serve it and
+      charge a <em>penalty</em> instead of abandoning it. <code>λ</code> is high
+      and fixed, so it's a strict improvement — on a feasible problem the result
+      is byte-identical to the hard solve (0.00&nbsp;% across Solomon C/R/RC),
+      and on an over-constrained one it serves the stops a hard solver would drop
+      (a tightened Solomon r101 goes from 2 dropped stops to 0, at 5.3× lower
+      cost). Auto-enabled when a problem has time windows; one flag to force on/off.
+    </p>
+    <pre><code># Python · CLI · JSON — same knob everywhere
+r.solve(problem_json, soft_tw=True)              # Python
+brooom -i problem.json --soft-tw                 # CLI
+{ "options": { "soft_time_windows": true } }     # JSON</code></pre>
+
+    <h3 style="margin-top:1.4rem">Code your own constraints — in Rust <em>or</em> Python</h3>
+    <p>
+      This is where MPEE goes past a fixed feature list. Write a constraint as a
+      small function in <strong>Rust or Python</strong>; MPEE parses it to a
+      sandboxed <strong>AST</strong> (pyspell) and runs it <strong>natively</strong>
+      inside the hot evaluation loop — no per-call interpreter, no Python GIL on
+      the path. Per-route rules and cross-route (global) rules both supported.
+    </p>
+    <pre><code># A custom per-route rule, written in Python, compiled to native:
+#   "no route may carry more than 12 fragile parcels"
+r.solve(problem_json, constraints=["sum(1 for j in route if j.fragile) &lt;= 12"])
+# return a number instead of a bool → a *soft* penalty the search trades off.</code></pre>
+    <p class="muted">
+      Honest scope vs OR-Tools: OR-Tools' CP-SAT is a full constraint-programming
+      solver (bidirectional propagation) — more general for arbitrary logic. MPEE
+      doesn't claim that. What MPEE gives you that OR-Tools doesn't: the same rich
+      built-ins plus <em>code-defined</em> constraints in <em>both</em> Rust and
+      Python, compiled to native, running in one process with the routing engine
+      and the streamed distance matrix — no separate matrix build, no service mesh.
+    </p>
   </section>
 
   <section id="how">
@@ -605,13 +658,17 @@ mpee.Router.build(pbf, profile="car", progress=True, force=False) -> dict
 # routing (need a .ch):
 r.route(from_lat, from_lon, to_lat, to_lon, geometry=False) -> dict
 r.optimize(stops, vehicles=1, capacity=1_000_000, depot=None, time_limit_s=5.0,
-           objective=None, dimensions=None) -> dict
+           objective=None, dimensions=None, soft_tw=None) -> dict
 r.solve(problem_json, time_limit_s=5.0, constraints=None, max_vehicles=None,
-        fairness_weight=0.0, objective=None, dimensions=None) -> dict   # VROOM-style JSON
+        fairness_weight=0.0, objective=None, dimensions=None, soft_tw=None) -> dict   # VROOM-style JSON
 # objective: None/"scalar" (default) or a level list, e.g. ["vehicles","cost"]
 #            (levels: unassigned, vehicles, cost, makespan, distance) — lexicographic
 # dimensions: [{"name","transit","start","min","max","monotonicity","soft_max",…}]
 #            transit is a sandboxed expr over distance/duration/cumul (OR-Tools-style)
+# constraints: Rust/Python rules -> parsed to a sandboxed AST, run natively in the
+#            hot loop (bool => hard reject; number => soft penalty). Per-route + global.
+# soft_tw: None=auto (on when there are job time windows) | True | False -- serve a
+#            stop late / over capacity for a penalty instead of dropping it
 r.table(points) -> dict                              # N×N durations + distances
 r.snap(lat, lon) -> (lat, lon)
 r.bbox() -> dict
