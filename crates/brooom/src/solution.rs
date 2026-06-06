@@ -129,6 +129,21 @@ pub struct RouteMetrics {
     pub break_count: u32,
     /// Total seconds spent on driver breaks on this route.
     pub break_duration: Time,
+    /// Soft-mode time-window lateness on this route (seconds of time warp).
+    /// Always `0.0` outside penalty-managed soft mode (see [`set_soft_penalties`]).
+    pub tw_excess: f64,
+    /// Soft-mode peak capacity overload on this route (load units). `0.0` in hard mode.
+    pub load_excess: f64,
+    /// Soft-mode duration/travel-time overrun on this route (seconds). `0.0` in hard mode.
+    pub dur_excess: f64,
+}
+
+impl RouteMetrics {
+    /// Total raw soft-constraint violation. `0.0` ⇒ this route is hard-feasible.
+    #[inline]
+    pub fn violation(&self) -> f64 {
+        self.tw_excess + self.load_excess + self.dur_excess
+    }
 }
 
 /// One route in the final solution.
@@ -263,7 +278,10 @@ pub fn evaluate_route(
     // distinct Problem instances don't share cache entries when their
     // vehicle.id + step hash happen to collide.
     let prob_id = problem as *const Problem as usize;
-    let key = (prob_id, vehicle.id, hash_steps(steps));
+    // Fold the soft generation into the step hash so a soft-penalised result is
+    // never served to a hard query (or across a λ update). `0` in hard mode ⇒
+    // the key — and behaviour — is byte-identical to before.
+    let key = (prob_id, vehicle.id, hash_steps(steps) ^ soft_generation());
 
     // Lookup. Reset cache if epoch has bumped since we last touched it.
     if let Some(hit) = EVAL_CACHE.with(|cell| {
@@ -323,6 +341,14 @@ fn evaluate_route_with_buf(
     }
     for v in load[..dim].iter_mut() { *v = 0; }
 
+    // Penalty-managed soft constraints (off by default → all three excess
+    // accumulators stay 0 and every check below behaves as a hard reject).
+    let soft = soft_active();
+    let sw = if soft { soft_weights() } else { SoftWeights { tw: 0.0, load: 0.0, dur: 0.0 } };
+    let mut tw_late: i64 = 0; // seconds of time-window lateness (time warp)
+    let mut load_excess: i64 = 0; // peak units of capacity overload
+    let mut dur_excess: i64 = 0; // seconds over shift / max travel time
+
     // Initial load = sum of the FIRST trip's single-job deliveries (shipments
     // are picked up en-route). For multi-trip routes the load is reset to the
     // next trip's deliveries at each `Reload`, so only sum up to the first one.
@@ -336,9 +362,14 @@ fn evaluate_route_with_buf(
         }
     }
     // Capacity check at depot start.
-    for (i, &cap_i) in vehicle.capacity.iter().enumerate() {
-        if i < dim && load[i] > cap_i {
-            return Err("capacity exceeded at route start");
+    {
+        let mut over = 0i64;
+        for (i, &cap_i) in vehicle.capacity.iter().enumerate() {
+            if i < dim && load[i] > cap_i { over += load[i] - cap_i; }
+        }
+        if over > 0 {
+            if soft { load_excess = load_excess.max(over); }
+            else { return Err("capacity exceeded at route start"); }
         }
     }
 
@@ -438,9 +469,14 @@ fn evaluate_route_with_buf(
                     }
                 }
             }
-            for (i, &cap_i) in vehicle.capacity.iter().enumerate() {
-                if i < dim && load[i] > cap_i {
-                    return Err("capacity exceeded after reload");
+            {
+                let mut over = 0i64;
+                for (i, &cap_i) in vehicle.capacity.iter().enumerate() {
+                    if i < dim && load[i] > cap_i { over += load[i] - cap_i; }
+                }
+                if over > 0 {
+                    if soft { load_excess = load_excess.max(over); }
+                    else { return Err("capacity exceeded after reload"); }
                 }
             }
             seen_backhaul = false;
@@ -518,13 +554,20 @@ fn evaluate_route_with_buf(
             t = job.release;
         }
 
-        let chosen_tw = pick_time_window(&job.time_windows, t).ok_or("time window missed")?;
+        let chosen_tw = match pick_time_window(&job.time_windows, t) {
+            Some(w) => w,
+            // Past every window: hard mode rejects; soft mode targets the latest
+            // window and charges the lateness past its end as time warp.
+            None if soft => latest_window(&job.time_windows),
+            None => return Err("time window missed"),
+        };
         if t < chosen_tw.start {
             waiting_time += chosen_tw.start - t;
             t = chosen_tw.start;
         }
         if t > chosen_tw.end {
-            return Err("arrived after time window end");
+            if soft { tw_late += t - chosen_tw.end; }
+            else { return Err("arrived after time window end"); }
         }
 
         // Apply load change in place — no allocations.
@@ -556,9 +599,14 @@ fn evaluate_route_with_buf(
         for i in 0..dim {
             if load[i] < 0 { return Err("negative load (over-delivery)"); }
         }
-        for (i, &cap_i) in vehicle.capacity.iter().enumerate() {
-            if i < dim && load[i] > cap_i {
-                return Err("capacity exceeded mid-route");
+        {
+            let mut over = 0i64;
+            for (i, &cap_i) in vehicle.capacity.iter().enumerate() {
+                if i < dim && load[i] > cap_i { over += load[i] - cap_i; }
+            }
+            if over > 0 {
+                if soft { load_excess = load_excess.max(over); }
+                else { return Err("capacity exceeded mid-route"); }
             }
         }
 
@@ -623,13 +671,17 @@ fn evaluate_route_with_buf(
     }
 
     if t > vw.end {
-        return Err("route ends after vehicle time window");
+        if soft { dur_excess += t - vw.end; }
+        else { return Err("route ends after vehicle time window"); }
     }
     if let Some(max) = vehicle.max_travel_time {
         if travel_time > max {
-            return Err("max_travel_time exceeded");
+            if soft { dur_excess += travel_time - max; }
+            else { return Err("max_travel_time exceeded"); }
         }
     }
+    // max_distance stays HARD even in soft mode (we soften time + load + duration,
+    // not distance — a road-distance cap is a physical, not a temporal, limit).
     if let Some(max) = vehicle.max_distance {
         if distance > max {
             return Err("max_distance exceeded");
@@ -671,7 +723,29 @@ fn evaluate_route_with_buf(
         cost_custom: 0.0,
         break_count,
         break_duration,
+        tw_excess: 0.0,
+        load_excess: 0.0,
+        dur_excess: 0.0,
     };
+
+    // Penalty-managed soft constraints: charge accumulated time warp, load
+    // excess and duration excess into the route cost (so penalised LS prefers
+    // feasible routes but may pass through infeasible ones), and record each
+    // violation so the search can tell a feasible route from a penalised one and
+    // adapt each weight independently. No-op when soft mode is off (all three
+    // accumulators are 0).
+    if soft {
+        let pen = sw.tw * tw_late as f64
+            + sw.load * load_excess as f64
+            + sw.dur * dur_excess as f64;
+        if pen != 0.0 {
+            metrics.cost_custom += pen;
+            metrics.cost += pen;
+        }
+        metrics.tw_excess = tw_late as f64;
+        metrics.load_excess = load_excess as f64;
+        metrics.dur_excess = dur_excess as f64;
+    }
 
     // Custom dimensions (P5): accumulate every registered dimension along this
     // route's arcs. Free when none are registered (`track_dims` is the relaxed
@@ -805,6 +879,89 @@ pub fn pick_time_window(tws: &[TimeWindow], arrival: Time) -> Option<TimeWindow>
         return Some(TimeWindow::FOREVER);
     }
     tws.iter().copied().find(|w| arrival <= w.end)
+}
+
+/// The window with the latest end. Soft mode targets it when an arrival is past
+/// every window; the lateness past its end is then charged as time warp. Caller
+/// ensures `tws` is non-empty (empty windows already pick `FOREVER`).
+#[inline]
+fn latest_window(tws: &[TimeWindow]) -> TimeWindow {
+    tws.iter().copied().max_by_key(|w| w.end).unwrap_or(TimeWindow::FOREVER)
+}
+
+// ---- penalty-managed soft constraints (PyVRP-style time-warp) --------------
+// When active on the current thread, `evaluate_route` does NOT hard-reject a
+// route that misses a time window, exceeds capacity, or overruns its duration —
+// instead it accumulates the violation magnitude and charges it at the supplied
+// per-unit weight into `cost_custom` (so the existing accept/select machinery
+// optimises in penalised space, exactly like PyVRP's time-warp/load penalties).
+// State is THREAD-LOCAL: each rayon multi-start seed runs on its own worker
+// thread, so per-seed penalty adaptation never clobbers a sibling seed. Outside
+// soft mode every field is its default and the hot path is byte-identical.
+//
+// Structural constraints stay HARD even in soft mode (as in PyVRP): skills,
+// vehicle allowlist, pickup-before-delivery, linehaul-before-backhaul,
+// unreachable legs, reload-while-loaded, negative load, max_tasks, max_distance,
+// driver-break windows, and custom hard dimension/constraint bounds.
+
+/// Per-unit soft-penalty weights (cost per second of time warp, per unit of load
+/// excess, per second of duration excess).
+#[derive(Clone, Copy, Debug)]
+pub struct SoftWeights {
+    pub tw: f64,
+    pub load: f64,
+    pub dur: f64,
+}
+
+thread_local! {
+    static SOFT_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SOFT_TW: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    static SOFT_LOAD: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    static SOFT_DUR: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// Bumped on every weight change so the route-eval cache never serves a
+    /// soft-penalised result to a hard query (or across a λ update). `0` ⇒ hard
+    /// mode, which keeps the cache key — and thus behaviour — byte-identical.
+    static SOFT_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Enable penalty-managed soft constraints on the current thread with the given
+/// weights, or pass `None` to restore hard constraints. Call at the start of a
+/// per-seed search and clear (`None`) before any final hard re-evaluation.
+pub fn set_soft_penalties(weights: Option<SoftWeights>) {
+    match weights {
+        Some(w) => {
+            SOFT_TW.with(|c| c.set(w.tw));
+            SOFT_LOAD.with(|c| c.set(w.load));
+            SOFT_DUR.with(|c| c.set(w.dur));
+            SOFT_ACTIVE.with(|c| c.set(true));
+            // Advance to a fresh, non-zero generation so cached hard/old-λ
+            // entries are not reused. Odd step keeps successive gens distinct.
+            SOFT_GEN.with(|c| c.set(c.get().wrapping_add(0x9E37_79B9_7F4A_7C15)));
+        }
+        None => {
+            SOFT_ACTIVE.with(|c| c.set(false));
+            SOFT_GEN.with(|c| c.set(0));
+        }
+    }
+}
+
+#[inline]
+fn soft_active() -> bool {
+    SOFT_ACTIVE.with(|c| c.get())
+}
+
+#[inline]
+fn soft_weights() -> SoftWeights {
+    SoftWeights {
+        tw: SOFT_TW.with(|c| c.get()),
+        load: SOFT_LOAD.with(|c| c.get()),
+        dur: SOFT_DUR.with(|c| c.get()),
+    }
+}
+
+#[inline]
+fn soft_generation() -> u64 {
+    SOFT_GEN.with(|c| c.get())
 }
 
 impl Solution {

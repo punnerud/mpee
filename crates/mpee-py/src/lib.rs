@@ -596,6 +596,7 @@ impl Router {
     #[pyo3(signature = (
         stops, vehicles = 1, capacity = 1_000_000i64, depot = None,
         time_limit_s = 5.0, use_gpu = false, objective = None, dimensions = None,
+        soft_tw = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn optimize<'py>(
@@ -603,6 +604,7 @@ impl Router {
         stops: Vec<(f32, f32)>, vehicles: usize, capacity: i64,
         depot: Option<(f32, f32)>, time_limit_s: f64, use_gpu: bool,
         objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
+        soft_tw: Option<bool>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         if stops.is_empty() { return Err(PyRuntimeError::new_err("no stops given")); }
@@ -676,6 +678,9 @@ impl Router {
                     verbose: false,
                     use_gpu,
                     objective_mode: objective_mode.clone(),
+                    // Penalty-managed soft constraints: None ⇒ AUTO (on when the
+                    // problem has time windows), Some(_) forces it on/off.
+                    soft_search: soft_tw,
                     ..Default::default()
                 };
                 let t = std::time::Instant::now();
@@ -791,13 +796,14 @@ impl Router {
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
-    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None))]
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None, soft_tw = None))]
     #[allow(clippy::too_many_arguments)]
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
         constraints: Option<Vec<Py<PyAny>>>,
         max_vehicles: Option<usize>, fairness_weight: f64, fairness_metric: &str,
         objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
+        soft_tw: Option<bool>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
@@ -887,6 +893,9 @@ impl Router {
                     fairness_weight,
                     fairness_metric,
                     objective_mode: objective_mode.clone(),
+                    // Penalty-managed soft constraints: None ⇒ AUTO (on when the
+                    // problem has time windows), Some(_) forces it on/off.
+                    soft_search: soft_tw,
                     ..Default::default()
                 };
                 let t = std::time::Instant::now();

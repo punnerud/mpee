@@ -232,6 +232,19 @@ struct Cli {
     /// on top of any dimensions from the input/`--options`.
     #[arg(long)]
     dimensions: Option<String>,
+
+    /// Force penalty-managed soft constraints ON (PyVRP-style time-warp): the
+    /// search may pass through time-window / capacity / duration-infeasible
+    /// solutions — each violation charged at an adaptive weight — and returns the
+    /// best HARD-feasible plan. By default this auto-enables when the problem has
+    /// time windows; use this to force it on (e.g. capacity-tight, no-TW cases).
+    #[arg(long, conflicts_with = "no_soft_tw")]
+    soft_tw: bool,
+
+    /// Force penalty-managed soft constraints OFF (feasible-only search), even on
+    /// a time-windowed problem where it would otherwise auto-enable.
+    #[arg(long)]
+    no_soft_tw: bool,
 }
 
 /// CLI objective selector (maps to `brooom::ObjectiveMode`).
@@ -490,6 +503,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warm_start: None,
         use_gpu: cli.gpu,
         objective_mode: objective_mode.clone(),
+        // Penalty-managed soft constraints. Precedence: a CLI flag (--soft-tw /
+        // --no-soft-tw) overrides the JSON `options.soft_time_windows`, which in
+        // turn overrides AUTO (None → on when the problem has time windows).
+        soft_search: if cli.soft_tw {
+            Some(true)
+        } else if cli.no_soft_tw {
+            Some(false)
+        } else {
+            solver_options.soft_time_windows
+        },
         ..Default::default()
     };
 

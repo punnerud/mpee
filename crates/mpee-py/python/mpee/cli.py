@@ -169,9 +169,16 @@ def cmd_optimize(args) -> int:
     # in the options.dimensions schema (a list of dicts).
     objective = _parse_objective_arg(args.objective)
     dimensions = _parse_dimensions_arg(getattr(args, "dimensions", None))
+    # Penalty-managed soft constraints (PyVRP-style time-warp). --soft-tw forces
+    # on, --no-soft-tw forces off, neither = AUTO (on when there are time windows).
+    soft_tw = None
+    if getattr(args, "soft_tw", False):
+        soft_tw = True
+    elif getattr(args, "no_soft_tw", False):
+        soft_tw = False
     plan = r.optimize(stops, vehicles=args.vehicles, capacity=args.capacity,
                       depot=depot, time_limit_s=args.time,
-                      objective=objective, dimensions=dimensions)
+                      objective=objective, dimensions=dimensions, soft_tw=soft_tw)
     if args.json:
         print(json.dumps(plan))
         return 0
@@ -312,6 +319,11 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--dimensions", default=None,
                     help="custom accumulator dimensions: a JSON file path or inline "
                          "JSON list in the options.dimensions schema")
+    po.add_argument("--soft-tw", dest="soft_tw", action="store_true",
+                    help="force penalty-managed soft constraints ON (PyVRP-style "
+                         "time-warp); default auto-enables when there are time windows")
+    po.add_argument("--no-soft-tw", dest="no_soft_tw", action="store_true",
+                    help="force soft constraints OFF (feasible-only search)")
     po.add_argument("--json", action="store_true", help="emit JSON")
     _add_cache_args(po)
     po.set_defaults(func=cmd_optimize)
