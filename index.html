@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MPEE — Offline route calculations &amp; optimization</title>
-<meta name="description" content="MPEE is a self-contained Rust routing + delivery-optimization engine with four equal surfaces — native Rust, Python, a CLI, and pure JSON config. Download one operating area once, then compute routes, multi-vehicle VRP, and street geocoding fully offline — no API keys, no per-request billing, no data leaving your machine.">
+<meta name="description" content="MPEE is a self-contained Rust routing + delivery-optimization engine with five equal surfaces — native Rust, Python, an HTTP API, a CLI, and pure JSON config. Download one operating area once, then compute routes, multi-vehicle VRP, and street geocoding fully offline — no API keys, no per-request billing, no data leaving your machine.">
 <link rel="canonical" href="https://punnerud.github.io/mpee/">
 
 <!-- Google tag (gtag.js) -->
@@ -36,7 +36,7 @@
   "alternateName": "Morten Punnerud-Engelstad Engine",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Linux, Windows",
-  "description": "A self-contained Rust routing and delivery-optimization engine with four equal surfaces — native Rust, Python, a CLI, and pure JSON config. Offline point-to-point routing, multi-vehicle VRP, and street geocoding over one downloaded OpenStreetMap area.",
+  "description": "A self-contained Rust routing and delivery-optimization engine with five equal surfaces — native Rust, Python, an HTTP API, a CLI, and pure JSON config. Offline point-to-point routing, multi-vehicle VRP, and street geocoding over one downloaded OpenStreetMap area.",
   "softwareVersion": "0.4.5",
   "license": "https://opensource.org/licenses/MIT",
   "url": "https://punnerud.github.io/mpee/",
@@ -145,6 +145,14 @@
   .card h3{margin:.1em 0 .35em; font-size:1.05rem}
   .card p{margin:0; color:var(--muted); font-size:.95rem}
   .card .ico{font-size:1.4rem}
+  .surf-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:1.1rem 0 .7rem}
+  .surf-tab{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:8px 14px;color:var(--fg);cursor:pointer;font-size:.95rem;font-weight:600;line-height:1}
+  .surf-tab:hover{border-color:var(--accent-weak)}
+  .surf-tab[aria-selected="true"]{background:var(--accent-weak);border-color:var(--accent);color:var(--fg)}
+  .surf-panel{display:none}
+  .surf-panel.active{display:block}
+  .hero-surf{margin:.4rem 0 0;font-size:.95rem;color:var(--muted)}
+  .hero-surf a{cursor:pointer}
 
   table{border-collapse:collapse; width:100%; font-size:.92rem; margin:.4rem 0 1rem}
   th,td{border:1px solid var(--line); padding:8px 11px; text-align:left; vertical-align:top}
@@ -194,6 +202,12 @@
       <a class="btn ghost" href="#quickstart">Quick start</a>
       <a class="btn ghost" href="https://github.com/punnerud/mpee">GitHub</a>
     </div>
+    <p class="hero-surf">One Rust engine — drive it from
+      <a href="#surfaces" data-go-surf="python">Python</a> ·
+      <a href="#surfaces" data-go-surf="rust">Rust</a> ·
+      <a href="#surfaces" data-go-surf="api">HTTP&nbsp;API</a> ·
+      <a href="#surfaces" data-go-surf="cli">CLI</a> ·
+      <a href="#surfaces" data-go-surf="json">JSON</a>. Python is just one front door.</p>
     <div class="stats">
       <div class="stat"><div class="n">≤ 500 MB</div><div class="l">streams the 50k×50k matrix — never materialises the ~10 GB (OSRM + VROOM), ≈20× less RAM</div></div>
       <div class="stat"><div class="n">94 s</div><div class="l">to build that 50k² matrix — OSRM runs out of memory</div></div>
@@ -251,45 +265,90 @@
   </section>
 
   <section id="surfaces">
-    <h2>Four ways to use one Rust engine</h2>
+    <h2>One Rust engine, five ways to drive it</h2>
     <p>
       <strong>MPEE is a Rust engine, not a Python library.</strong> Routing, the
       streamed matrix, the VRP solver, every constraint and objective — all live
       in the <strong>brooom</strong> and <strong>dijeng</strong> Rust crates.
-      Python, the CLI, and the JSON config are <strong>thin surfaces over that
-      same core</strong>, with no feature difference between them.
-      <code>pip&nbsp;install&nbsp;mpee</code> is <strong>PyO3 bindings compiled
-      from the Rust crate</strong> — it runs the exact same native solver, not a
-      reimplementation (and so does the WebAssembly demo). Pick the front door
-      that fits how you ship:
+      Python, the HTTP API, the CLI, and the JSON config are <strong>thin
+      surfaces over that same core</strong>, with no feature difference between
+      them. <code>pip&nbsp;install&nbsp;mpee</code> is <strong>PyO3 bindings
+      compiled from the Rust crate</strong> — the exact same native solver, not a
+      reimplementation (so is the WebAssembly demo). Pick a tab — the example
+      below switches, and the rest of the page follows it:
     </p>
-    <div class="grid">
-      <div class="card"><div class="ico">🦀</div><h3>Rust crate</h3>
-        <p>Embed it — lowest latency, native callbacks, compiles to WASM.</p>
-        <pre><code>use brooom::solver::{solve, SolverConfig};
-let sol = solve(&amp;mut problem, Some(&amp;matrix),
-                SolverConfig::default())?;</code></pre></div>
-      <div class="card"><div class="ico">🧩</div><h3>JSON config</h3>
-        <p>Drive it from any language — no code. Objectives, dimensions and caps go in an <code>options</code> block.</p>
-        <pre><code>{ "vehicles": [...], "jobs": [...],
-  "options": { "objective":
-    { "levels": ["vehicles","cost"] } } }</code></pre></div>
-      <div class="card"><div class="ico">⌨️</div><h3>CLI</h3>
-        <p>Scripts, batch jobs, CI — one self-contained binary.</p>
-        <pre><code>brooom -i problem.json \
-  --objective lexicographic \
-  --objective-levels vehicles,cost</code></pre></div>
-      <div class="card"><div class="ico">🐍</div><h3>Python</h3>
-        <p>Notebooks, glue code, the quickest start.</p>
-        <pre><code>from mpee import Router
-Router(cache).optimize(stops, vehicles=10,
-    objective=["unassigned","vehicles","cost"])</code></pre></div>
+    <div class="surf-tabs" role="tablist" aria-label="Choose a surface">
+      <button class="surf-tab" data-surf="python" type="button">🐍 Python</button>
+      <button class="surf-tab" data-surf="rust" type="button">🦀 Rust</button>
+      <button class="surf-tab" data-surf="api" type="button">🌐 HTTP&nbsp;API</button>
+      <button class="surf-tab" data-surf="cli" type="button">⌨️ CLI</button>
+      <button class="surf-tab" data-surf="json" type="button">🧩 JSON</button>
     </div>
+
+    <div class="surf-panel active" data-surf="python">
+      <p class="muted">Notebooks, glue code, the quickest start — PyO3 bindings over the Rust core.</p>
+      <pre><code>pip install mpee
+
+from mpee import Router
+r = Router("london.pp", "london.ch")
+plan = r.optimize(stops, vehicles=10,
+                  objective=["unassigned", "vehicles", "cost"])   # lexicographic</code></pre>
+    </div>
+
+    <div class="surf-panel" data-surf="rust">
+      <p class="muted">Embed it — lowest latency, native constraint callbacks, compiles to WASM.</p>
+      <pre><code>// Cargo.toml:  brooom = "0.4"
+use brooom::solver::{solve, SolverConfig, ObjectiveMode, LexObjective};
+
+let cfg = SolverConfig {
+    objective_mode: ObjectiveMode::Lexicographic {
+        levels: vec![LexObjective::Vehicles, LexObjective::Cost],
+    },
+    ..Default::default()
+};
+let solution = solve(&amp;mut problem, Some(&amp;matrix), cfg)?;</code></pre>
+    </div>
+
+    <div class="surf-panel" data-surf="api">
+      <p class="muted">Expose the solver over HTTP with one flag. Same JSON as the CLI — with sync <em>and</em> async-webhook modes.</p>
+      <pre><code># 1. expose the engine
+brooom --serve 8088
+
+# 2a. synchronous: POST a problem, get the solution back
+curl -X POST http://127.0.0.1:8088/solve --data-binary @problem.json
+
+# 2b. async: add a "webhook" field → 202 {job_id} now, solution POSTed later
+curl -X POST http://127.0.0.1:8088/solve \
+     -d '{"vehicles":[...],"jobs":[...],"webhook":"https://you.app/cb"}'
+#    → {"job_id":1,"status":"running"}   then poll GET /jobs/1, or wait for the callback</code></pre>
+    </div>
+
+    <div class="surf-panel" data-surf="cli">
+      <p class="muted">Scripts, batch jobs, CI — one self-contained binary, no runtime.</p>
+      <pre><code>brooom -i problem.json -o solution.json \
+       --objective lexicographic \
+       --objective-levels unassigned,vehicles,cost</code></pre>
+    </div>
+
+    <div class="surf-panel" data-surf="json">
+      <p class="muted">Drive it from any language — no code. Objectives, dimensions and caps go in an <code>options</code> block (works via CLI, the HTTP API, or Python).</p>
+      <pre><code>{
+  "vehicles": [ { "id": 1, "start": {...}, "capacity": [100] } ],
+  "jobs":     [ { "id": 7, "location": {...}, "delivery": [5] } ],
+  "options": {
+    "objective":  { "levels": ["unassigned", "vehicles", "cost"] },
+    "dimensions": [ { "name": "fuel", "transit": "distance / 10",
+                     "start": 500, "min": 0, "monotonicity": "non_increasing" } ]
+  }
+}</code></pre>
+    </div>
+
     <p class="muted" style="font-size:.95rem">
-      Same goes for advanced features: an <strong>N-level lexicographic
-      objective</strong> and <strong>custom accumulator dimensions</strong>
-      (OR-Tools-style fuel/resource tracking) are reachable identically from all
-      four — see the <a href="https://github.com/punnerud/mpee#choosing-a-surface">README</a>.
+      Same task in every tab, same native solver. Advanced features — an
+      <strong>N-level lexicographic objective</strong> and
+      <strong>custom accumulator dimensions</strong> (OR-Tools-style fuel/resource
+      tracking) — are reachable identically from all five; see the
+      <a href="https://github.com/punnerud/mpee#choosing-a-surface">README</a>.
     </p>
   </section>
 
@@ -580,6 +639,30 @@ r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
 </footer>
 
 <script>
+  // Surface switcher: one active surface (Python/Rust/HTTP API/CLI/JSON),
+  // persisted across visits. Tabs + the hero links both drive it.
+  (function () {
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.surf-tab'));
+    var panels = Array.prototype.slice.call(document.querySelectorAll('.surf-panel'));
+    if (!tabs.length) return;
+    var VALID = tabs.map(function (t) { return t.dataset.surf; });
+    function setSurf(name) {
+      if (VALID.indexOf(name) < 0) name = VALID[0];
+      tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.surf === name)); });
+      panels.forEach(function (p) { p.classList.toggle('active', p.dataset.surf === name); });
+      try { localStorage.setItem('mpee-surface', name); } catch (e) {}
+    }
+    tabs.forEach(function (t) {
+      t.addEventListener('click', function () { setSurf(t.dataset.surf); });
+    });
+    document.querySelectorAll('[data-go-surf]').forEach(function (a) {
+      a.addEventListener('click', function () { setSurf(a.dataset.goSurf); });
+    });
+    var saved = null;
+    try { saved = localStorage.getItem('mpee-surface'); } catch (e) {}
+    setSurf(saved || 'python');
+  })();
+
   // Progressive enhancement only — all content above is in static HTML.
   // Wrap each code block and add a "Copy" button. The button lives in the
   // (non-scrolling) wrapper, not inside <pre>, so it stays pinned top-right
