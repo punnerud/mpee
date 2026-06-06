@@ -39,7 +39,7 @@ it**, which is where the speed and memory wins come from.
 
 | Scale | Result |
 |---|---|
-| N = 100–200 | **ties** the best (PyVRP) on tight-window C1/R1/C2 and reaches it ~2.5× faster; **#2 — behind PyVRP by 2–5 %** on wide-window R2/RC2; beats OR-Tools (which can fail feasibility) |
+| N = 100–200 | **ties** the best (PyVRP) on tight-window C1/R1/C2 and reaches it ~2.5× faster; on wide-window R2/RC2 now **within ~1–3 %** of PyVRP (beats it on some, e.g. r208) after a route-opening fix — down from 2–13 %; beats OR-Tools (which can fail feasibility) |
 | N = 1,000 | beats the next-best solver (PyVRP) on **17 / 20** seeds, p ≈ 10⁻⁷ |
 | N = 50,000 | the **only** tested solver that converges on a laptop |
 | Inner loop | the *entire* local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as **one GPU megakernel** — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration |

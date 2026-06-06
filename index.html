@@ -399,7 +399,7 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     <table>
       <thead><tr><th>Scale</th><th>Result</th></tr></thead>
       <tbody>
-        <tr><td>N = 100–200 (small)</td><td><b>ties the best</b> (PyVRP) on tight-window C1/R1/C2 and reaches it <b>~2.5× faster</b> (≈4 s vs 10 s); OR-Tools sometimes can't even find a feasible solution in the budget. <b>Loses 2–5%</b> to PyVRP's HGS on <em>wide-window</em> R2/RC2 — the honest open gap.</td></tr>
+        <tr><td>N = 100–200 (small)</td><td><b>ties the best</b> (PyVRP) on tight-window C1/R1/C2 and reaches it <b>~2.5× faster</b> (≈4 s vs 10 s); OR-Tools sometimes can't even find a feasible solution in the budget. On <em>wide-window</em> R2/RC2 we're now within <b>~1–3%</b> of PyVRP (and beat it on some, e.g. r208) after a route-opening fix — the last honest gap, down from 2–13%.</td></tr>
         <tr><td>N = 1,000</td><td>beats the next-best solver (PyVRP) on <b>17 / 20</b> seeds, p&nbsp;≈&nbsp;10⁻⁷</td></tr>
         <tr><td>N = 50,000</td><td>the <b>only</b> tested solver that converges on a laptop</td></tr>
         <tr><td>Inner loop</td><td>the entire local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as <b>one GPU megakernel</b> — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration</td></tr>
