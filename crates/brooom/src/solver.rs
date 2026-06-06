@@ -472,18 +472,29 @@ fn solve_scalar_with_extra_global(
             config.max_local_search_passes, granular.as_ref(),
         );
 
-        // Smart RouteSplit: enable only for one selected seed (seed=7).
-        // The best-of-K mechanism means that if the split variant wins, we
-        // keep it; if it doesn't win, we lose nothing. Earlier unconditional
-        // split caused +0.6% regression on N=1000 because some variants got
-        // worse. With ONLY one variant we now get "best of with-vs-without"
-        // for free from the multi-start pool.
-        if seed == 7 {
+        // RouteSplit on every seed with a per-seed revert guard: snapshot the
+        // cost, try split + re-LS, and keep it only if it strictly improves —
+        // otherwise restore. This spreads the split's benefit (key on wide-window
+        // R2/RC2 instances, where spreading onto more, shorter routes lowers
+        // distance) across the whole multi-start pool while making the earlier
+        // +0.6% N=1000 regression impossible (a seed can never end up worse than
+        // its no-split result).
+        // Small instances: try split on every seed (the split + re-LS is cheap
+        // at this size, and the revert guard makes a per-seed regression
+        // impossible). Larger instances keep the original seed==7-only behaviour
+        // so the extra split + re-LS never eats into the ILS time budget at scale.
+        let split_this_seed = if problem.jobs.len() <= 400 { true } else { seed == 7 };
+        if split_this_seed {
+            let before_cost = sol.summary.cost;
+            let snapshot = sol.clone();
             route_split_pass(problem, matrix, &mut sol, 10);
             local_search(
                 problem, matrix, &mut sol,
                 config.max_local_search_passes, granular.as_ref(),
             );
+            if sol.summary.cost >= before_cost - 1e-9 {
+                sol = snapshot; // split didn't help this seed — revert.
+            }
         }
 
         // ILS: destroy-and-repair, track best ever.
