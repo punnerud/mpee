@@ -9,13 +9,34 @@
 use wasm_bindgen::prelude::*;
 
 use brooom::solution::TaskRef;
-use brooom::solver::{solve_with_matrix, SolverConfig};
+use brooom::solver::{solve_with_matrix, ObjectiveMode, SolverConfig};
 use brooom::{Job, Location, Matrix, Problem, Vehicle};
 use dijeng::buffer::Buffer;
 use dijeng::routing::RoutingService;
 
 fn err_to_js<E: std::fmt::Display>(e: E) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+/// Parse the `objective` argument shared by the JS surface into an
+/// [`ObjectiveMode`]. `""` / `"scalar"` ⇒ the default single-cost solve; a
+/// comma list of level names ("vehicles,cost", "unassigned,vehicles,cost", …)
+/// ⇒ an N-level lexicographic objective. Level names match the CLI/JSON/Python
+/// surfaces (see `brooom::options::lex_objective_from_name`).
+fn parse_objective(spec: &str) -> Result<ObjectiveMode, String> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.eq_ignore_ascii_case("scalar") {
+        return Ok(ObjectiveMode::Scalar);
+    }
+    let mut levels = Vec::new();
+    for name in spec.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        levels.push(brooom::options::lex_objective_from_name(name).map_err(|e| e.to_string())?);
+    }
+    if levels.is_empty() {
+        Ok(ObjectiveMode::Scalar)
+    } else {
+        Ok(ObjectiveMode::Lexicographic { levels })
+    }
 }
 
 /// The in-browser engine. Holds a memory-loaded routing + geocoding service.
@@ -174,8 +195,13 @@ impl Engine {
         vehicles: usize,
         capacity: i32,
         time_limit_s: f64,
+        objective: &str,
     ) -> Result<String, JsValue> {
         let capacity = capacity as i64; // i32 maps to a JS number; widen for brooom
+        // `objective`: "" / "scalar" → today's single-cost solve; otherwise a
+        // comma list of lexicographic levels ("vehicles,cost", …) parsed to an
+        // N-level objective. Same names as the CLI/JSON/Python surfaces.
+        let objective_mode = parse_objective(objective).map_err(err_to_js)?;
         let stops: Vec<[f32; 2]> = serde_json::from_str(stops_json).map_err(err_to_js)?;
         if stops.is_empty() {
             return Err(JsValue::from_str("no stops given"));
@@ -225,6 +251,9 @@ impl Engine {
                 max_distance: None,
                 fixed: 0.0,
                 per_hour: 3600.0,
+                span_cost: 0.0,
+                distance_weight: 0.0,
+                time_weight: 1.0,
                 profile: "car".into(),
                 breaks: vec![],
                 max_trips: 1,
@@ -258,6 +287,7 @@ impl Engine {
                 priority: 0,
                 time_windows: vec![],
                 prize: brooom::problem::DEFAULT_PRIZE,
+                disjunction_penalty: None,
                 group: None,
                 description: None,
             });
@@ -271,6 +301,7 @@ impl Engine {
             time_limit_ms: Some((time_limit_s * 1000.0) as u64),
             verbose: false,
             use_gpu: false,
+            objective_mode,
             ..Default::default()
         };
         let sol = solve_with_matrix(&problem, &matrix, &cfg);

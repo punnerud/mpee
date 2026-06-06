@@ -71,7 +71,7 @@
   .controls{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
   .ctl{flex:1;min-width:90px}
   .ctl label{display:block;color:var(--muted);font-size:.72rem;margin-bottom:3px}
-  .ctl input{width:100%;background:#0d141a;border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:7px 9px;font-size:.9rem}
+  .ctl input,.ctl select{width:100%;background:#0d141a;border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:7px 9px;font-size:.9rem}
   .actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
   .btn{flex:1;min-width:110px;border:0;border-radius:10px;padding:11px;font-weight:600;font-size:.9rem;cursor:pointer;color:#fff;background:var(--accent)}
   .btn:hover{filter:brightness(1.08)}
@@ -149,7 +149,7 @@
 <div id="map"></div>
 <div id="hint" hidden><span class="ring"></span><span class="txt">Click the map to add stops</span></div>
 <div id="opt-hint" hidden>Open ☰ to optimize routes</div>
-<div class="credit">MPEE · Rust engine, this demo is the WebAssembly build · also <a href="../#surfaces">Rust&nbsp;/&nbsp;Python&nbsp;/&nbsp;CLI&nbsp;/&nbsp;JSON</a> · <a href="https://github.com/punnerud/mpee">source</a> · build 2c0</div>
+<div class="credit">MPEE · Rust engine, this demo is the WebAssembly build · also <a href="../#surfaces">Rust&nbsp;/&nbsp;Python&nbsp;/&nbsp;CLI&nbsp;/&nbsp;JSON</a> · <a href="https://github.com/punnerud/mpee">source</a> · build 2d0</div>
 
 <!-- top search bar -->
 <div id="searchbar" hidden>
@@ -175,6 +175,11 @@
       <div class="controls">
         <div class="ctl"><label>Vehicles</label><input type="number" id="o-v" value="4" min="1" max="20"></div>
         <div class="ctl"><label>Capacity</label><input type="number" id="o-cap" value="10" min="1"></div>
+        <div class="ctl" style="flex:1 1 100%"><label>Objective</label><select id="o-obj">
+          <option value="">Lowest cost (default)</option>
+          <option value="vehicles,cost">Fewest vehicles → then cost</option>
+          <option value="unassigned,vehicles,cost">Serve all → fewest vehicles → cost</option>
+        </select></div>
       </div>
       <div class="actions" style="margin-top:8px">
         <button class="btn" id="act-route" disabled>Route A→B</button>
@@ -223,8 +228,8 @@
 
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2c0';
-const BUILD = '2c0';
+import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
+const BUILD = '2d0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -432,23 +437,27 @@ async function doOptimize() {
   if (stops.length < 2) return;
   const vehicles = Math.max(1, +$('o-v').value || 4);
   const capacity = Math.max(1, +$('o-cap').value || 10);
+  // "" = scalar (lowest cost); else a lexicographic level list, e.g. "vehicles,cost".
+  const objective = $('o-obj').value;
   // First stop = depot; the rest are delivery jobs.
   const depot = [stops[0].lat, stops[0].lon];
   const jobs = stops.slice(1).map(s => [s.lat, s.lon]);
   // Run the GPU solver when WebGPU compute is verified and the toggle is on;
   // otherwise the CPU (WASM) solver. The GPU path is async (returns a Promise).
-  const useGpu = $('o-gpu').checked && navigator.gpu && gpuVerified;
+  // The GPU 2-opt path can't run the lexicographic meta-driver, so any non-default
+  // objective falls back to the CPU solver.
+  const useGpu = $('o-gpu').checked && navigator.gpu && gpuVerified && !objective;
   const t0 = performance.now();
   let plan;
   try {
     plan = useGpu
       ? JSON.parse(await engine.optimize_gpu(JSON.stringify(jobs), JSON.stringify(depot), vehicles, capacity))
-      : JSON.parse(engine.optimize(JSON.stringify(jobs), JSON.stringify(depot), vehicles, capacity, 2.0));
+      : JSON.parse(engine.optimize(JSON.stringify(jobs), JSON.stringify(depot), vehicles, capacity, 2.0, objective));
   } catch(e){ setOut('trip-out', 'Optimize failed: '+e.message); return; }
   const ms = performance.now()-t0;
   lastPlan = plan;
-  track('optimize', { solver: useGpu ? 'gpu' : 'cpu', stops: plan.total_stops,
-                      vehicles: plan.vehicles_used, ms: Math.round(ms) });
+  track('optimize', { solver: useGpu ? 'gpu' : 'cpu', objective: objective || 'scalar',
+                      stops: plan.total_stops, vehicles: plan.vehicles_used, ms: Math.round(ms) });
 
   clearRoutes(); clearResultMarkers();
   const lines = [];
