@@ -1,6 +1,7 @@
 //! Top-level solve orchestration.
 
 use rand::seq::SliceRandom;
+use rand::Rng;
 use rand::SeedableRng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -672,12 +673,19 @@ fn solve_scalar_with_extra_global(
             let mut hist = vec![best_cost; hist_len];
             let mut hidx = 0usize;
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA5A5));
-            for _ in 0..ils_iters {
+            // Deep trajectory (PyVRP recipe): small perturbation with a
+            // route-OPENING move (lift a cluster onto a spare vehicle) + LS, run
+            // to the deadline. LAHC accepts the temporarily-worse opening so the
+            // walk can reach a higher-route basin. No time limit ⇒ a fixed cap.
+            let max_perturb = (problem.jobs.len() / 10).clamp(1, 25);
+            let max_iters = if deadline.is_some() { usize::MAX } else { ils_iters.max(1) * 80 };
+            for _ in 0..max_iters {
                 if let Some(d) = deadline {
                     if Instant::now() >= d { break; }
                 }
                 let mut perturbed = cur.clone();
-                kick(&mut perturbed, ils_kick, &mut rng, problem, matrix);
+                let n_moves = rng.gen_range(1..=max_perturb);
+                perturb_small(&mut perturbed, n_moves, 0.08, &mut rng, problem, matrix);
                 local_search(
                     problem, matrix, &mut perturbed,
                     config.max_local_search_passes, gran,
@@ -1290,6 +1298,108 @@ pub fn build_matrix(problem: &mut Problem, source: Option<&dyn MatrixSource>) ->
 ///
 /// `pub` so the population-polish in `crate::population` can reuse the
 /// same destroy-and-repair logic.
+/// Small perturbation for a deep ILS trajectory (PyVRP-style), WITH a
+/// route-opening move. Applies `n_moves` random steps; each is either a single
+/// relocation OR (with probability `open_p`, when a spare vehicle exists) a
+/// **route opening**: lift a small contiguous cluster (1–3 stops) onto a fresh
+/// unused vehicle. Opening a cluster (not a lone stop) gives the new route enough
+/// substance that local search won't trivially re-absorb it — the move that lets
+/// the search reach a higher-route basin (our diagnosed R2/RC2 gap). Greedy LS
+/// alone can't take this (it's temporarily worse); pair it with LAHC acceptance.
+pub fn perturb_small<R: rand::Rng>(
+    sol: &mut Solution,
+    n_moves: usize,
+    open_p: f64,
+    rng: &mut R,
+    problem: &Problem,
+    matrix: &Matrix,
+) {
+    use crate::solution::{evaluate_route, Route, RouteMetrics, TaskRef};
+    for _ in 0..n_moves {
+        let nonempty: Vec<usize> = (0..sol.routes.len())
+            .filter(|&r| !sol.routes[r].steps.is_empty())
+            .collect();
+        if nonempty.is_empty() {
+            return;
+        }
+        let r1 = nonempty[rng.gen_range(0..nonempty.len())];
+        let len1 = sol.routes[r1].steps.len();
+        let i = rng.gen_range(0..len1);
+
+        // Spare vehicles (recomputed each move, since opening consumes one).
+        let used: std::collections::HashSet<usize> =
+            sol.routes.iter().map(|r| r.vehicle_idx).collect();
+        let unused: Vec<usize> = (0..problem.vehicles.len())
+            .filter(|v| !used.contains(v))
+            .collect();
+
+        if !unused.is_empty() && len1 >= 2 && rng.gen_bool(open_p) {
+            // Route-opening: move a contiguous cluster [i, i+seg) to a new vehicle.
+            let seg_len = rng.gen_range(1..=3.min(len1 - 1));
+            let start = i.min(len1 - seg_len);
+            let seg: Vec<TaskRef> = sol.routes[r1].steps[start..start + seg_len].to_vec();
+            if !seg.iter().all(|t| matches!(t, TaskRef::Job(_))) {
+                continue; // keep shipment halves where they are
+            }
+            let v2 = unused[rng.gen_range(0..unused.len())];
+            let veh2 = &problem.vehicles[v2];
+            if !seg.iter().all(|t| veh2.has_skills(t.skills(problem))) {
+                continue;
+            }
+            let mut s1: Vec<TaskRef> = sol.routes[r1].steps.clone();
+            s1.drain(start..start + seg_len);
+            let veh1 = &problem.vehicles[sol.routes[r1].vehicle_idx];
+            let m1 = if s1.is_empty() {
+                Ok(RouteMetrics::default())
+            } else {
+                evaluate_route(problem, matrix, veh1, &s1)
+            };
+            if let (Ok(m1), Ok(m2)) = (m1, evaluate_route(problem, matrix, veh2, &seg)) {
+                sol.routes[r1].steps = s1;
+                sol.routes[r1].metrics = m1;
+                sol.routes.push(Route { vehicle_idx: v2, steps: seg, metrics: m2 });
+            }
+            continue;
+        }
+
+        // Plain single-stop relocation to a random existing route.
+        let task = sol.routes[r1].steps[i];
+        if !matches!(task, TaskRef::Job(_)) {
+            continue;
+        }
+        let r2 = rng.gen_range(0..sol.routes.len());
+        let mut s1: Vec<TaskRef> = sol.routes[r1].steps.clone();
+        s1.remove(i);
+        if r1 == r2 {
+            let pos = rng.gen_range(0..=s1.len());
+            let mut s = s1;
+            s.insert(pos, task);
+            let veh = &problem.vehicles[sol.routes[r1].vehicle_idx];
+            if let Ok(m) = evaluate_route(problem, matrix, veh, &s) {
+                sol.routes[r1].steps = s;
+                sol.routes[r1].metrics = m;
+            }
+        } else {
+            let mut s2: Vec<TaskRef> = sol.routes[r2].steps.clone();
+            let pos = rng.gen_range(0..=s2.len());
+            s2.insert(pos, task);
+            let veh1 = &problem.vehicles[sol.routes[r1].vehicle_idx];
+            let veh2 = &problem.vehicles[sol.routes[r2].vehicle_idx];
+            if let (Ok(m1), Ok(m2)) = (
+                evaluate_route(problem, matrix, veh1, &s1),
+                evaluate_route(problem, matrix, veh2, &s2),
+            ) {
+                sol.routes[r1].steps = s1;
+                sol.routes[r1].metrics = m1;
+                sol.routes[r2].steps = s2;
+                sol.routes[r2].metrics = m2;
+            }
+        }
+    }
+    sol.routes.retain(|r| !r.steps.is_empty());
+    sol.recompute_summary(problem);
+}
+
 pub fn kick<R: rand::Rng>(
     sol: &mut Solution,
     frac: f64,
