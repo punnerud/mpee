@@ -151,6 +151,11 @@
   .surf-tab[aria-selected="true"]{background:var(--accent-weak);border-color:var(--accent);color:var(--fg)}
   .surf-panel{display:none}
   .surf-panel.active{display:block}
+  /* Stripe-style segmented language switcher in the hero */
+  .lang-switch{display:inline-flex;gap:3px;padding:4px;margin:0 0 .9rem;background:var(--card);border:1px solid var(--line);border-radius:13px;flex-wrap:wrap}
+  .lang-switch .surf-tab{background:transparent;border:1px solid transparent;border-radius:9px;padding:7px 13px;color:var(--muted);font-weight:600;font-size:.92rem;line-height:1;cursor:pointer}
+  .lang-switch .surf-tab:hover{color:var(--fg)}
+  .lang-switch .surf-tab[aria-selected="true"]{background:var(--bg);border-color:var(--line);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.10)}
   .hero-surf{margin:.4rem 0 0;font-size:.95rem;color:var(--muted)}
   .hero-surf a{cursor:pointer}
 
@@ -196,18 +201,21 @@
       <a href="https://github.com/punnerud/mpee/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
       <a href="https://github.com/punnerud/mpee"><img src="https://img.shields.io/badge/source-github-181717.svg?logo=github" alt="Source on GitHub"></a>
     </div>
+    <div class="lang-switch" role="tablist" aria-label="Choose a language / surface">
+      <button class="surf-tab" data-surf="python" type="button">🐍 Python</button>
+      <button class="surf-tab" data-surf="rust" type="button">🦀 Rust</button>
+      <button class="surf-tab" data-surf="api" type="button">🌐 HTTP&nbsp;API</button>
+      <button class="surf-tab" data-surf="cli" type="button">⌨️ CLI</button>
+      <button class="surf-tab" data-surf="json" type="button">🧩 JSON</button>
+    </div>
     <div class="cta">
-      <a class="btn" href="./demo/">▶ Live demo (San Francisco)</a>
-      <button class="install-pill" id="copy-pip" type="button" title="Click to copy">$ pip install mpee<span class="cp" id="copy-pip-cp">⧉</span></button>
-      <a class="btn ghost" href="#quickstart">Quick start</a>
+      <button class="install-pill" id="copy-pip" type="button" title="Click to copy">$&nbsp;<span id="hero-cmd">pip install mpee</span><span class="cp" id="copy-pip-cp">⧉</span></button>
+      <a class="btn" href="./demo/">▶ Live demo</a>
+      <a class="btn ghost" href="#surfaces">Quick start</a>
       <a class="btn ghost" href="https://github.com/punnerud/mpee">GitHub</a>
     </div>
-    <p class="hero-surf">One Rust engine — drive it from
-      <a href="#surfaces" data-go-surf="python">Python</a> ·
-      <a href="#surfaces" data-go-surf="rust">Rust</a> ·
-      <a href="#surfaces" data-go-surf="api">HTTP&nbsp;API</a> ·
-      <a href="#surfaces" data-go-surf="cli">CLI</a> ·
-      <a href="#surfaces" data-go-surf="json">JSON</a>. Python is just one front door.</p>
+    <p class="hero-surf">One Rust engine — Python is just one of five equal front doors.
+      <a href="#surfaces">See every surface ↓</a></p>
     <div class="stats">
       <div class="stat"><div class="n">≤ 500 MB</div><div class="l">streams the 50k×50k matrix — never materialises the ~10 GB (OSRM + VROOM), ≈20× less RAM</div></div>
       <div class="stat"><div class="n">94 s</div><div class="l">to build that 50k² matrix — OSRM runs out of memory</div></div>
@@ -646,10 +654,20 @@ r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
     var panels = Array.prototype.slice.call(document.querySelectorAll('.surf-panel'));
     if (!tabs.length) return;
     var VALID = tabs.map(function (t) { return t.dataset.surf; });
+    // The hero command pill reflects the selected surface (Stripe-style).
+    var CMDS = {
+      python: 'pip install mpee',
+      rust:   'cargo add brooom',
+      api:    'brooom --serve 8088',
+      cli:    'brooom -i problem.json -o solution.json',
+      json:   'brooom -i problem.json   # problem.json has an "options" block'
+    };
+    var heroCmd = document.getElementById('hero-cmd');
     function setSurf(name) {
       if (VALID.indexOf(name) < 0) name = VALID[0];
       tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.surf === name)); });
       panels.forEach(function (p) { p.classList.toggle('active', p.dataset.surf === name); });
+      if (heroCmd && CMDS[name]) heroCmd.textContent = CMDS[name];
       try { localStorage.setItem('mpee-surface', name); } catch (e) {}
     }
     tabs.forEach(function (t) {
@@ -694,7 +712,9 @@ r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
     var cp = document.getElementById('copy-pip-cp');
     if (!pill) return;
     pill.addEventListener('click', function () {
-      navigator.clipboard.writeText('pip install mpee').then(function () {
+      var hc = document.getElementById('hero-cmd');
+      var cmd = hc ? hc.textContent.split('   #')[0].trim() : 'pip install mpee';
+      navigator.clipboard.writeText(cmd).then(function () {
         var old = cp.textContent;
         cp.textContent = '✓ copied';
         setTimeout(function () { cp.textContent = old; }, 1400);
