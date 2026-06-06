@@ -67,7 +67,8 @@ def run_brooom(json_path: Path, time_limit_s: int) -> dict:
     out_path = RES_DIR / f"{json_path.stem}.brooom.json"
     t0 = time.perf_counter()
     r = subprocess.run(
-        [str(BROOOM), "-i", str(json_path), "-o", str(out_path)],
+        [str(BROOOM), "-i", str(json_path), "-o", str(out_path),
+         "-l", str(time_limit_s), "-m", "16"],
         capture_output=True, text=True, timeout=time_limit_s + 60,
     )
     t1 = time.perf_counter()
