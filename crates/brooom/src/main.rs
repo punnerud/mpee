@@ -47,6 +47,12 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     serve_host: String,
 
+    /// Worker threads for the `--serve` job pool. Each solve already uses every
+    /// core (rayon), so 1 (a queue) is the default; raise it for many small jobs.
+    /// Keep at 1 for GPU solves (a single device).
+    #[arg(long, default_value_t = 1)]
+    serve_workers: usize,
+
     /// Routing engine for matrix building (skipped if matrix is in input).
     #[arg(short = 'r', long, value_enum, default_value_t = RoutingEngine::Haversine)]
     routing: RoutingEngine,
@@ -333,6 +339,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = serve::ServeConfig {
             host: cli.serve_host.clone(),
             port,
+            workers: cli.serve_workers,
             time_limit_s: cli.time_limit_s,
             use_osrm: matches!(cli.routing, RoutingEngine::Osrm),
             osrm_host: cli.osrm_host.clone(),
