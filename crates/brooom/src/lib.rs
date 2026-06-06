@@ -45,7 +45,7 @@ pub use matrix::{Matrix, MatrixSource, HaversineMatrix};
 #[cfg(feature = "osrm")]
 pub use matrix::OsrmClient;
 pub use constraint::{RouteView, Verdict};
-pub use dimension::{CustomDimension, DimensionGuard};
+pub use dimension::{ArcCtx, CustomDimension, DimensionGuard, Monotonicity};
 pub use global_constraint::{FairnessMetric, GlobalConstraintGuard, SolutionView};
 pub use solution::{Route, Solution, Step, StepKind, Summary, TaskRef};
 pub use solver::{solve, solve_full, solve_with_matrix, Solved, SolverConfig};

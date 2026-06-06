@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use brooom::dimension::{CustomDimension, DimensionGuard};
+use brooom::dimension::{ArcCtx, CustomDimension, DimensionGuard};
 use brooom::io::parse_input;
 use brooom::matrix::HaversineMatrix;
 use brooom::solution::{eval_cache_invalidate, evaluate_route, TaskRef};
@@ -48,7 +48,7 @@ const THREE_JOBS: &str = r#"{
 /// deterministic function of the arc count, which is enough to prove
 /// accumulation and bound enforcement.
 fn fuel_dim() -> CustomDimension {
-    CustomDimension::new("fuel", Arc::new(|_from, _to, _cumul, _arrival| -40))
+    CustomDimension::new("fuel", Arc::new(|_: &ArcCtx| -40))
         .with_start(100)
         .with_min(0)
 }
@@ -128,7 +128,7 @@ fn cleared_dimension_restores_plain_behaviour() {
 /// insertion probe (the spike). Two arcs (start->job->end) peak at 60 ≤ 65 →
 /// feasible; three arcs peak at 90 > 65 → infeasible.
 fn load_dim() -> CustomDimension {
-    CustomDimension::new("load", Arc::new(|_from, _to, _cumul, _arrival| 30))
+    CustomDimension::new("load", Arc::new(|_: &ArcCtx| 30))
         .with_start(0)
         .with_max(65)
         .monotone()
@@ -191,7 +191,7 @@ fn non_monotone_max_still_falls_back_to_full_eval() {
 
     // Same +30/arc accrual and max 65, but NOT declared monotone. Because the
     // flag is absent, the probe mirror is inert for this dimension.
-    let non_mono = CustomDimension::new("load", Arc::new(|_, _, _, _| 30))
+    let non_mono = CustomDimension::new("load", Arc::new(|_: &ArcCtx| 30))
         .with_start(0)
         .with_max(65);
     let _g = DimensionGuard::install(vec![non_mono]);
@@ -213,6 +213,181 @@ fn non_monotone_max_still_falls_back_to_full_eval() {
         Some("custom dimension bound exceeded"),
         "full eval is still the authority for non-monotone dimensions"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 extensions: draining/min probe, soft bounds, coupling, shared resource.
+// ---------------------------------------------------------------------------
+
+/// A DRAINING fuel dimension (the dual of `load_dim`): starts at 100, burns a
+/// fixed 40 per arc, floor 0, declared `draining()` so its MIN bound is mirrored
+/// into the O(1) probe. Two arcs trough at 20 ≥ 0 → feasible; three arcs trough at
+/// −20 < 0 → infeasible and pruned in the probe.
+fn draining_fuel_dim() -> CustomDimension {
+    CustomDimension::new("fuel", Arc::new(|_: &ArcCtx| -40))
+        .with_start(100)
+        .with_min(0)
+        .draining()
+}
+
+/// The draining dual of the monotone-max spike: a draining resource's MIN bound
+/// (its floor) prunes a breaching insertion in the fast `precompute` probe BEFORE
+/// the full `evaluate_route`, and the two paths agree exactly.
+#[test]
+fn draining_resource_prunes_on_min_in_the_probe_and_matches_full_eval() {
+    let _lock = guard();
+    let (problem, matrix) = prep(THREE_JOBS);
+    let veh = &problem.vehicles[0];
+
+    let _g = DimensionGuard::install(vec![draining_fuel_dim()]);
+    assert!(
+        brooom::dimension::has_probe_dimensions(),
+        "a draining+min dimension is probe-mirrorable (the dual direction)"
+    );
+
+    // One stop = 2 arcs → fuel cumuls [100,60,20], trough 20 ≥ 0: FEASIBLE on both
+    // paths. The probe returns Some(_) (no prune) and the evaluator returns Ok.
+    let one = [TaskRef::Job(0)];
+    assert!(
+        brooom::eval::precompute(&problem, &matrix, veh, 0, &one).is_some(),
+        "the probe accepts a one-stop route (trough 20 ≥ 0)"
+    );
+    assert!(
+        evaluate_route(&problem, &matrix, veh, &one).is_ok(),
+        "full eval agrees the one-stop route is feasible"
+    );
+
+    // Two stops = 3 arcs → fuel cumuls [100,60,20,-20], trough −20 < 0: the second
+    // insertion drains the tank below the floor. The PROBE prunes it early
+    // (returns None) via `probe_breaches_monotone_min`, AND full eval rejects it
+    // with the dimension-bound error — correctness identical to the P5 path.
+    let two = [TaskRef::Job(0), TaskRef::Job(1)];
+    assert!(
+        brooom::eval::precompute(&problem, &matrix, veh, 0, &two).is_none(),
+        "the probe PRUNES the draining breach before full eval (the dual spike)"
+    );
+    assert_eq!(
+        evaluate_route(&problem, &matrix, veh, &two).err(),
+        Some("custom dimension bound exceeded"),
+        "full eval rejects the same route with the dimension-bound error"
+    );
+}
+
+/// A SOFT cumul bound adds a penalty (it does NOT reject): a load resource with a
+/// hard max far above the route's peak but a soft max it does exceed is still
+/// feasible, and the per-route cost carries the soft penalty in `cost_custom`.
+#[test]
+fn soft_cumul_bound_penalises_instead_of_rejecting() {
+    let _lock = guard();
+    let (problem, matrix) = prep(THREE_JOBS);
+    let veh = &problem.vehicles[0];
+
+    // +30/arc, hard max 1000 (never breached), soft max 40 with weight 2.
+    // One stop = 2 arcs → load cumuls [0,30,60]: only position 2 (60) breaches the
+    // soft band, by 20 → penalty 2 × 20 = 40.
+    let dim = CustomDimension::new("load", Arc::new(|_: &ArcCtx| 30))
+        .with_start(0)
+        .with_max(1000)
+        .with_soft_max(40, 2.0)
+        .monotone();
+    let _g = DimensionGuard::install(vec![dim]);
+
+    let m = evaluate_route(&problem, &matrix, veh, &[TaskRef::Job(0)])
+        .expect("soft-bound breach is feasible (hard max not exceeded)");
+    assert!(m.cost_custom >= 40.0, "the soft penalty is folded into cost_custom: {}", m.cost_custom);
+
+    // Sanity: the SAME route with no soft band has no such penalty.
+    drop(_g);
+    let plain = CustomDimension::new("load", Arc::new(|_: &ArcCtx| 30))
+        .with_start(0)
+        .with_max(1000)
+        .monotone();
+    let _g2 = DimensionGuard::install(vec![plain]);
+    let m0 = evaluate_route(&problem, &matrix, veh, &[TaskRef::Job(0)]).unwrap();
+    assert_eq!(m0.cost_custom, 0.0, "no soft band → no custom penalty");
+}
+
+/// A CROSS-DIMENSION coupling: a fuel dimension whose per-arc burn is a function
+/// of the arc's physical DISTANCE (`ArcCtx::distance`), proving the callback can
+/// express `fuel = distance × factor` without re-querying the matrix. We just
+/// assert the cumuls fall with distance and the longer route burns strictly more.
+#[test]
+fn coupling_dimension_reads_arc_distance() {
+    let _lock = guard();
+    let (problem, matrix) = prep(THREE_JOBS);
+    let veh = &problem.vehicles[0];
+
+    // Burn proportional to distance. The Haversine matrix gives positive arc
+    // distances, so any served stop drains the tank below the 100 start.
+    let dim = CustomDimension::new(
+        "fuel",
+        Arc::new(|c: &ArcCtx| -(c.distance / 100)),
+    )
+    .with_start(100_000);
+    let _g = DimensionGuard::install(vec![dim]);
+
+    let cumuls = brooom::solution::dimension_cumuls_for_route(
+        &problem,
+        &matrix,
+        veh,
+        &[TaskRef::Job(0)],
+    );
+    let row = cumuls.cumuls_of(0);
+    assert_eq!(row.len(), 3, "start -> job -> end = 3 positions");
+    assert_eq!(row[0], 100_000, "starts full");
+    assert!(row[1] < row[0], "the outbound arc burns a distance-proportional amount");
+    assert!(row[2] < row[1], "the return arc burns more still");
+
+    // A two-stop route covers more distance, so its end-of-route fuel is strictly
+    // lower than the one-stop route's — coupling genuinely tracks distance.
+    let two = brooom::solution::dimension_cumuls_for_route(
+        &problem,
+        &matrix,
+        veh,
+        &[TaskRef::Job(0), TaskRef::Job(1)],
+    );
+    let one_end = *row.last().unwrap();
+    let two_end = *two.cumuls_of(0).last().unwrap();
+    assert!(two_end < one_end, "the longer route burns strictly more fuel");
+}
+
+/// The SHARED cross-route resource: a loading-dock global penalises a solution
+/// whose routes all load at the depot at the same instant (overbooking the dock),
+/// while a staggered solution pays nothing.
+#[test]
+fn shared_resource_global_penalises_overbooked_dock() {
+    let _lock = guard();
+    use brooom::global_constraint::{shared_resource_dock, SolutionView};
+    use brooom::solution::{Route, RouteMetrics};
+
+    let (problem, matrix) = prep(THREE_JOBS);
+
+    // A dimension whose DEPOT cumul (position 0) is the amount loaded at the dock:
+    // start 30 means each route holds 30 units at the depot. (The per-arc transit
+    // is irrelevant to the dock reading, which uses cumul[dim][0].)
+    let _g = DimensionGuard::install(vec![
+        CustomDimension::new("dock", Arc::new(|_: &ArcCtx| 0)).with_start(30),
+    ]);
+
+    let mk_route = |start: i64| Route {
+        vehicle_idx: 0,
+        steps: vec![TaskRef::Job(0)],
+        metrics: RouteMetrics { start_time: start, end_time: start + 1, ..Default::default() },
+    };
+
+    // Two routes both leaving at t=0 → both occupy a 100s dock window together,
+    // peak concurrent load = 60. Capacity 50, weight 1 → penalty 1 × (60−50) = 10.
+    let overbooked = vec![mk_route(0), mk_route(0)];
+    let view = SolutionView { problem: &problem, routes: &overbooked, unassigned: &[] };
+    let pen = shared_resource_dock(&view, &matrix, 0, 100, 50, 1.0);
+    assert_eq!(pen, 10.0, "two overlapping 30-unit loads peak at 60, 10 over capacity 50");
+
+    // Stagger the second route past the 100s dock window → never concurrent, peak
+    // 30 ≤ 50 → no penalty.
+    let staggered = vec![mk_route(0), mk_route(200)];
+    let view2 = SolutionView { problem: &problem, routes: &staggered, unassigned: &[] };
+    let pen2 = shared_resource_dock(&view2, &matrix, 0, 100, 50, 1.0);
+    assert_eq!(pen2, 0.0, "staggered loads never overlap, peak 30 ≤ 50");
 }
 
 #[cfg(feature = "pyspell")]

@@ -13,7 +13,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::problem::{Cost, Problem};
+use crate::problem::{Cost, Problem, Time};
 use crate::solution::{Route, TaskRef};
 
 /// Penalty magnitude for a hard solution-level violation — large enough to
@@ -87,6 +87,25 @@ impl SolutionView<'_> {
             .iter()
             .filter(|t| matches!(t, TaskRef::Job(_)))
             .count()
+    }
+    /// Recompute the custom-dimension cumuls for route `i` (Phase 1). Needs the
+    /// routing `matrix` (the `SolutionView` does not carry one, since the per-route
+    /// `recompute_summary` path has no matrix in scope), so this is offered as an
+    /// explicit accessor for solution-level globals that read dimension state —
+    /// e.g. [`shared_resource_dock`]. Returns an empty cumuls struct when no
+    /// dimension is registered.
+    pub fn dimension_cumuls(
+        &self,
+        matrix: &crate::matrix::Matrix,
+        i: usize,
+    ) -> crate::dimension::DimensionCumuls {
+        let r = &self.routes[i];
+        let vehicle = &self.problem.vehicles[r.vehicle_idx];
+        crate::solution::dimension_cumuls_for_route(self.problem, matrix, vehicle, &r.steps)
+    }
+    /// Start time of route `i` (the moment it leaves the depot).
+    pub fn start_time(&self, i: usize) -> Time {
+        self.routes[i].metrics.start_time
     }
 }
 
@@ -387,6 +406,76 @@ pub fn fairness(weight: Cost, metric: FairnessMetric) -> Arc<GlobalConstraintFn>
         let max = *vals.iter().max().unwrap();
         weight * (max - min) as Cost
     })
+}
+
+/// A shared cross-route resource: peak concurrent **depot usage** (e.g. a
+/// loading-dock / yard capacity), penalised post-hoc at the solution level.
+///
+/// The model: every non-empty route occupies the depot for `dock_time` seconds
+/// starting at its [`SolutionView::start_time`], during which it holds the
+/// depot-position cumul of custom dimension `dim` (cumul index 0 — the resource
+/// taken on at the depot, e.g. the initial loaded amount). At any instant the
+/// concurrent usage is the SUM of the depot cumuls of all routes whose dock
+/// windows overlap that instant; the peak of that sum over the day is the peak
+/// dock occupancy. Usage above `capacity` is charged `weight` per unit-over.
+///
+/// ## HONEST CAVEAT (do not overclaim)
+/// This is **post-hoc / solution-level**, evaluated once per candidate solution,
+/// NOT an in-routing resource variable like OR-Tools `RoutingModel` resource
+/// groups. It shapes the search (an overbooked-dock solution is out-competed by a
+/// staggered one) but it cannot, inside the routing, *forbid* a route from
+/// departing while the dock is full — it only penalises the finished plan. The
+/// dock window is a fixed `dock_time` block at the route's start, not a true
+/// model of the loading duration. Treat it as a soft, gradient-providing
+/// objective term, not a hard resource constraint.
+///
+/// Because a `GlobalConstraintFn` closure receives only the `SolutionView` (no
+/// matrix), this is a standalone function the caller invokes with the routing
+/// matrix; it reads each route's dimension cumuls via
+/// [`SolutionView::dimension_cumuls`].
+pub fn shared_resource_dock(
+    view: &SolutionView,
+    matrix: &crate::matrix::Matrix,
+    dim: usize,
+    dock_time: Time,
+    capacity: i64,
+    weight: Cost,
+) -> Cost {
+    // Collect (start, end, depot_load) for every non-empty route.
+    let mut windows: Vec<(Time, Time, i64)> = Vec::new();
+    for i in 0..view.route_count() {
+        if view.routes[i].steps.is_empty() {
+            continue;
+        }
+        let cumuls = view.dimension_cumuls(matrix, i);
+        // cumul[dim][0] is the resource held at the depot (position 0).
+        let depot_load = cumuls.at(dim, 0);
+        if depot_load <= 0 {
+            continue;
+        }
+        let start = view.start_time(i);
+        windows.push((start, start + dock_time, depot_load));
+    }
+    if windows.is_empty() {
+        return 0.0;
+    }
+    // Peak concurrent sum via a sweep over the window endpoints: at each route
+    // start the running occupancy can only rise, so the peak is reached at some
+    // start instant. For each start, sum the loads of every window covering it.
+    let mut peak: i64 = 0;
+    for &(s, _, _) in &windows {
+        let mut concurrent: i64 = 0;
+        for &(ws, we, load) in &windows {
+            if ws <= s && s < we {
+                concurrent += load;
+            }
+        }
+        if concurrent > peak {
+            peak = concurrent;
+        }
+    }
+    let over = (peak - capacity).max(0);
+    weight * over as Cost
 }
 
 #[cfg(test)]

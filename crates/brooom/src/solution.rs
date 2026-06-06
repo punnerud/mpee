@@ -465,6 +465,8 @@ fn evaluate_route_with_buf(
             }
         }
 
+        let mut arc_dur: i64 = 0;
+        let mut arc_dist: i64 = 0;
         if let Some(p) = prev_idx {
             let raw = matrix.duration(p, here);
             // A sentinel-valued leg means "no road between these points"; such
@@ -473,9 +475,11 @@ fn evaluate_route_with_buf(
                 return Err("unreachable leg (no road between stops)");
             }
             let dur = ((raw as f64) * speed).round() as i64;
+            arc_dur = dur;
+            arc_dist = matrix.distance(p, here);
             t += dur;
             travel_time += dur;
-            distance += matrix.distance(p, here);
+            distance += arc_dist;
         }
 
         // Custom-dimension arc: from the previous node to `here`, with `t` as the
@@ -483,13 +487,18 @@ fn evaluate_route_with_buf(
         // for every step so the cumul vector has one entry per route position
         // (start depot at index 0, then one per visited step), matching how the
         // DSL indexes `route.<dim>[k]`. Skipped when there is no incoming node.
+        // Distance/duration are the physical arc cost, threaded into `ArcCtx`.
         if track_dims {
             if let Some(p) = prev_idx {
-                dim_arcs.push(crate::dimension::Arc2 { from: p, to: here, arrival: t });
+                dim_arcs.push(crate::dimension::Arc2 {
+                    from: p, to: here, arrival: t, distance: arc_dist, duration: arc_dur,
+                });
             } else {
                 // No start location: treat the first stop as a self-arc so the
                 // cumul still has a position-1 entry (callback decides the delta).
-                dim_arcs.push(crate::dimension::Arc2 { from: here, to: here, arrival: t });
+                dim_arcs.push(crate::dimension::Arc2 {
+                    from: here, to: here, arrival: t, distance: 0, duration: 0,
+                });
             }
         }
 
@@ -583,12 +592,15 @@ fn evaluate_route_with_buf(
             return Err("unreachable leg (no road back to depot)");
         }
         let dur = ((raw as f64) * speed).round() as i64;
+        let dist = matrix.distance(p, e);
         t += dur;
         travel_time += dur;
-        distance += matrix.distance(p, e);
+        distance += dist;
         // Final custom-dimension arc back to the end depot.
         if track_dims {
-            dim_arcs.push(crate::dimension::Arc2 { from: p, to: e, arrival: t });
+            dim_arcs.push(crate::dimension::Arc2 {
+                from: p, to: e, arrival: t, distance: dist, duration: dur,
+            });
         }
     }
 
@@ -678,6 +690,14 @@ fn evaluate_route_with_buf(
     if dim_cumuls.bound_violated {
         return Err("custom dimension bound exceeded");
     }
+    // Soft cumul bounds (Phase 1): a cumul outside its soft band but within the
+    // hard band adds a penalty to the route cost instead of being a hard reject —
+    // mirrors OR-Tools SetCumulVarSoft{Upper,Lower}Bound. Zero unless a soft band
+    // is configured AND breached, so this is a no-op for every existing dimension.
+    if dim_cumuls.soft_penalty != 0.0 {
+        metrics.cost_custom += dim_cumuls.soft_penalty;
+        metrics.cost += dim_cumuls.soft_penalty;
+    }
 
     // User-supplied custom constraints (code, from Rust or Python). The flag
     // check is a single relaxed atomic load — free when none are registered.
@@ -732,8 +752,11 @@ pub fn dimension_cumuls_for_route(
             // dimension.rs caveats) by simply continuing through the depot.
             if let (Some(p), Some(d)) = (prev_idx, start_idx) {
                 let dur = ((matrix.duration(p, d) as f64) * speed).round() as i64;
+                let dist = matrix.distance(p, d);
                 t += dur;
-                arcs.push(crate::dimension::Arc2 { from: p, to: d, arrival: t });
+                arcs.push(crate::dimension::Arc2 {
+                    from: p, to: d, arrival: t, distance: dist, duration: dur,
+                });
                 prev_idx = start_idx;
             }
             continue;
@@ -745,12 +768,17 @@ pub fn dimension_cumuls_for_route(
         let arrival;
         if let Some(p) = prev_idx {
             let dur = ((matrix.duration(p, here) as f64) * speed).round() as i64;
+            let dist = matrix.distance(p, here);
             t += dur;
             arrival = t;
-            arcs.push(crate::dimension::Arc2 { from: p, to: here, arrival });
+            arcs.push(crate::dimension::Arc2 {
+                from: p, to: here, arrival, distance: dist, duration: dur,
+            });
         } else {
             arrival = t;
-            arcs.push(crate::dimension::Arc2 { from: here, to: here, arrival });
+            arcs.push(crate::dimension::Arc2 {
+                from: here, to: here, arrival, distance: 0, duration: 0,
+            });
         }
         // Advance the clock through this stop's service so downstream arrival
         // times stay in step with the evaluator (release/TW waits are not
@@ -761,8 +789,11 @@ pub fn dimension_cumuls_for_route(
     }
     if let (Some(p), Some(e)) = (prev_idx, end_idx) {
         let dur = ((matrix.duration(p, e) as f64) * speed).round() as i64;
+        let dist = matrix.distance(p, e);
         t += dur;
-        arcs.push(crate::dimension::Arc2 { from: p, to: e, arrival: t });
+        arcs.push(crate::dimension::Arc2 {
+            from: p, to: e, arrival: t, distance: dist, duration: dur,
+        });
     }
     crate::dimension::accumulate(&arcs)
 }

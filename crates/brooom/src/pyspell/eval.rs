@@ -936,7 +936,9 @@ mod tests {
         let dims = DimensionCumuls {
             cumul: vec![vec![100, 60, 20]],
             max_prefix: vec![vec![100, 100, 100]],
+            min_prefix: vec![vec![100, 60, 20]],
             bound_violated: false,
+            soft_penalty: 0.0,
         };
         let problem = problem();
         let veh = vehicle();
