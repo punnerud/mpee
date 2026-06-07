@@ -153,6 +153,14 @@
     display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;
     box-shadow:0 2px 10px rgba(0,0,0,.32);pointer-events:none}
   #addr-hud .a{color:var(--fg);overflow:hidden;text-overflow:ellipsis;max-width:170px}
+  /* Prominent crossing address banner, near the top (above the open sheet). */
+  #cross-addr{position:fixed;top:max(62px,calc(env(safe-area-inset-top) + 52px));
+    left:50%;transform:translateX(-50%);z-index:16;max-width:min(86vw,520px);
+    background:rgba(13,26,24,.95);border:1px solid var(--accent);border-radius:11px;
+    padding:8px 14px;box-shadow:0 6px 22px rgba(0,0,0,.4);display:flex;align-items:center;
+    gap:9px;white-space:nowrap;overflow:hidden;pointer-events:none}
+  #cross-addr .pin{flex:none;color:var(--accent2);font-size:1rem}
+  #cross-addr .t{color:#fff;font-weight:600;font-size:1rem;overflow:hidden;text-overflow:ellipsis}
   #addr-hud .arrow{color:var(--accent2);flex:none;font-weight:600}
   #addr-hud .dist{color:var(--accent2);flex:none;font-variant-numeric:tabular-nums;
     border-left:1px solid var(--line);padding-left:8px}
@@ -164,6 +172,9 @@
 <!-- Small address HUD, left of the +/- zoom control. First stop = address only;
      next stops show "prev → cur" + straight-line/route distance. -->
 <div id="addr-hud" hidden></div>
+<!-- Prominent crossing read-out, shown ABOVE the (open) crossing sheet so the
+     nearest address at the junction is clearly visible while you pick streets. -->
+<div id="cross-addr" hidden></div>
 <div id="hint" hidden><span class="ring"></span><span class="txt">Click the map to add stops</span></div>
 <div id="opt-hint" hidden>Open ☰ to optimize routes</div>
 <div class="credit">MPEE · Rust engine, this demo is the WebAssembly build · also <a href="../#surfaces">Rust&nbsp;/&nbsp;Python&nbsp;/&nbsp;CLI&nbsp;/&nbsp;JSON</a> · <a href="https://github.com/punnerud/mpee">source</a> · build 2d0</div>
@@ -244,7 +255,7 @@
 </div>
 
 <script type="module">
-const BUILD = '3g0';
+const BUILD = '3h0';
 // The engine module is imported DYNAMICALLY inside boot() with ?v=${BUILD}, so a
 // fresh wasm build is never served stale from a previous deploy's cache (a
 // hard-coded ?v on a static import had drifted out of sync).
@@ -621,18 +632,30 @@ function crossClick(lat, lon) {
     setOut('c-out', crossText(crossClicks[0], crossClicks[1], hits));
   } else {
     $('c-a').value = name; $('c-b').value = '';
+    setCrossAddr('');   // only one street picked yet → no junction address
     setOut('c-out', `Street A: ${name}\nTap a crossing street…`);
   }
 }
 // Crossing read-out: the streets, the count, the nearest full address (with house
 // number) at the first crossing point, then each crossing coordinate.
 function crossText(a, b, hits) {
-  if (!hits.length) return `${a} and ${b} don't share a node (no at-grade crossing).`;
+  if (!hits.length) { setCrossAddr(''); return `${a} and ${b} don't share a node (no at-grade crossing).`; }
   let addr = '';
   try { addr = engine.reverse(hits[0].lat, hits[0].lon) || ''; } catch (e) {}
+  setCrossAddr(addr);   // big banner above the sheet
   return `${a} × ${b}: ${hits.length} crossing(s)\n`
     + (addr ? `nearest address: ${addr}\n` : '')
     + hits.map(h => `${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n');
+}
+// Prominent nearest-address banner at the junction, shown above the open sheet.
+function setCrossAddr(addr) {
+  const el = $('cross-addr');
+  el.textContent = '';
+  if (!addr) { el.hidden = true; return; }
+  const pin = document.createElement('span'); pin.className = 'pin'; pin.textContent = '✚';
+  const t = document.createElement('span'); t.className = 't'; t.textContent = addr;
+  el.appendChild(pin); el.appendChild(t);
+  el.hidden = false;
 }
 
 // ---------- CSV ----------
@@ -787,7 +810,7 @@ function setupUI() {
     document.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on', x===ch));
     document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on', p.id==='pane-'+mode));
     $('q').placeholder = mode==='trip' ? 'Search an address or street…' : 'Tap a street on the map, then a crossing street';
-    if (mode !== 'cross') { clearStreets(); crossClicks=[]; }
+    if (mode !== 'cross') { clearStreets(); crossClicks=[]; setCrossAddr(''); }
   });
 
   $('act-route').onclick = doRoute;
@@ -798,7 +821,7 @@ function setupUI() {
     const ok = await confirmDialog('Clear everything?',
       `This removes ${n} stop${n===1?'':'s'} and any drawn routes or highlighted streets.`);
     if (!ok) return;
-    stops=[]; lastPlan=null; crossClicks=[]; clearRoutes(); clearResultMarkers(); clearStreets(); renderStops(); setOut('trip-out',''); setOut('c-out','');
+    stops=[]; lastPlan=null; crossClicks=[]; clearRoutes(); clearResultMarkers(); clearStreets(); renderStops(); setOut('trip-out',''); setOut('c-out',''); setCrossAddr('');
   };
   $('c-go').onclick = doCross;
   $('csv-imp').onclick = () => $('csv-file').click();
