@@ -266,6 +266,19 @@
       <div class="card"><div class="ico">🔎</div><h3>Offline geocoding</h3><p>Address&nbsp;⇄&nbsp;coordinate down to the house number, plus street-crossing lookup, reusing the same cache. No separate index.</p></div>
       <div class="card"><div class="ico">🗺️</div><h3>Bring your own area</h3><p>Any OpenStreetMap extract sized to where you operate. One downloaded area, one cache.</p></div>
     </div>
+    <p>
+      <strong>More than a solver — a platform for optimization.</strong> Beyond
+      routing and VRP, MPEE is programmable and data-aware at every layer:
+      <strong>constraints and costs written as code</strong> (PySpell — Rust or
+      Python expressions compiled to a sandboxed native AST and run in the hot
+      loop), <strong>lossless compression of external matrices</strong> (matcodec
+      — bring a matrix from anywhere, store it 7–10× smaller, stream it bigger
+      than RAM, random-access it compressed), and a <strong>cost-aware matrix
+      broker</strong> that buys only the cells the solver reads from a paid API,
+      derives the rest, and learns one day of live traffic to <strong>replay
+      offline</strong>. You assemble an optimizer for <em>your</em> problem — not
+      just call a solver.
+    </p>
     <blockquote>
       <p><strong>Scope:</strong> MPEE covers a single downloaded area — it is not
       a route-anywhere-on-Earth offline map. There is no global tiling, by
@@ -488,6 +501,40 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       cells, and a <em>free</em> triangle-inequality check (a positive bridge
       residual <em>is</em> a violation) that auto-disables the metric-only
       shortcuts when your matrix isn't a clean metric.
+    </p>
+
+    <h3>Pay only for the matrix you use — the cost-aware broker <span class="muted" style="font-weight:400">· new · cost / delay</span></h3>
+    <p>
+      The flip side of <em>compressing</em> a matrix you have is <strong>not
+      buying</strong> one you don't. When the matrix must come from a
+      <strong>paid or metered</strong> provider — Google Distance Matrix, a billed
+      OSRM, an internal endpoint — a full <em>N×N</em> is wasteful: the solver only
+      ever reads each stop's nearest neighbours plus the depot and a few landmarks.
+      The <strong>broker</strong> ranks candidates with a free Haversine prior,
+      <strong>buys only that skeleton exactly</strong> (no quality loss on what the
+      search touches), <strong>derives</strong> every long-range cell with the same
+      min-plus bridge matcodec uses, and <strong>caches</strong> it in a local DB —
+      so a warm DB buys <strong>zero</strong> cells the second run, and the same
+      cell is never bought twice. A PySpell <code>broker.*</code> spell prices the
+      buy; a budget cap keeps the search-critical cells and derives the rest.
+    </p>
+    <p>
+      <strong>Time-of-day, learned once, replayed offline.</strong> Travel time
+      depends on when you leave. The broker can key its cache by a
+      <code>(weekday-class, hour)</code> window and store a running <strong>mean and
+      variance</strong> per cell. Fetch <strong>one representative workday's</strong>
+      hourly cells and — because the key is a weekday <em>class</em>, not a date —
+      that profile answers every weekday at that hour <strong>with no new calls</strong>.
+      The variance is the <strong>uncertainty</strong>: with an uncertainty weight
+      the matrix cell becomes <code>mean&nbsp;+&nbsp;weight·std</code>, so flaky,
+      queue-prone arcs cost more and the solver routes around them. Buy a little
+      live congestion once; reuse it offline for every similar day.
+    </p>
+    <p class="muted" style="font-size:.88rem">
+      Provider-agnostic (Google is an example, not a dependency); pairs naturally
+      with a compressed offline graph as the free base plus a thin paid “delay”
+      overlay. Absent the broker, routing is byte-for-byte unchanged.
+      <a href="https://github.com/punnerud/mpee/blob/main/crates/brooom/docs/matrix-broker.md">Full write-up →</a>
     </p>
 
     <h3>Real maps, not just synthetic <span class="muted" style="font-weight:400">· real OSM road distances, seed-reproducible</span></h3>

@@ -14,6 +14,16 @@ materialises it**: it streams that matrix through a **~500 MB** budget
 (**≈20× less**) yet still solves the whole fleet — in **94 s** where OSRM runs
 out of RAM, on **CPU + GPU**.
 
+> **More than a solver — a platform for optimization.** MPEE is programmable and
+> data-aware at every layer, not just a black-box solver you call: **constraints
+> and costs written as code** (PySpell — Rust/Python expressions compiled to a
+> sandboxed native AST, run in the hot loop), **lossless compression of external
+> matrices** (matcodec — bring a matrix from anywhere, store it 7–10× smaller,
+> stream it bigger than RAM, random-access it compressed), and a **cost-aware
+> matrix broker** that buys only the cells the solver reads from a paid API,
+> derives the rest, and learns one day of live traffic to **replay offline**. You
+> assemble an optimizer for *your* problem.
+
 > 🌐 **[Live demo → punnerud.github.io/mpee/demo](https://punnerud.github.io/mpee/demo/)** —
 > the whole engine compiled to WebAssembly, running **in your browser** over a
 > San Francisco map: address search, street-crossing lookup, point-to-point
@@ -577,6 +587,38 @@ matcodec compress   matrix.json out.mtz [--stream] [--landmarks L]
 matcodec decompress out.mtz back.json
 matcodec validate   matrix.json          # warns on anomalies; exits non-zero on hard errors
 ```
+
+### Cost-aware matrix broker — pay only for the cells you use
+
+The flip side of *compressing* a matrix you already have is **not buying** one you
+don't. When the matrix has to come from a **paid/metered** provider (Google
+Distance Matrix, a billed OSRM, an internal endpoint), a full *N×N* is wasteful:
+the solver only ever reads each stop's nearest neighbours plus the depot and a few
+landmarks. The broker ranks candidates with a free Haversine prior, **buys only
+that skeleton exactly** (no quality loss on what the search touches), **derives**
+the long-range rest with the same min-plus bridge matcodec uses, and **caches** in
+a local DB — so a warm DB buys **zero** cells the second run, and the same cell is
+never bought twice. A PySpell `broker.*` spell prices the buy; `--buy-budget` caps
+the spend (search-critical cells survive, the rest are derived).
+
+**Time-of-day, learned once, replayed offline.** Key the cache by a
+`(weekday-class, hour)` window and the broker stores a running **mean + variance**
+per cell. Fetch **one representative workday's** hourly cells and — because the key
+is a weekday *class*, not a date — that profile answers every weekday at that hour
+with **no new calls**. The variance is the **uncertainty**: with
+`--uncertainty-weight W` the matrix cell becomes `mean + W·std`, so flaky,
+queue-prone arcs cost more and the solver routes around them. Provider-agnostic
+(Google is an example, not a dependency); pairs naturally with a compressed offline
+graph as the free base plus a thin paid "delay" overlay. Absent `--broker`, routing
+is byte-for-byte unchanged.
+
+```bash
+brooom -i fleet.json --routing google --google-key "$KEY" --broker \
+       --matrix-db ./fleet.cells --departure workday:08 \
+       --uncertainty-weight 1.0 --offline-reuse
+```
+
+Full write-up: [`crates/brooom/docs/matrix-broker.md`](crates/brooom/docs/matrix-broker.md).
 
 ---
 
