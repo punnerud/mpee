@@ -79,7 +79,25 @@ fn fast_cost_eligible(problem: &Problem) -> bool {
     if problem.any_multi_trip() {
         return false;
     }
-    problem.vehicles.iter().all(|v| v.span_cost.max(0.0) == 0.0)
+    if problem.vehicles.iter().any(|v| v.span_cost.max(0.0) != 0.0) {
+        return false;
+    }
+    // Homogeneous COST coefficients: the cross-route fast operators cost a moved
+    // segment's internal arcs once (they cancel between source and destination)
+    // — exact only when every vehicle shares per_hour/time_weight/distance_weight/
+    // speed_factor/fixed. Heterogeneous fleets fall back to full evaluation.
+    homogeneous_cost(problem)
+}
+
+/// All vehicles share the cost coefficients that drive the arc-sum model.
+fn homogeneous_cost(problem: &Problem) -> bool {
+    let mut it = problem.vehicles.iter();
+    let Some(v0) = it.next() else { return true };
+    let c0 = cost_coef(v0);
+    it.all(|v| {
+        let c = cost_coef(v);
+        c.ct == c0.ct && c.cd == c0.cd && c.speed == c0.speed && c.fixed == c0.fixed
+    })
 }
 
 /// Matrix index of a step's location.
@@ -762,6 +780,78 @@ fn try_exchange_with(
         (Some(g), Some(loc)) => Some(g.neighbors(loc).collect()),
         _ => None,
     };
+
+    // Fast path: O(1) edge-delta per swap, lazy feasibility confirm best-first.
+    let fast = granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem);
+    if fast {
+        let Some(aloc) = a_loc else { return };
+        let route1 = &sol.routes[r1];
+        let veh1 = &problem.vehicles[route1.vehicle_idx];
+        let c1 = cost_coef(veh1);
+        let n1 = route1.steps.len();
+        let a_serv = a.description(problem).service as f64 * 1e-6;
+        let pi = if i == 0 { depot_start(veh1) } else { step_loc(problem, route1.steps[i - 1]) };
+        let ni = if i + 1 >= n1 { depot_end(veh1) } else { step_loc(problem, route1.steps[i + 1]) };
+        let old_a = pi.map_or(0.0, |p| arc_cost(matrix, c1, p, aloc))
+            + ni.map_or(0.0, |n| arc_cost(matrix, c1, aloc, n));
+        struct EC { delta: f64, r2: usize, j: usize }
+        let mut cands: Vec<EC> = Vec::new();
+        for r2 in 0..n_routes {
+            if r2 == r1 { continue; }
+            let route2 = &sol.routes[r2];
+            let veh2 = &problem.vehicles[route2.vehicle_idx];
+            if !veh2.has_skills(a.skills(problem)) { continue; }
+            let c2 = cost_coef(veh2);
+            let n2 = route2.steps.len();
+            for j in 0..n2 {
+                let b = route2.steps[j];
+                let Some(bloc) = step_loc(problem, b) else { continue };
+                if let Some(set) = &neighbor_set {
+                    if !set.contains(&bloc) { continue; }
+                }
+                if !veh1.has_skills(b.skills(problem)) { continue; }
+                let b_serv = b.description(problem).service as f64 * 1e-6;
+                // r1: a→b at i.
+                let new_a = pi.map_or(0.0, |p| arc_cost(matrix, c1, p, bloc))
+                    + ni.map_or(0.0, |n| arc_cost(matrix, c1, bloc, n));
+                let d1 = (new_a - old_a) + (b_serv - a_serv);
+                // r2: b→a at j.
+                let pj = if j == 0 { depot_start(veh2) } else { step_loc(problem, route2.steps[j - 1]) };
+                let nj = if j + 1 >= n2 { depot_end(veh2) } else { step_loc(problem, route2.steps[j + 1]) };
+                let old_b = pj.map_or(0.0, |p| arc_cost(matrix, c2, p, bloc))
+                    + nj.map_or(0.0, |n| arc_cost(matrix, c2, bloc, n));
+                let new_b = pj.map_or(0.0, |p| arc_cost(matrix, c2, p, aloc))
+                    + nj.map_or(0.0, |n| arc_cost(matrix, c2, aloc, n));
+                let d2 = (new_b - old_b) + (a_serv - b_serv);
+                let delta = d1 + d2;
+                if delta < -1e-9 {
+                    cands.push(EC { delta, r2, j });
+                }
+            }
+        }
+        if cands.is_empty() { return; }
+        cands.sort_by(|x, y| x.delta.partial_cmp(&y.delta).unwrap());
+        for cd in &cands {
+            if best.as_ref().map_or(false, |bm| cd.delta >= bm.delta - 1e-12) { break; }
+            let route2 = &sol.routes[cd.r2];
+            let veh2 = &problem.vehicles[route2.vehicle_idx];
+            let b = route2.steps[cd.j];
+            let mut cand1 = route1.steps.clone();
+            let mut cand2 = route2.steps.clone();
+            cand1[i] = b;
+            cand2[cd.j] = a;
+            let m1 = match evaluate_route(problem, matrix, veh1, &cand1) { Ok(m) => m, Err(_) => continue };
+            let m2 = match evaluate_route(problem, matrix, veh2, &cand2) { Ok(m) => m, Err(_) => continue };
+            let delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
+            consider(best, Move {
+                delta,
+                route_updates: vec![(r1, Some((cand1, m1))), (cd.r2, Some((cand2, m2)))],
+                touched: vec![a, b],
+            });
+            break;
+        }
+        return;
+    }
 
     for r2 in 0..n_routes {
         if r2 == r1 { continue; }
