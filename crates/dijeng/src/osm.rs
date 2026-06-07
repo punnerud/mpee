@@ -68,6 +68,23 @@ impl ParseAcc {
     }
 }
 
+/// OSM packs several house numbers on one feature with `;` (e.g. "4081;4083"
+/// for a building covering both). Render that as a clean range "4081–4083"
+/// (first–last) instead of the raw semicolon list; a single number is returned
+/// trimmed and unchanged.
+fn clean_housenumber(s: &str) -> String {
+    let t = s.trim();
+    if !t.contains(';') {
+        return t.to_string();
+    }
+    let parts: Vec<&str> = t.split(';').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    match (parts.first(), parts.last()) {
+        (Some(&a), Some(&b)) if a != b => format!("{a}\u{2013}{b}"),
+        (Some(&a), _) => a.to_string(),
+        _ => t.to_string(),
+    }
+}
+
 #[inline]
 fn leading_int(s: &str) -> Option<i64> {
     let d: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -86,7 +103,7 @@ fn resolve_addresses(
     let mk = |lat: f32, lon: f32, hn: &str, st: &str, a: &NodeAddr| AddrRec {
         lat,
         lon,
-        housenumber: hn.to_string(),
+        housenumber: clean_housenumber(hn),
         street: st.to_string(),
         city: a.city.as_deref().map(|s| s.to_string()),
         postcode: a.postcode.as_deref().map(|s| s.to_string()),
@@ -664,4 +681,19 @@ fn haversine_m(lat1: f32, lon1: f32, lat2: f32, lon2: f32) -> f32 {
 
 fn io_err(e: osmpbf::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_housenumber;
+
+    #[test]
+    fn semicolon_lists_become_ranges() {
+        assert_eq!(clean_housenumber("4081;4083"), "4081\u{2013}4083");
+        assert_eq!(clean_housenumber("2111;2113;2115"), "2111\u{2013}2115");
+        assert_eq!(clean_housenumber("151"), "151");
+        assert_eq!(clean_housenumber(" 42 "), "42");
+        assert_eq!(clean_housenumber("5;5"), "5"); // dup collapses
+        assert_eq!(clean_housenumber("42B"), "42B");
+    }
 }
