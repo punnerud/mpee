@@ -541,10 +541,43 @@ fn solve_scalar_with_extra_global(
     } else {
         None
     };
-    let total_variants = if lahc_on { 2 * k } else { k };
-    let deadline = config
+    let lahc_variants = if lahc_on { 2 * k } else { k };
+    // Population HGS (giant-tour OX crossover + Split). Runs `n_hgs` island
+    // populations as EXTRA variants in the same parallel pool, best-of-all ⇒
+    // additive. Split reconstructs route partitions from scratch — the global
+    // move ILS can't make — so HGS reaches route structures (e.g. r205's 5-route
+    // basin) the perturbation search never finds. Gated to the HGS envelope
+    // (single-dim capacity, job-only, homogeneous fleet) and small N (via
+    // `lahc_on`). Off via BROOOM_NO_HGS.
+    let hgs_on = lahc_on
+        && crate::genetic::hgs_applicable(problem)
+        && config.time_limit_ms.is_some() // HGS phase needs a wall-clock budget
+        && std::env::var("BROOOM_NO_HGS").is_err();
+    // HGS education passes: small (cold LS is the GA's budget — the default 50
+    // would allow only a handful of generations). 4 passes is the sweet spot.
+    let hgs_passes = config.max_local_search_passes.min(4);
+    let total_variants = lahc_variants;
+    // Budget split: when HGS is on, the ILS multi-start gets the first fraction
+    // of the wall clock (all cores), then the HGS phase gets the rest (all
+    // cores), SEEDED with the ILS best. Phasing avoids the core starvation that
+    // running both pools concurrently caused. Default 55% ILS / 45% HGS;
+    // override the ILS share via BROOOM_HGS_SPLIT (e.g. "0.6").
+    let now = Instant::now();
+    let full_deadline = config
         .time_limit_ms
-        .map(|ms| Instant::now() + std::time::Duration::from_millis(ms));
+        .map(|ms| now + std::time::Duration::from_millis(ms));
+    let ils_frac: f64 = std::env::var("BROOOM_HGS_SPLIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|f: &f64| *f > 0.05 && *f < 0.95)
+        .unwrap_or(0.55);
+    let deadline = if hgs_on {
+        config
+            .time_limit_ms
+            .map(|ms| now + std::time::Duration::from_millis((ms as f64 * ils_frac) as u64))
+    } else {
+        full_deadline
+    };
 
     // Penalty-managed soft constraints (OR-Tools soft-bound semantics). AUTO
     // (None) turns it on when the problem has time windows; Some(_) forces it.
@@ -772,6 +805,44 @@ fn solve_scalar_with_extra_global(
             })
         }
     };
+
+    // ── HGS phase ──────────────────────────────────────────────────────────
+    // Population Hybrid Genetic Search (giant-tour OX crossover + Split) on the
+    // remaining wall-clock budget, all cores, SEEDED with the ILS best. Split
+    // reconstructs route partitions from scratch — the global move ILS can't make
+    // — reaching route structures (e.g. r205's 5-route basin) the perturbation
+    // search never finds. The seed is Split+educated (both can only improve it)
+    // and kept in the population, so HGS returns ≤ the ILS best ⇒ this phase is
+    // non-regressing vs the ILS result it starts from. Soft-search must be OFF so
+    // the GA's education stays hard-feasible.
+    #[cfg(feature = "parallel")]
+    if hgs_on {
+        crate::solution::set_soft_penalties(None);
+        // Plain DISTANCE granular (not the TW-aware one): the GA's cold education
+        // recombines whole orderings, where the distance neighbourhood reaches
+        // better optima than the TW-proximity lists (measured: TW granular gave
+        // ~+1.5% worse HGS results on R2/RC2).
+        let gran_hgs = granular.as_ref();
+        let n_islands = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .clamp(2, 16);
+        if let Some(hgs_sol) = crate::genetic::solve_genetic_parallel(
+            problem, matrix, gran_hgs, hgs_passes, 0x00C0_FFEE, full_deadline, n_islands,
+            std::slice::from_ref(&best),
+        ) {
+            if hgs_sol.summary.cost + 1e-9 < best.summary.cost {
+                if config.verbose {
+                    eprintln!(
+                        "brooom: HGS phase: {:.2} → {:.2} (Δ={:.2})",
+                        best.summary.cost, hgs_sol.summary.cost,
+                        best.summary.cost - hgs_sol.summary.cost
+                    );
+                }
+                best = hgs_sol;
+            }
+        }
+    }
 
     // GPU megakernel polish pass on the multi-start winner. Falls back
     // silently if GPU init fails or no improvement. Only invoked for

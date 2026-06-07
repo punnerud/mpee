@@ -1,0 +1,164 @@
+//! Isolated validation of the Split (Prins/Vidal) procedure.
+//!
+//! The warm-start hold test proved brooom's LS *holds* PyVRP's optima but our
+//! search can't *reach* them. Split is the missing mechanism: given a good
+//! customer ORDERING it reconstructs the cost-optimal route partition. This test
+//! feeds PyVRP's own r205 visiting order (saved as a warm-start) through Split
+//! and checks it recovers PyVRP's solution — proving Split works before the GA
+//! is built around it.
+//!
+//! Prereq: /tmp/warm_r205.json (PyVRP's r205 solution, Vroom-style) — generated
+//! by the bench helper. Skips gracefully if absent.
+//!
+//! Run: cargo test --release -p brooom --test genetic_split -- --nocapture
+
+use std::path::Path;
+
+use brooom::genetic::{hgs_applicable, solution_to_giant_tour, split};
+use brooom::io::parse_input;
+use brooom::solver::build_matrix;
+use brooom::warm_start::load_warm_start;
+
+fn load(name: &str) -> (brooom::Problem, brooom::Matrix) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benchmarks/instances_solomon")
+        .join(format!("{name}.json"));
+    let json = std::fs::read_to_string(&path).expect("read instance");
+    let mut problem = parse_input(&json).expect("parse");
+    let matrix = build_matrix(&mut problem, None).expect("matrix");
+    brooom::solution::eval_cache_invalidate();
+    (problem, matrix)
+}
+
+#[test]
+fn split_recovers_pyvrp_r205_ordering() {
+    let warm_path = "/tmp/warm_r205.json";
+    if !Path::new(warm_path).exists() {
+        eprintln!("SKIP: {warm_path} not present");
+        return;
+    }
+    let (problem, matrix) = load("r205");
+    assert!(hgs_applicable(&problem), "r205 should be in the HGS envelope");
+
+    let warm = load_warm_start(&problem, &matrix, warm_path).expect("warm-start");
+    let warm_cost = warm.summary.cost;
+    let warm_routes = warm.routes.iter().filter(|r| !r.steps.is_empty()).count();
+    eprintln!("PyVRP warm-start: cost={warm_cost:.0} routes={warm_routes}");
+
+    let tour = solution_to_giant_tour(&warm, &problem);
+    assert_eq!(tour.len(), problem.jobs.len(), "giant tour covers every job");
+
+    let split_sol = split(&tour, &problem, &matrix).expect("split feasible");
+    let split_cost = split_sol.summary.cost;
+    let split_routes = split_sol.routes.iter().filter(|r| !r.steps.is_empty()).count();
+    eprintln!(
+        "Split of PyVRP ordering: cost={split_cost:.0} routes={split_routes} (PyVRP ref 95415/5)"
+    );
+
+    // Split re-partitions PyVRP's *ordering* optimally, so it can only match or
+    // beat PyVRP's own partition of that order. Allow a hair for rounding.
+    assert!(
+        split_cost <= warm_cost + 1e-6,
+        "Split ({split_cost:.0}) must not be worse than PyVRP's own partition ({warm_cost:.0})"
+    );
+    // Every job placed.
+    let placed: usize = split_sol.routes.iter().map(|r| r.steps.len()).sum();
+    assert_eq!(placed, problem.jobs.len(), "all jobs placed by Split");
+    assert!(split_sol.unassigned.is_empty(), "no unassigned after Split");
+}
+
+#[test]
+#[ignore]
+fn hgs_quality_vs_pyvrp() {
+    use brooom::genetic::solve_genetic;
+    use brooom::granular::Granular;
+    use web_time::{Duration, Instant};
+    let refs = [("r205", 95415.0), ("r211", 75523.0), ("rc208", 77892.0),
+                ("r207", 79789.0), ("rc206", 105460.0)];
+    for (name, py) in refs {
+        let (problem, matrix) = load(name);
+        let granular = Granular::build(&matrix, 30);
+        brooom::solution::eval_cache_invalidate();
+        let t0 = Instant::now();
+        let deadline = Some(t0 + Duration::from_millis(9000));
+        let sol = solve_genetic(&problem, &matrix, Some(&granular), 30, 42, deadline, &[])
+            .expect("hgs solves");
+        let routes = sol.routes.iter().filter(|r| !r.steps.is_empty()).count();
+        let c = sol.summary.cost;
+        eprintln!("HGS {name}: cost={c:.0} routes={routes} gap={:+.2}% t={:.1}s",
+            (c - py) / py * 100.0, t0.elapsed().as_secs_f64());
+        assert!(sol.unassigned.is_empty());
+    }
+}
+
+#[test]
+#[ignore]
+fn hgs_microbench() {
+    use brooom::genetic::{split, solution_to_giant_tour};
+    use brooom::granular::Granular;
+    use brooom::insertion::greedy_insertion_seeded;
+    use brooom::local_search::local_search;
+    use web_time::Instant;
+    let (problem, matrix) = load("r211");
+    let granular = Granular::build(&matrix, 30);
+    eprintln!("n_jobs={}", problem.jobs.len());
+    // greedy
+    let t = Instant::now();
+    let mut s = greedy_insertion_seeded(&problem, &matrix, 1);
+    eprintln!("greedy: {:.1}ms", t.elapsed().as_secs_f64()*1000.0);
+    // split
+    let tour = solution_to_giant_tour(&s, &problem);
+    let t = Instant::now();
+    for _ in 0..10 { let _ = split(&tour, &problem, &matrix); }
+    eprintln!("split x10: {:.1}ms ({:.1}ms each)", t.elapsed().as_secs_f64()*1000.0, t.elapsed().as_secs_f64()*100.0);
+    // cold local_search
+    let t = Instant::now();
+    local_search(&problem, &matrix, &mut s, 30, Some(&granular));
+    eprintln!("cold LS: {:.1}ms", t.elapsed().as_secs_f64()*1000.0);
+}
+
+#[test]
+#[ignore]
+fn hgs_microbench2() {
+    use brooom::genetic::{split, solution_to_giant_tour};
+    use brooom::granular::Granular;
+    use brooom::insertion::greedy_insertion_seeded;
+    use brooom::local_search::local_search;
+    use web_time::Instant;
+    let (problem, matrix) = load("r211");
+    let s0 = greedy_insertion_seeded(&problem, &matrix, 1);
+    let tour = solution_to_giant_tour(&s0, &problem);
+    for k in [8usize, 12, 20] {
+        let granular = Granular::build(&matrix, k);
+        for passes in [1usize, 2, 4] {
+            let mut s = split(&tour, &problem, &matrix).unwrap();
+            let t = Instant::now();
+            local_search(&problem, &matrix, &mut s, passes, Some(&granular));
+            eprintln!("K={k} passes={passes}: {:.1}ms cost={:.0}", t.elapsed().as_secs_f64()*1000.0, s.summary.cost);
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn hgs_parallel_vs_pyvrp() {
+    use brooom::genetic::solve_genetic_parallel;
+    use brooom::granular::Granular;
+    use web_time::{Duration, Instant};
+    let refs = [("r205", 95415.0), ("r211", 75523.0), ("rc208", 77892.0),
+                ("r207", 79789.0), ("rc206", 105460.0)];
+    for (name, py) in refs {
+        let (problem, matrix) = load(name);
+        let granular = Granular::build(&matrix, 20);
+        brooom::solution::eval_cache_invalidate();
+        let t0 = Instant::now();
+        let deadline = Some(t0 + Duration::from_millis(10000));
+        // 11 islands ≈ logical cores; medium education (passes=4).
+        let sol = solve_genetic_parallel(&problem, &matrix, Some(&granular), 4, 42, deadline, 11, &[])
+            .expect("hgs solves");
+        let routes = sol.routes.iter().filter(|r| !r.steps.is_empty()).count();
+        let c = sol.summary.cost;
+        eprintln!("HGS-par {name}: cost={c:.0} routes={routes} gap={:+.2}% t={:.1}s",
+            (c - py) / py * 100.0, t0.elapsed().as_secs_f64());
+    }
+}
