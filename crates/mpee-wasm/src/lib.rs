@@ -161,6 +161,12 @@ impl Engine {
         self.routing.reverse(lat, lon).unwrap_or("").to_string()
     }
 
+    /// Nearest STREET NAME only (no house number) — used by crossing selection,
+    /// which matches on street names. `reverse` (above) returns the full address.
+    pub fn reverse_street(&self, lat: f32, lon: f32) -> String {
+        self.routing.reverse(lat, lon).unwrap_or("").to_string()
+    }
+
     /// Forward-geocode: street (optionally "Street 42") → JSON. Address-level
     /// when the query has a number and an address sidecar is loaded (adds
     /// `housenumber`/`city`/`postcode`/`approximate`), else `{name,lat,lon}`.

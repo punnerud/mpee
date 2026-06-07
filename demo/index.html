@@ -246,7 +246,7 @@
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
 import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
-const BUILD = '3e0';
+const BUILD = '3f0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -352,13 +352,13 @@ function setupMap() {
   map.on('movestart', hideHint);   // pan/zoom → remove the nudge
   map.on('click', (e) => {
     hideHint();
-    // On mobile, a tap on the map dismisses an open sheet. In TRIP mode that tap
-    // only closes the sheet (so you don't drop a stop by accident); in CROSS
-    // mode the same tap also registers the street, so picking "Street crossing"
-    // from the menu and tapping the map works on the first tap.
-    if (isMobile() && $('sheet').classList.contains('open')) {
+    // On mobile, a tap on the map dismisses an open sheet — but ONLY in TRIP
+    // mode (so you don't drop a stop by accident). In CROSS mode the sheet
+    // stays open while you tap streets, so you can watch the highlighted lines
+    // and the crossing read-out build up.
+    if (isMobile() && mode === 'trip' && $('sheet').classList.contains('open')) {
       $('sheet').classList.remove('open');
-      if (mode === 'trip') return;
+      return;
     }
     const lat = e.lngLat.lat, lon = e.lngLat.lng;
     if (!inBounds(lat, lon)) { outOfAreaWarning(); return; }
@@ -592,9 +592,7 @@ function showCrossing(a, b) {
   const hits = pinCrossings(a, b);
   const pts = hits.length ? hits : streetFeatures.a ? streetFeatures.a.geometry.coordinates.flat().map(c=>({lat:c[1],lon:c[0]})) : [];
   if (pts.length) fit(pts);
-  setOut('c-out', hits.length
-    ? `${a} × ${b}: ${hits.length} crossing(s)\n` + hits.map(h=>`${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n')
-    : `${a} and ${b} don't share a node (no at-grade crossing).`);
+  setOut('c-out', crossText(a, b, hits));
 }
 function doCross() {
   const a = $('c-a').value.trim(), b = $('c-b').value.trim();
@@ -607,7 +605,8 @@ function doCross() {
 function crossClick(lat, lon) {
   if (!engine.has_names()) return;
   if (crossClicks.length >= 2) { clearStreets(); clearResultMarkers(); crossClicks = []; }
-  const name = engine.reverse(lat, lon);
+  // STREET NAME only (reverse() returns a full address now, which wouldn't match).
+  const name = engine.reverse_street(lat, lon);
   if (!name) { showToast('No named street at that point — tap directly on a road.'); return; }
   const slot = crossClicks.length === 0 ? 'a' : 'b';
   drawStreet(slot, name, slot==='a' ? STREET_A : STREET_B);
@@ -616,13 +615,21 @@ function crossClick(lat, lon) {
     track('crossing', { via: 'map' });
     $('c-a').value = crossClicks[0]; $('c-b').value = crossClicks[1];
     const hits = pinCrossings(crossClicks[0], crossClicks[1]);
-    setOut('c-out', hits.length
-      ? `${crossClicks[0]} × ${crossClicks[1]}: ${hits.length} crossing(s)\n` + hits.map(h=>`${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n')
-      : `${crossClicks[0]} and ${crossClicks[1]} don't share a node (no crossing).`);
+    setOut('c-out', crossText(crossClicks[0], crossClicks[1], hits));
   } else {
     $('c-a').value = name; $('c-b').value = '';
     setOut('c-out', `Street A: ${name}\nTap a crossing street…`);
   }
+}
+// Crossing read-out: the streets, the count, the nearest full address (with house
+// number) at the first crossing point, then each crossing coordinate.
+function crossText(a, b, hits) {
+  if (!hits.length) return `${a} and ${b} don't share a node (no at-grade crossing).`;
+  let addr = '';
+  try { addr = engine.reverse(hits[0].lat, hits[0].lon) || ''; } catch (e) {}
+  return `${a} × ${b}: ${hits.length} crossing(s)\n`
+    + (addr ? `nearest address: ${addr}\n` : '')
+    + hits.map(h => `${h.lat.toFixed(6)}, ${h.lon.toFixed(6)}`).join('\n');
 }
 
 // ---------- CSV ----------

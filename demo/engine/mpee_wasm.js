@@ -215,6 +215,25 @@ export class Engine {
         }
     }
     /**
+     * Nearest STREET NAME only (no house number) — used by crossing selection,
+     * which matches on street names. `reverse` (above) returns the full address.
+     * @param {number} lat
+     * @param {number} lon
+     * @returns {string}
+     */
+    reverse_street(lat, lon) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.engine_reverse_street(this.__wbg_ptr, lat, lon);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Driving route between two points. Returns JSON with distance/duration,
      * snapped endpoints and the `[[lat,lon],…]` road geometry.
      * @param {number} from_lat
