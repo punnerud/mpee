@@ -244,9 +244,11 @@
 </div>
 
 <script type="module">
-// ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
-import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
-const BUILD = '3f0';
+const BUILD = '3g0';
+// The engine module is imported DYNAMICALLY inside boot() with ?v=${BUILD}, so a
+// fresh wasm build is never served stale from a previous deploy's cache (a
+// hard-coded ?v on a static import had drifted out of sync).
+let init, Engine, webgpu_probe;
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -298,6 +300,7 @@ async function fetchGunzip(url, onProgress) {
 async function boot() {
   try {
     if (typeof DecompressionStream === 'undefined') throw new Error('This browser lacks DecompressionStream — try a recent Chrome, Edge, Safari 16.4+ or Firefox 113+.');
+    ({ default: init, Engine, webgpu_probe } = await import(`./engine/mpee_wasm.js?v=${BUILD}`));
     await init(`./engine/mpee_wasm_bg.wasm?v=${BUILD}`);
     const w = { pp:0.30, ch:0.62, names:0.02, addr:0.06 }, p = { pp:0, ch:0, names:0, addr:0 };
     const paint = () => $('load-bar').style.width = ((p.pp*w.pp + p.ch*w.ch + p.names*w.names + p.addr*w.addr)*100).toFixed(0)+'%';
