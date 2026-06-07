@@ -64,6 +64,20 @@ it**, which is where the speed and memory wins come from.
 
 ## Where MPEE fits
 
+> **An engine, not a service.** The usual knock on MPEE is "great router and
+> solver, but no global coverage." That's backwards: MPEE gives you *anywhere*
+> two complementary ways, **self-hosted, no per-call API, your data stays put** —
+> (1) **route offline from OpenStreetMap** — the whole planet is an OSM extract,
+> dijeng builds the routable cache, brooom solves; or (2) **bring your own
+> matrix** computed anywhere (a commercial API, an internal system, another
+> OSRM) — brooom ingests it directly and `matcodec` compresses/validates it
+> *without* the router. The router becomes central at planet scale: it feeds the
+> compressor **row by row**, so a matrix **larger than RAM is streamed and
+> compressed without ever materialising n²** (compute → stream → compress →
+> solve). Nobody else packages lossless matrix compression (7–10× on real
+> roads), bigger-than-RAM streaming, compressed random-access, matrix validation,
+> a SOTA solver, and an offline router in one engine.
+
 - **Matches state-of-the-art quality.** On small-N CVRPTW (Solomon R2/RC2),
   same-harness 10 s, MPEE now **ties PyVRP** (HGS-class, the SOTA open reference)
   at **mean +0.06 %** and beats it on several instances. Of the open solvers we
@@ -519,11 +533,16 @@ models** per matrix (1 header byte, always an exact roundtrip):
 
 Measured (exact roundtrip, vs raw int32; plain `gzip` ≈ 2×):
 
-| matrix | matcodec | model |
-|--------|----------|-------|
-| real OSRM road, 8 cities × 40 (320²) | **6.99×** | cluster |
-| Oslo haversine, 1001² | **4.41×** | bridge |
-| structureless uniform points | ~1.8× | (graceful floor) |
+| matrix | matcodec | model | compress | decompress |
+|--------|----------|-------|----------|------------|
+| real OSRM road, 16 towns (960²) | **9.79×** | cluster | 0.97 s | 0.01 s |
+| real OSRM road, 8 towns (320²) | **6.99×** | cluster | 0.12 s | ~0 s |
+| Oslo haversine, 1001² | **4.41×** | bridge | 3.2 s | 0.05 s |
+| structureless uniform points | ~1.8× | (graceful floor) | — | — |
+
+More geographic separation ⇒ better ratio (the 960² road matrix hits **9.79×**);
+compress is sub-second to ~1 s for ~1 M cells and **decompression is essentially
+free (~10 ms)**, so you can decompress on the fly.
 
 It also **streams** (`compress_stream` + the `MTZS` container: peak memory
 `L×n + 1 row`, fed by any `RowSource` — e.g. dijeng's per-row CH queries, so a

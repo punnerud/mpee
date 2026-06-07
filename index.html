@@ -416,6 +416,19 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     </p>
 
     <h3>Where MPEE fits</h3>
+    <p style="line-height:1.55">
+      <b>An engine, not a service.</b> The usual knock — "great router and solver,
+      but no global coverage" — is backwards. MPEE gives you <em>anywhere</em>,
+      <strong>self-hosted, no per-call API, your data stays put</strong>, two
+      complementary ways: <b>route offline from OpenStreetMap</b> (the whole
+      planet is an OSM extract — dijeng builds the cache, brooom solves), or
+      <b>bring your own matrix</b> computed anywhere (a commercial API, an
+      internal system, another OSRM) — brooom ingests it directly and
+      <code>matcodec</code> compresses/validates it without the router. At planet
+      scale the router becomes central: it feeds the compressor <b>row by row</b>,
+      so a matrix <b>larger than RAM is streamed and compressed without ever
+      materialising n²</b> — compute → stream → compress → solve.
+    </p>
     <ul style="line-height:1.55">
       <li><b>Matches SOTA quality.</b> Same-harness 10&nbsp;s on Solomon R2/RC2,
         MPEE ties PyVRP (HGS-class SOTA) at <b>mean +0.06%</b> and beats it on
@@ -445,13 +458,19 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       landmarks, <code>base(i,j)=minₗ d(i,l)+d(l,j)</code>):
     </p>
     <table>
-      <thead><tr><th>Matrix</th><th>matcodec (lossless)</th><th>vs raw · vs gzip</th></tr></thead>
+      <thead><tr><th>Matrix</th><th>matcodec (lossless)</th><th>compress · decompress</th></tr></thead>
       <tbody>
-        <tr><td>Real OSRM road, 8 cities (320²)</td><td><b>6.99×</b> (cluster)</td><td>plain gzip ≈ 2.1×</td></tr>
-        <tr><td>Oslo haversine (1001²)</td><td><b>4.41×</b> (bridge)</td><td>plain gzip ≈ 2.4×</td></tr>
+        <tr><td>Real OSRM road, 16 towns (960²)</td><td><b>9.79×</b> (cluster)</td><td>0.97 s · 0.01 s</td></tr>
+        <tr><td>Real OSRM road, 8 towns (320²)</td><td><b>6.99×</b> (cluster)</td><td>0.12 s · ~0 s</td></tr>
+        <tr><td>Oslo haversine (1001²)</td><td><b>4.41×</b> (bridge)</td><td>3.2 s · 0.05 s</td></tr>
         <tr><td>structureless points</td><td>~1.8×</td><td>graceful floor</td></tr>
       </tbody>
     </table>
+    <p class="muted" style="font-size:.88rem">
+      More geographic separation ⇒ better ratio; plain <code>gzip</code> ≈ 2× on
+      the same matrices. Decompression is essentially free (~10 ms), so you can
+      decompress on the fly.
+    </p>
     <p>
       It also <strong>streams</strong> (peak memory <code>L×n + 1 row</code>, fed
       by dijeng's per-row CH queries — so a matrix bigger than RAM is compressed
