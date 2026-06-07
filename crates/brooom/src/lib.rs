@@ -38,6 +38,7 @@ pub mod gpu_polish;
 pub mod hgs;
 pub mod route_exact;
 pub mod population;
+pub mod genetic;
 
 pub use error::{Error, Result};
 pub use problem::{

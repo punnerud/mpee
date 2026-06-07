@@ -966,6 +966,14 @@ fn soft_active() -> bool {
     SOFT_ACTIVE.with(|c| c.get())
 }
 
+/// Public view of whether penalty-managed soft mode is armed on this thread.
+/// The fast O(1) cost-delta LS path is only exact in hard mode (soft penalties
+/// fold time-warp/overload into the cost, which the arc-sum model doesn't see).
+#[inline]
+pub fn soft_is_active() -> bool {
+    soft_active()
+}
+
 #[inline]
 fn soft_weights() -> SoftWeights {
     SoftWeights {

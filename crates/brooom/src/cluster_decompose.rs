@@ -209,6 +209,10 @@ pub fn solve_decomposed(
     // so clusters use the greedy path exactly as before.
     let mut sub_cfg = config.clone();
     sub_cfg.allow_lahc = false;
+    // Keep the decomposed large-N path byte-identical to the pre-fast-LS engine:
+    // turn the fast O(1) LS off for the duration of the cluster sub-solves (it
+    // gives no benefit here and would only perturb tie-breaks). Restored after.
+    let prev_fast_ls = crate::local_search::set_fast_ls_global(false);
     let solve_cluster = |c: usize| -> Solution {
         let sub = subproblem(problem, &jobs_by_cluster[c], &veh_by_cluster[c]);
         solve_with_matrix(&sub, matrix, &sub_cfg)
@@ -217,6 +221,7 @@ pub fn solve_decomposed(
     let sub_solutions: Vec<Solution> = (0..assn.k).into_par_iter().map(solve_cluster).collect();
     #[cfg(not(feature = "parallel"))]
     let sub_solutions: Vec<Solution> = (0..assn.k).map(solve_cluster).collect();
+    crate::local_search::set_fast_ls_global(prev_fast_ls);
 
     // Reassemble. Each sub-route's TaskRef::Job(idx) is local to its
     // sub-problem; re-map to parent indices.
