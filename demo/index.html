@@ -143,10 +143,24 @@
     padding:6px 11px;border-radius:9px;box-shadow:0 4px 16px rgba(13,148,136,.5);cursor:pointer;white-space:nowrap;
   }
   #opt-hint::before{content:'';position:absolute;top:-5px;right:14px;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:5px solid var(--accent)}
+  /* Small address read-out, sitting just left of the bottom-right zoom control. */
+  #addr-hud{position:fixed;right:52px;bottom:12px;z-index:5;max-width:min(62vw,440px);
+    background:rgba(14,20,25,.86);border:1px solid var(--line);border-radius:9px;
+    padding:6px 10px;font-size:.82rem;color:var(--muted);backdrop-filter:blur(6px);
+    display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;
+    box-shadow:0 2px 10px rgba(0,0,0,.32);pointer-events:none}
+  #addr-hud .a{color:var(--fg);overflow:hidden;text-overflow:ellipsis;max-width:170px}
+  #addr-hud .arrow{color:var(--accent2);flex:none;font-weight:600}
+  #addr-hud .dist{color:var(--accent2);flex:none;font-variant-numeric:tabular-nums;
+    border-left:1px solid var(--line);padding-left:8px}
+  @media (max-width:560px){ #addr-hud{font-size:.76rem;max-width:78vw} #addr-hud .a{max-width:34vw} }
 </style>
 </head>
 <body>
 <div id="map"></div>
+<!-- Small address HUD, left of the +/- zoom control. First stop = address only;
+     next stops show "prev → cur" + straight-line/route distance. -->
+<div id="addr-hud" hidden></div>
 <div id="hint" hidden><span class="ring"></span><span class="txt">Click the map to add stops</span></div>
 <div id="opt-hint" hidden>Open ☰ to optimize routes</div>
 <div class="credit">MPEE · Rust engine, this demo is the WebAssembly build · also <a href="../#surfaces">Rust&nbsp;/&nbsp;Python&nbsp;/&nbsp;CLI&nbsp;/&nbsp;JSON</a> · <a href="https://github.com/punnerud/mpee">source</a> · build 2d0</div>
@@ -229,7 +243,7 @@
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
 import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
-const BUILD = '3a0';
+const BUILD = '3b0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -423,6 +437,43 @@ function renderStops() {
   // Live route through the stops in order — recomputed on every add/remove so
   // tapping around the map connects each leg automatically.
   if (mode === 'trip') drawSequentialRoute();
+  updateAddrHud();
+}
+
+// ---------- address HUD (bottom-right, left of the zoom control) ----------
+function haversineKm(a, b){
+  const R = 6371, rad = x => x * Math.PI / 180;
+  const dla = rad(b.lat - a.lat), dlo = rad(b.lon - a.lon);
+  const s = Math.sin(dla/2)**2 + Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dlo/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+function fmtDist(km){
+  const mi = km * 0.621371;
+  return km < 1 ? `${Math.round(km*1000)} m / ${Math.round(mi*5280)} ft`
+                : `${km.toFixed(1)} km / ${mi.toFixed(1)} mi`;
+}
+// Replace the read-out on each new point: first stop = address only; from the
+// second on, "prev → cur" + distance from the previous point (driving distance,
+// straight-line fallback). Hidden when there are no stops.
+function updateAddrHud(){
+  const hud = $('addr-hud'); if (!hud) return;
+  hud.textContent = '';
+  if (!stops.length) { hud.hidden = true; return; }
+  const span = (cls, txt) => { const s = document.createElement('span'); s.className = cls; s.textContent = txt; return s; };
+  const cur = stops[stops.length - 1];
+  if (stops.length === 1) {
+    hud.appendChild(span('a', cur.name));
+  } else {
+    const prev = stops[stops.length - 2];
+    let km = null;
+    try { const r = JSON.parse(engine.route(prev.lat, prev.lon, cur.lat, cur.lon)); if (r && isFinite(r.distance_km)) km = r.distance_km; } catch (e) {}
+    if (km == null) km = haversineKm(prev, cur);
+    hud.appendChild(span('a', prev.name));
+    hud.appendChild(span('arrow', '→'));
+    hud.appendChild(span('a', cur.name));
+    hud.appendChild(span('dist', fmtDist(km)));
+  }
+  hud.hidden = false;
 }
 
 // ---------- actions ----------
