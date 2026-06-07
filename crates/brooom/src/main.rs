@@ -701,7 +701,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     //
     // The alternation is the key insight: GPU diversifies (kick + LS), CPU
     // does deep deterministic LS. They find complementary improvements.
-    if cli.gpu && solved.matrix.n >= 50 {
+    // Run this top-level polish loop when --gpu is on (n≥50), AND — even WITHOUT
+    // --gpu — for large decomposed instances (n≥500), where a second full-LS
+    // polish on the MERGED solution recovers cross-cluster moves (measured
+    // ~−1.2% on N=1000). The GPU pass itself is skipped unless --gpu (on TW
+    // instances it produces 0 feasible trajectories anyway); the CPU polish is
+    // the load-bearing part. Small flat instances (n<500) keep their default.
+    if (cli.gpu && solved.matrix.n >= 50) || solved.matrix.n >= 500 {
         let granular = eff_granular_k.checked_sub(0)
             .and_then(|k| if k == 0 { None } else { Some(brooom::granular::Granular::build(&solved.matrix, k)) });
         let max_iter = if solved.matrix.n >= 5000 { 2000 } else { 1500 };
@@ -719,23 +725,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     None => break,
                 }
             }
-            // GPU batch polish.
-            let t_gpu = std::time::Instant::now();
+            // GPU batch polish — only when --gpu (skipped on the CPU-only
+            // large-N path).
             let pre_cost = solved.solution.summary.cost;
-            if let Some(gpu_sol) = brooom::gpu_polish::gpu_polish(
-                &problem, &solved.matrix, &solved.solution,
-                granular.as_ref(), max_iter, cli.verbose,
-            ) {
-                if gpu_sol.summary.cost + 1e-9 < solved.solution.summary.cost {
-                    if cli.verbose {
-                        eprintln!(
-                            "brooom: round {}: GPU polish {:.2} → {:.2} (Δ={:.2}, t={:.2}s)",
-                            rounds, solved.solution.summary.cost, gpu_sol.summary.cost,
-                            solved.solution.summary.cost - gpu_sol.summary.cost,
-                            t_gpu.elapsed().as_secs_f64()
-                        );
+            #[cfg(feature = "gpu")]
+            if cli.gpu {
+                let t_gpu = std::time::Instant::now();
+                if let Some(gpu_sol) = brooom::gpu_polish::gpu_polish(
+                    &problem, &solved.matrix, &solved.solution,
+                    granular.as_ref(), max_iter, cli.verbose,
+                ) {
+                    if gpu_sol.summary.cost + 1e-9 < solved.solution.summary.cost {
+                        if cli.verbose {
+                            eprintln!(
+                                "brooom: round {}: GPU polish {:.2} → {:.2} (Δ={:.2}, t={:.2}s)",
+                                rounds, solved.solution.summary.cost, gpu_sol.summary.cost,
+                                solved.solution.summary.cost - gpu_sol.summary.cost,
+                                t_gpu.elapsed().as_secs_f64()
+                            );
+                        }
+                        solved.solution = gpu_sol;
                     }
-                    solved.solution = gpu_sol;
                 }
             }
             // CPU LS polish.
