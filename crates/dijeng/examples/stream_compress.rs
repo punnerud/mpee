@@ -19,6 +19,7 @@
 //! access it in RAM with `matcodec::MtzReader`.
 
 use dijeng::ch::{self, ContractionHierarchy};
+use matcodec::RowSource as _;
 use std::fs;
 use std::io::BufWriter;
 
@@ -54,11 +55,30 @@ fn main() {
         std::process::exit(2);
     }
     let ch = dijeng::cache_ch::load_mmap(&args[1]).expect("load .ch");
-    let ids: Vec<u32> = fs::read_to_string(&args[2])
-        .expect("read nodes.txt")
-        .split_whitespace()
-        .map(|t| t.parse::<u32>().expect("node id must be u32"))
-        .collect();
+    // nodes arg: a path to a whitespace-separated id list, OR "random:K" to pick
+    // K distinct random CH-internal node ids from the loaded hierarchy.
+    let ids: Vec<u32> = if let Some(k) = args[2].strip_prefix("random:") {
+        let k: usize = k.parse().expect("random:K");
+        let count = ch.perm.len();
+        assert!(count >= 2, "graph too small");
+        let mut s: u64 = 0x1234_5678_9abc_def1;
+        let mut seen = std::collections::HashSet::new();
+        let mut v = Vec::with_capacity(k);
+        while v.len() < k.min(count) {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let id = ((s >> 33) as usize % count) as u32;
+            if seen.insert(id) {
+                v.push(id);
+            }
+        }
+        v
+    } else {
+        fs::read_to_string(&args[2])
+            .expect("read nodes.txt")
+            .split_whitespace()
+            .map(|t| t.parse::<u32>().expect("node id must be u32"))
+            .collect()
+    };
     let n = ids.len();
     assert!(n >= 2, "need at least 2 nodes");
 
@@ -75,9 +95,46 @@ fn main() {
     let lm: Vec<usize> = (0..l).map(|k| (k * n) / l).collect();
 
     let mut src = ChRowSource { ch, ids };
-    let mut out = BufWriter::new(fs::File::create(&args[3]).expect("create out.mtz"));
-    let rep = matcodec::compress_stream(&mut src, &lm, &mut out).expect("compress_stream");
-    drop(out);
+    let dump = args
+        .iter()
+        .position(|a| a == "--dump")
+        .and_then(|p| args.get(p + 1))
+        .cloned();
+
+    let rep = if let Some(dp) = dump {
+        // Benchmark/comparison mode: materialise the matrix once, write it as
+        // JSON (so `matcodec roundtrip`/`validate` can run the best-of model on
+        // the same real CH data), then stream-compress from the buffer.
+        let mut full = vec![0i32; n * n];
+        for i in 0..n {
+            let r = src.row(i);
+            full[i * n..i * n + n].copy_from_slice(&r);
+        }
+        let mut s = String::from("{\"durations\":[");
+        for i in 0..n {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push('[');
+            for j in 0..n {
+                if j > 0 {
+                    s.push(',');
+                }
+                s.push_str(&full[i * n + j].to_string());
+            }
+            s.push(']');
+        }
+        s.push_str("]}");
+        fs::write(&dp, s).expect("write dump");
+        eprintln!("dumped full matrix to {dp} (comparison only; streaming itself never materialises)");
+        let mut sbuf = matcodec::SliceRows { d: &full, n };
+        let mut out = BufWriter::new(fs::File::create(&args[3]).expect("create out.mtz"));
+        matcodec::compress_stream(&mut sbuf, &lm, &mut out).expect("compress_stream")
+    } else {
+        // Pure streaming: rows pulled on demand from the CH, n² never held.
+        let mut out = BufWriter::new(fs::File::create(&args[3]).expect("create out.mtz"));
+        matcodec::compress_stream(&mut src, &lm, &mut out).expect("compress_stream")
+    };
 
     let sz = fs::metadata(&args[3]).map(|m| m.len()).unwrap_or(0);
     let raw = (n as u64) * (n as u64) * 4;
