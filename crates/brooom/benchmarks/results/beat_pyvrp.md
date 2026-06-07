@@ -40,9 +40,17 @@ regression there.
 
 Standalone HGS multi-seed (3 seeds) is low-variance: r205 +0.79%, r211 +1.05%,
 rc208 +0.64%, r207 +0.77%, rc206 +0.14% mean vs PyVRP (rc206 hits +0.00% twice).
-So we now **match PyVRP within ~0.2–0.8%** on the core wide-window set (was
-+1.5–3%), beat OR-Tools, and keep the N≥1000 win and tight-window parity.
-Honest caveat: r201/rc201 (borderline-wide) improve but still trail PyVRP more.
+
+### VERIFIED same-harness eval — all 19 R2/RC2, both solvers 10 s (2026-06-07)
+
+`results/pyvrp_eval_2026.txt` (brooom default `-m 16` vs PyVRP `MaxRuntime(10s)`,
+same matrix): **mean Δ = +0.06 %**, every instance within −1.3 … +0.9 %, and
+brooom **beats** PyVRP on **r202 −0.27, r206 −0.56, r208 −1.32, r209 −0.61,
+rc204 −0.02, rc205 ±0.00**. Worst cases r211 +0.93, rc208 +0.79, r205 +0.70.
+Tight-window r101/rc101/c101 tie (+0.00…+0.25 %). So brooom now **matches PyVRP**
+on R2/RC2 — the +2–13 % gap is closed. (Earlier per-instance "+2–4 %" figures
+compared against an optimistic reference, not PyVRP @10 s; same-harness shows
+parity, e.g. r201 +0.03 %, rc201 +0.18 %.)
 
 ---
 

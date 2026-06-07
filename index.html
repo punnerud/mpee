@@ -399,7 +399,7 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     <table>
       <thead><tr><th>Scale</th><th>Result</th></tr></thead>
       <tbody>
-        <tr><td>N = 100–200 (small)</td><td><b>ties the best</b> (PyVRP) on tight-window C1/R1/C2 and reaches it <b>~2.5× faster</b> (≈4 s vs 10 s); OR-Tools sometimes can't even find a feasible solution in the budget. On <em>wide-window</em> R2/RC2 we're now within <b>~1–3%</b> of PyVRP (and beat it on some, e.g. r208) after a route-opening fix — the last honest gap, down from 2–13%.</td></tr>
+        <tr><td>N = 100–200 (small)</td><td><b>matches PyVRP</b> (HGS-class SOTA): same-harness 10 s on the 19 Solomon R2/RC2 wide-window instances, <b>mean Δ +0.06%</b> (range −1.3…+0.9%), and brooom <b>beats</b> PyVRP on r202/r206/r208/r209/rc204; ties tight-window C1/R1 (±0.0–0.25%). Was +2–13% — closed by an O(1)-cost-delta local search (6–11× faster cold LS) + a population HGS (giant-tour crossover + Split). OR-Tools sometimes can't even find a feasible solution in the budget.</td></tr>
         <tr><td>N = 1,000</td><td>beats the next-best solver (PyVRP) on <b>17 / 20</b> seeds, p&nbsp;≈&nbsp;10⁻⁷</td></tr>
         <tr><td>N = 50,000</td><td>the <b>only</b> tested solver that converges on a laptop</td></tr>
         <tr><td>Inner loop</td><td>the entire local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as <b>one GPU megakernel</b> — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration</td></tr>
@@ -410,8 +410,9 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       yourself: <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom/benchmarks">crates/brooom/benchmarks</a>
       (raw 4-way numbers in
       <a href="https://github.com/punnerud/mpee/blob/main/crates/brooom/benchmarks/results/competitor_comparison.md">competitor_comparison.md</a>).
-      PyVRP (HGS) is state-of-the-art on small CVRPTW; brooom's edge is the
-      integrated stack, speed-to-good-answer, and scale — not beating HGS at n=100.
+      PyVRP (HGS) is the small-CVRPTW reference; brooom now <b>matches</b> it on
+      R2/RC2 (mean +0.06%) and beats the field at n≥1000 — with the added edge of
+      an integrated single-engine stack, speed-to-good-answer, and scale.
     </p>
 
     <h3>Real maps, not just synthetic <span class="muted" style="font-weight:400">· real OSM road distances, seed-reproducible</span></h3>
@@ -465,12 +466,11 @@ python3 crates/brooom/benchmarks/gen_realmap.py --region sf --seed 11 --n 80 \
     --matrix osrm --osrm-host &lt;host&gt;
 .bench-venv/bin/python crates/brooom/benchmarks/run_multi_bench.py instances_realmap/sf_s11_n80_osrm.json</code></pre>
     <p class="muted" style="font-size:.88rem">
-      Where we stand, honestly: <strong>not</strong> state-of-the-art on raw
-      solution quality — PyVRP's HGS-class ILS still wins 2–5 % on wide-window
-      small-N (R2/RC2); we're #2 there (we beat OR-Tools, tie on tight-window
-      C1/R1/C2, and are ~2.5–5× faster to a good answer). Where we lead: the
-      integrated single-engine stack, memory/scale (50k on a laptop), and end-to-end
-      speed. Raw results + the honest gap analysis live in
+      Where we stand, honestly: on raw solution quality we now <strong>match</strong>
+      PyVRP's HGS-class ILS on wide-window small-N (R2/RC2 mean Δ +0.06 % same-harness,
+      beating it on several), tie on tight-window C1/R1, and beat OR-Tools + the field
+      at N≥1000. Where we add edge: the integrated single-engine stack, memory/scale
+      (50k on a laptop), and end-to-end speed. Raw results + the analysis live in
       <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom/benchmarks/results">benchmarks/results/</a>
       (<code>competitor_comparison.md</code>, <code>beat_pyvrp.md</code>).
       Independent benchmarks welcome — open an issue with your numbers.

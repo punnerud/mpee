@@ -39,7 +39,7 @@ it**, which is where the speed and memory wins come from.
 
 | Scale | Result |
 |---|---|
-| N = 100–200 | **ties** the best (PyVRP) on tight-window C1/R1/C2 and reaches it ~2.5× faster; on wide-window R2/RC2 now **within ~1–3 %** of PyVRP (beats it on some, e.g. r208) after a route-opening fix — down from 2–13 %; beats OR-Tools (which can fail feasibility) |
+| N = 100–200 | **matches PyVRP** (HGS-class SOTA): same-harness 10 s on the 19 Solomon R2/RC2 wide-window instances, **mean Δ +0.06 %** (range −1.3 … +0.9 %), and brooom **beats** PyVRP on r202/r206/r208/r209/rc204; ties tight-window C1/R1 (±0.0–0.25 %). Was +2–13 % — closed by an O(1)-cost-delta local search (6–11× faster cold LS) + a population HGS (giant-tour crossover + Split). Beats OR-Tools (which can fail feasibility) |
 | N = 1,000 | beats the next-best solver (PyVRP) on **17 / 20** seeds, p ≈ 10⁻⁷ |
 | N = 50,000 | the **only** tested solver that converges on a laptop |
 | Inner loop | the *entire* local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as **one GPU megakernel** — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration |
@@ -48,8 +48,9 @@ it**, which is where the speed and memory wins come from.
 
 > **Self-reported — independent validation welcome.** All numbers above are
 > measured on one machine (Apple M3 Pro) and have not been independently verified.
-> Not SOTA on raw solution quality (PyVRP's HGS-class ILS leads small-N wide-window);
-> our edge is the integrated single-engine stack, memory/scale, and speed. Every
+> On raw solution quality we now **match PyVRP** (HGS-class SOTA) on small-N
+> R2/RC2 (mean +0.06 %, beating it on several) and beat the field at N≥1000; our
+> added edge is the integrated single-engine stack, memory/scale, and speed. Every
 > benchmark is built to re-run on the same instances/budget through every solver —
 > see [`crates/brooom/benchmarks`](crates/brooom/benchmarks) (seeded real-map
 > generator + 4-way harness) and the honest gap analysis in
@@ -638,9 +639,10 @@ See the [Constraints](#constraints) matrix above.
   50k customers, OSRM-compatible HTTP server (`bench_osrm`, `serve`),
   correctness verified against full Dijeng. See
   [crates/dijeng/README.md](crates/dijeng/README.md).
-- **brooom**: GPU-accelerated VRP. Beats PyVRP / Vroom / OR-Tools at **large N**
-  (Solomon R1-1000, p ≈ 3·10⁻⁸); **#2 behind PyVRP at small N** (ties tight-window,
-  −2–5 % on wide-window R2/RC2). Vroom-compatible I/O. See
+- **brooom**: VRP solver. Beats PyVRP / Vroom / OR-Tools at **large N**
+  (Solomon R1-1000, p ≈ 3·10⁻⁸); **matches PyVRP at small N** (mean +0.06 % on
+  R2/RC2, beats it on several; ties tight-window) via O(1) local search +
+  population HGS. Vroom-compatible I/O. See
   [crates/brooom/README.md](crates/brooom/README.md).
 
 - **mpee-cli**: end-to-end VRP pipeline. The `download` / `build` /
