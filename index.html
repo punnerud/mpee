@@ -444,6 +444,14 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
         separately. MPEE doesn't ask for that: it <b>auto-decomposes internally</b>
         (cluster-first for large N) and re-polishes across cluster boundaries, so
         you submit the entire problem and get one optimized plan.</li>
+      <li><b>Graceful degradation — not a dead "infeasible".</b> When no plan can
+        hit every time window, a hard solver (e.g. PyVRP) just returns
+        <em>infeasible</em>. With soft time windows MPEE still serves everyone and
+        reports <b>exactly which stops are late and by how much</b>
+        (<code>time_warp</code>, <code>late_jobs</code>, <code>max_lateness</code>,
+        and a per-job <code>late[]</code> list) — an actionable best-effort plan
+        with the violations made visible, not a dead end. On-time plans report
+        nothing extra.</li>
     </ul>
 
     <h3>Bring your own matrix — compress it losslessly <span class="muted" style="font-weight:400">· new <code>matcodec</code> crate</span></h3>

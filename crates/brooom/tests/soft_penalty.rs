@@ -21,7 +21,8 @@ use brooom::matrix::HaversineMatrix;
 use brooom::solution::{
     eval_cache_invalidate, evaluate_route, set_soft_penalties, SoftWeights, TaskRef,
 };
-use brooom::solver::{build_matrix, solve, SolverConfig};
+use brooom::io::to_output;
+use brooom::solver::{build_matrix, solve, solve_with_matrix, SolverConfig};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -201,6 +202,61 @@ fn soft_does_not_assign_fewer_jobs_than_hard() {
         soft.unassigned.len(),
         hard.unassigned.len()
     );
+}
+
+#[test]
+fn output_surfaces_soft_lateness_and_hides_it_when_clean() {
+    let _lock = guard();
+    // Job 20 sits far east with an impossible [0,1] window — soft mode serves it
+    // (rather than dropping it) but LATE. The output must surface that lateness
+    // honestly instead of reporting a clean-looking plan.
+    let late_json = r#"{
+        "vehicles": [
+            {"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10],
+             "time_window": [0, 100000]}
+        ],
+        "jobs": [
+            {"id": 10, "location": [10.02, 60.0], "delivery": [1], "time_windows": [[0, 100000]]},
+            {"id": 20, "location": [10.30, 60.0], "delivery": [1], "service": 10,
+             "time_windows": [[0, 1]]}
+        ]
+    }"#;
+    let mut problem = parse_input(late_json).unwrap();
+    eval_cache_invalidate();
+    let matrix = build_matrix(&mut problem, Some(&HaversineMatrix::default())).unwrap();
+    let mut cfg = SolverConfig::default();
+    cfg.soft_search = Some(true);
+    let sol = solve_with_matrix(&problem, &matrix, &cfg);
+    set_soft_penalties(None);
+    let out = to_output(&problem, &sol, Some(&matrix));
+
+    assert_eq!(out.summary.unassigned, 0, "soft should still serve the late job");
+    assert!(out.summary.time_warp > 0, "summary must report total time_warp");
+    assert!(out.summary.late_jobs >= 1, "summary must count late jobs");
+    assert!(out.summary.max_lateness > 0, "summary must report max lateness");
+    let l = out.late.iter().find(|l| l.id == 20).expect("late[] must name job 20");
+    assert!(l.lateness > 0 && l.arrival - l.due == l.lateness,
+        "late entry must be self-consistent (arrival - due == lateness)");
+    assert_eq!(out.summary.time_warp, out.late.iter().map(|x| x.lateness).sum::<i64>(),
+        "summary time_warp must equal the sum of per-job lateness");
+
+    // A fully feasible instance must surface NOTHING (clean output, as before).
+    let clean_json = r#"{
+        "vehicles": [
+            {"id": 1, "start": [10.0, 60.0], "end": [10.0, 60.0], "capacity": [10]}
+        ],
+        "jobs": [
+            {"id": 10, "location": [10.05, 60.0], "delivery": [1]},
+            {"id": 20, "location": [10.10, 60.0], "delivery": [1]}
+        ]
+    }"#;
+    let mut p2 = parse_input(clean_json).unwrap();
+    eval_cache_invalidate();
+    let m2 = build_matrix(&mut p2, Some(&HaversineMatrix::default())).unwrap();
+    let out2 = to_output(&p2, &solve_with_matrix(&p2, &m2, &SolverConfig::default()), Some(&m2));
+    assert!(out2.late.is_empty(), "clean plan must have no late entries");
+    assert_eq!(out2.summary.time_warp, 0);
+    assert_eq!(out2.summary.late_jobs, 0);
 }
 
 #[test]

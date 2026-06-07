@@ -202,6 +202,23 @@ pub struct Step {
     pub setup: Time,
     pub load: Vec<i64>,
     pub distance: i64,
+    /// Soft time-window violation at this stop: how late (seconds) service
+    /// started past the job's last time-window end. 0 = on time. Non-zero only
+    /// when soft constraints let the search accept a late stop (so callers can
+    /// surface "served, but N s late" instead of just dropping the job).
+    #[serde(default, skip_serializing_if = "is_zero_time")]
+    pub lateness: Time,
+}
+
+/// serde helper: omit zero-valued lateness/time-warp so a clean (on-time)
+/// solution serialises exactly as before.
+pub fn is_zero_time(t: &Time) -> bool {
+    *t == 0
+}
+
+/// serde helper: omit zero counts.
+pub fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 // Per-thread scratch space reused by `evaluate_route` so the hot path

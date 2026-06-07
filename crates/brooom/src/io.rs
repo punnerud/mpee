@@ -316,6 +316,12 @@ pub struct VroomOutput {
     pub summary: SummaryOut,
     pub unassigned: Vec<UnassignedOut>,
     pub routes: Vec<RouteOut>,
+    /// Jobs served but past their time window (soft-constraint degradation).
+    /// Empty on a clean on-time plan. Lets a dispatcher see exactly who is late
+    /// and by how much instead of getting a bare "infeasible" — or a plan that
+    /// silently hides the violation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub late: Vec<LateOut>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +334,31 @@ pub struct SummaryOut {
     pub duration: Time,
     pub waiting_time: Time,
     pub distance: i64,
+    /// Total soft time-window violation across all stops (seconds). 0 when the
+    /// plan is fully on-time; positive when soft constraints accepted lateness.
+    #[serde(default, skip_serializing_if = "crate::solution::is_zero_time")]
+    pub time_warp: Time,
+    /// Number of stops served after their window closed.
+    #[serde(default, skip_serializing_if = "crate::solution::is_zero_usize")]
+    pub late_jobs: usize,
+    /// Worst single lateness (seconds).
+    #[serde(default, skip_serializing_if = "crate::solution::is_zero_time")]
+    pub max_lateness: Time,
+}
+
+/// One late stop: which job, when it was reached, when it was due, and by how
+/// much it overran.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LateOut {
+    pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_index: Option<usize>,
+    /// Time service actually started.
+    pub arrival: Time,
+    /// Latest time-window end the job had.
+    pub due: Time,
+    /// `arrival - due` (seconds late).
+    pub lateness: Time,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +381,9 @@ pub struct RouteOut {
     pub duration: Time,
     pub waiting_time: Time,
     pub distance: i64,
+    /// Total soft lateness on this route (seconds); 0 when on-time.
+    #[serde(default, skip_serializing_if = "crate::solution::is_zero_time")]
+    pub time_warp: Time,
     pub steps: Vec<Step>,
 }
 
@@ -368,6 +402,25 @@ pub fn to_output(
         routes_out.push(route_steps(problem, r, matrix));
     }
 
+    // Collect soft time-window violations across all routes so a caller can act
+    // on "served, but late" instead of a hidden penalty.
+    let mut late: Vec<LateOut> = Vec::new();
+    for r in &routes_out {
+        for s in &r.steps {
+            if s.lateness > 0 {
+                late.push(LateOut {
+                    id: s.job_id.unwrap_or(0),
+                    location_index: s.location_index,
+                    arrival: s.arrival,
+                    due: s.arrival - s.lateness,
+                    lateness: s.lateness,
+                });
+            }
+        }
+    }
+    let time_warp: Time = late.iter().map(|l| l.lateness).sum();
+    let max_lateness: Time = late.iter().map(|l| l.lateness).max().unwrap_or(0);
+
     let summary = SummaryOut {
         cost: sol.summary.cost,
         routes: sol.summary.routes,
@@ -377,6 +430,9 @@ pub fn to_output(
         duration: sol.summary.travel_time,
         waiting_time: sol.summary.waiting_time,
         distance: sol.summary.distance,
+        time_warp,
+        late_jobs: late.len(),
+        max_lateness,
     };
 
     let unassigned = sol.unassigned.iter().map(|t| {
@@ -400,6 +456,7 @@ pub fn to_output(
         summary,
         unassigned,
         routes: routes_out,
+        late,
     }
 }
 
@@ -436,6 +493,7 @@ fn route_steps(
     let mut total_setup: Time = 0;
     let mut total_wait: Time = 0;
     let mut total_dist: i64 = 0;
+    let mut total_lateness: Time = 0;
     // Mirror the break scheduling in `evaluate_route` so emitted `break` steps
     // line up with the timings the solver actually used.
     let breaks = &veh.breaks;
@@ -451,6 +509,7 @@ fn route_steps(
         setup: 0,
         load: load.clone(),
         distance: 0,
+        lateness: 0,
     });
 
     // Prefer an explicit matrix (passed in from solve_full); fall back to one
@@ -492,6 +551,7 @@ fn route_steps(
                 setup: 0,
                 load: load.clone(),
                 distance: total_dist,
+                lateness: 0,
             });
             prev = start_idx;
             continue;
@@ -564,6 +624,15 @@ fn route_steps(
             TaskRef::Reload => StepKind::Reload,
         };
 
+        // Soft lateness: service started at `t`; if that is past the job's
+        // latest window end, the soft search accepted a late stop. Surface it.
+        let due = j.time_windows.iter().map(|w| w.end).max();
+        let lateness = match due {
+            Some(e) if t > e => t - e,
+            _ => 0,
+        };
+        total_lateness += lateness;
+
         steps.push(Step {
             kind,
             job_id: Some(j.id),
@@ -574,6 +643,7 @@ fn route_steps(
             setup,
             load: load.clone(),
             distance: total_dist,
+            lateness,
         });
 
         t += j.service;
@@ -597,6 +667,7 @@ fn route_steps(
                 setup: 0,
                 load: load.clone(),
                 distance: total_dist,
+                lateness: 0,
             });
             t += br.service;
             break_idx += 1;
@@ -637,6 +708,7 @@ fn route_steps(
             setup: 0,
             load: load.clone(),
             distance: total_dist,
+            lateness: 0,
         });
         t += br.service;
         break_idx += 1;
@@ -652,6 +724,7 @@ fn route_steps(
         setup: 0,
         load: load.clone(),
         distance: total_dist,
+        lateness: 0,
     });
 
     RouteOut {
@@ -662,6 +735,7 @@ fn route_steps(
         duration: total_travel,
         waiting_time: total_wait,
         distance: total_dist,
+        time_warp: total_lateness,
         steps,
     }
 }

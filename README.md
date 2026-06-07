@@ -94,6 +94,14 @@ it**, which is where the speed and memory wins come from.
   internally** (cluster-first for large N) and re-polishes across cluster
   boundaries, so you submit the entire problem and get one optimized plan — no
   pre-clustering, no per-zone glue.
+- **Graceful degradation, not a dead "infeasible".** When no plan can hit every
+  time window, a hard solver (e.g. PyVRP) just returns *infeasible*. With soft
+  time windows (auto-on when the problem has windows) MPEE still serves everyone
+  and reports **exactly which stops are late and by how much** — `summary.time_warp`,
+  `late_jobs`, `max_lateness`, and a per-job `late[]` list (`id`, `arrival`,
+  `due`, `lateness`). A dispatcher gets an actionable best-effort plan with the
+  violations made visible, not a dead end. Fully on-time plans report nothing
+  extra (byte-identical to before).
 
 ## Constraints
 
