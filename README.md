@@ -471,6 +471,7 @@ See [`crates/mpee-py/`](crates/mpee-py/) for the full Python API, and
 |-----------------------------|------------------------------------------|--------------------|
 | Road-network router (CH)    | [`crates/dijeng/`](crates/dijeng/)   | OSRM               |
 | VRP solver (GPU + CPU LS)   | [`crates/brooom/`](crates/brooom/)       | VROOM              |
+| Lossless matrix codec       | [`crates/matcodec/`](crates/matcodec/)   | (new)              |
 | Shared CLI / orchestration  | [`crates/mpee-cli/`](crates/mpee-cli/)     | (new)              |
 | Live HTTP + map UI          | [`crates/mpee-viz/`](crates/mpee-viz/) | (new)              |
 
@@ -502,6 +503,43 @@ Both dijeng and brooom were recently optimised to compute distances
 Together they make it possible to solve a 50 000-customer VRP on a
 laptop without ever materialising a full distance matrix.
 
+### Matrix compression — bring your own matrix, compress it losslessly
+
+When you *do* have a matrix computed elsewhere (for a whole country, or the
+rest of the world), [`crates/matcodec/`](crates/matcodec/) stores it
+**losslessly** and far smaller than a general compressor, by exploiting the
+structure a road network leaves in the numbers — between two regions connected
+by few roads, the cross-block is min-plus low rank. It picks **best-of two
+models** per matrix (1 header byte, always an exact roundtrip):
+
+- **cluster** — k-medoids regions, off-diagonal blocks as a rank-1 base + exact
+  residual. Wins on block-structured road nets.
+- **bridge** — farthest-point landmarks, `base(i,j) = minₗ d(i,l)+d(l,j)` +
+  exact residual. Wins on smooth metrics.
+
+Measured (exact roundtrip, vs raw int32; plain `gzip` ≈ 2×):
+
+| matrix | matcodec | model |
+|--------|----------|-------|
+| real OSRM road, 8 cities × 40 (320²) | **6.99×** | cluster |
+| Oslo haversine, 1001² | **4.41×** | bridge |
+| structureless uniform points | ~1.8× | (graceful floor) |
+
+It also **streams** (`compress_stream` + the `MTZS` container: peak memory
+`L×n + 1 row`, fed by any `RowSource` — e.g. dijeng's per-row CH queries, so a
+matrix larger than RAM is compressed without ever materialising n²),
+**random-accesses** the compressed blob in RAM (`MtzReader`, LRU row cache —
+better than swapping a raw matrix), and **validates** every row as it passes
+(negative / unreachable / non-zero-diagonal cells, plus a *free* triangle-
+inequality check — in the bridge model a positive residual *is* a violation —
+that auto-gates the metric-only shortcuts). CLI:
+
+```bash
+matcodec compress   matrix.json out.mtz [--stream] [--landmarks L]
+matcodec decompress out.mtz back.json
+matcodec validate   matrix.json          # warns on anomalies; exits non-zero on hard errors
+```
+
 ---
 
 ## Layout
@@ -523,6 +561,9 @@ mpee/
     │   ├── README.md               # Routing details + benchmarks
     │   ├── integration.txt         # API contract with the solver
     │   └── src/
+    ├── matcodec/                   # Lossless distance-matrix codec
+    │   ├── Cargo.toml              # cluster + bridge best-of; stream + random-access
+    │   └── src/                    # compress / decompress / validate
     ├── mpee-cli/                    # Rust CLI binary `mpee` (VRP driver)
     │   ├── Cargo.toml              # Path-deps on both engines
     │   └── src/main.rs             # Verbs: gen / route / download / build / solve / pipeline

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/brooom",
     "crates/dijeng",
+    "crates/matcodec",
     "crates/mpee-cli",
     "crates/mpee-viz",
     "crates/mpee-py",

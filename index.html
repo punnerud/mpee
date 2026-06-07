@@ -433,6 +433,36 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
         you submit the entire problem and get one optimized plan.</li>
     </ul>
 
+    <h3>Bring your own matrix — compress it losslessly <span class="muted" style="font-weight:400">· new <code>matcodec</code> crate</span></h3>
+    <p>
+      Got a matrix computed elsewhere — a whole country, the rest of the world?
+      <strong>matcodec</strong> stores it <strong>losslessly</strong> and far
+      smaller than a general compressor, by exploiting the structure a road
+      network leaves in the numbers: where two regions are joined by few roads,
+      the cross-block is min-plus low rank. It auto-picks the better of two exact
+      models per matrix (1 header byte, always a byte-identical roundtrip) —
+      <em>cluster</em> (regional blocks) or <em>bridge</em> (farthest-point
+      landmarks, <code>base(i,j)=minₗ d(i,l)+d(l,j)</code>):
+    </p>
+    <table>
+      <thead><tr><th>Matrix</th><th>matcodec (lossless)</th><th>vs raw · vs gzip</th></tr></thead>
+      <tbody>
+        <tr><td>Real OSRM road, 8 cities (320²)</td><td><b>6.99×</b> (cluster)</td><td>plain gzip ≈ 2.1×</td></tr>
+        <tr><td>Oslo haversine (1001²)</td><td><b>4.41×</b> (bridge)</td><td>plain gzip ≈ 2.4×</td></tr>
+        <tr><td>structureless points</td><td>~1.8×</td><td>graceful floor</td></tr>
+      </tbody>
+    </table>
+    <p>
+      It also <strong>streams</strong> (peak memory <code>L×n + 1 row</code>, fed
+      by dijeng's per-row CH queries — so a matrix bigger than RAM is compressed
+      without ever materialising n²), gives <strong>random access</strong> to the
+      compressed blob in RAM (better than swapping a raw matrix), and
+      <strong>validates each row as it streams</strong> — negative / unreachable
+      cells, and a <em>free</em> triangle-inequality check (a positive bridge
+      residual <em>is</em> a violation) that auto-disables the metric-only
+      shortcuts when your matrix isn't a clean metric.
+    </p>
+
     <h3>Real maps, not just synthetic <span class="muted" style="font-weight:400">· real OSM road distances, seed-reproducible</span></h3>
     <p>
       The numbers above use the classic synthetic Solomon set. We also benchmark on

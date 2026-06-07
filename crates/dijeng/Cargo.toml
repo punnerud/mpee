@@ -23,6 +23,16 @@ default = ["native"]
 # caches, the bench binaries, and the parallel matrix. The wasm build omits it.
 native = ["dep:osmpbf", "dep:rayon", "dep:memmap2", "dep:flate2", "dep:lru", "dep:libc", "dep:petgraph", "dep:ureq"]
 
+# Used only by the stream_compress example: feed CH rows into matcodec without
+# materialising the full n² matrix. Kept out of the library's own deps.
+[dev-dependencies]
+matcodec = { path = "../matcodec" }
+
+[[example]]
+name = "stream_compress"
+path = "examples/stream_compress.rs"
+required-features = ["native"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -1,0 +1,22 @@
+[package]
+name = "matcodec"
+version = "0.1.0"
+edition = "2021"
+description = "Lossless structural codec for travel-time/distance matrices: cluster + per-block min-plus rank-1 base + exact residual. Compresses N×N matrices with road-bottleneck structure; exact roundtrip (decompress == original)."
+
+[lib]
+name = "matcodec"
+path = "src/lib.rs"
+
+[[bin]]
+name = "matcodec"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = "1"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
