@@ -62,6 +62,25 @@ it**, which is where the speed and memory wins come from.
 > country ≈ GBs). There's no global tiling, by design — within your area, one
 > cache is simpler and faster.
 
+## Where MPEE fits
+
+- **Matches state-of-the-art quality.** On small-N CVRPTW (Solomon R2/RC2),
+  same-harness 10 s, MPEE now **ties PyVRP** (HGS-class, the SOTA open reference)
+  at **mean +0.06 %** and beats it on several instances. Of the open solvers we
+  benchmarked, MPEE is the one that reaches PyVRP — VROOM and OR-Tools trail it
+  (OR-Tools sometimes can't even find a feasible plan in budget).
+- **Wins on end-to-end time and scale.** One process does routing *and*
+  optimization, streaming the matrix instead of materialising ~10 GB — so the
+  *total* wall-clock (matrix + solve) beats the OSRM+VROOM split, and it keeps
+  going where they OOM (50 k on a laptop). At N ≥ 1,000 it beats the field on
+  solution quality too.
+- **No manual zoning — feed it the whole fleet.** The usual way to make large
+  VRP tractable is to hand-carve the area into territories/groupings and solve
+  each separately, then stitch. MPEE doesn't ask for that: it **auto-decomposes
+  internally** (cluster-first for large N) and re-polishes across cluster
+  boundaries, so you submit the entire problem and get one optimized plan — no
+  pre-clustering, no per-zone glue.
+
 ## Constraints
 
 "Vroom-compatible" undersells what the solver actually enforces. brooom ships

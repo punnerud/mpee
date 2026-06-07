@@ -415,6 +415,24 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       an integrated single-engine stack, speed-to-good-answer, and scale.
     </p>
 
+    <h3>Where MPEE fits</h3>
+    <ul style="line-height:1.55">
+      <li><b>Matches SOTA quality.</b> Same-harness 10&nbsp;s on Solomon R2/RC2,
+        MPEE ties PyVRP (HGS-class SOTA) at <b>mean +0.06%</b> and beats it on
+        several. Of the open solvers we benchmarked it's the one that reaches
+        PyVRP — VROOM and OR-Tools trail it.</li>
+      <li><b>Wins on total time &amp; scale.</b> One process does routing
+        <em>and</em> optimization, streaming the matrix instead of materialising
+        ~10&nbsp;GB — so total wall-clock (matrix + solve) beats the OSRM+VROOM
+        split, and it keeps solving where they run out of RAM (50k on a laptop).
+        At N&nbsp;≥&nbsp;1,000 it also wins on quality.</li>
+      <li><b>No manual zoning — submit the whole fleet.</b> Large VRP is usually
+        made tractable by hand-carving the area into territories and solving each
+        separately. MPEE doesn't ask for that: it <b>auto-decomposes internally</b>
+        (cluster-first for large N) and re-polishes across cluster boundaries, so
+        you submit the entire problem and get one optimized plan.</li>
+    </ul>
+
     <h3>Real maps, not just synthetic <span class="muted" style="font-weight:400">· real OSM road distances, seed-reproducible</span></h3>
     <p>
       The numbers above use the classic synthetic Solomon set. We also benchmark on
