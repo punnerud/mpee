@@ -106,6 +106,40 @@ fn step_loc(problem: &Problem, t: TaskRef) -> Option<usize> {
     t.description(problem).location.index
 }
 
+// Thread-local epoch-stamped membership buffer for granular neighbours. Replaces
+// a per-call `HashSet` (alloc + K hashes) in the hot LS operators with O(1)
+// array writes and zero allocation after warmup. Each operator stamps the
+// neighbours of its anchor once, then tests membership in its candidate loop.
+thread_local! {
+    static NMARK: std::cell::RefCell<(u32, Vec<u32>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+/// Stamp the granular neighbours of `loc` into the thread-local buffer.
+fn nmark_set(g: &Granular, loc: usize, n_locs: usize) {
+    NMARK.with(|cell| {
+        let mut b = cell.borrow_mut();
+        if b.1.len() < n_locs {
+            b.1.resize(n_locs, 0);
+        }
+        b.0 = b.0.wrapping_add(1);
+        if b.0 == 0 {
+            for m in b.1.iter_mut() { *m = 0; }
+            b.0 = 1;
+        }
+        let epoch = b.0;
+        for nb in g.neighbors(loc) {
+            if nb < b.1.len() { b.1[nb] = epoch; }
+        }
+    });
+}
+/// Test membership against the most recent `nmark_set`.
+#[inline]
+fn nmark_has(l: usize) -> bool {
+    NMARK.with(|cell| {
+        let b = cell.borrow();
+        b.1.get(l).copied() == Some(b.0)
+    })
+}
+
 /// The depot index a vehicle starts/ends at (for arc endpoints).
 #[inline]
 fn depot_start(v: &crate::problem::Vehicle) -> Option<usize> {
@@ -549,7 +583,7 @@ fn try_relocate_task_fast(
         let delta_r1 = cost_r1_after - route1.metrics.cost;
         r1_after_cache[seg_len] = Some((route1_after.clone(), m1_after, delta_r1));
 
-        let seg_neighbors: std::collections::HashSet<usize> = granular.neighbors(seg0).collect();
+        nmark_set(granular, seg0, matrix.n);
 
         for r2 in 0..sol.routes.len() {
             let route2 = &sol.routes[r2];
@@ -569,9 +603,7 @@ fn try_relocate_task_fast(
             for j in 0..=nb {
                 let prev_loc = if j == 0 { None } else { step_loc(problem, base[j - 1]) };
                 let next_loc = if j == nb { None } else { step_loc(problem, base[j]) };
-                if prev_loc.map_or(false, |l| seg_neighbors.contains(&l))
-                    || next_loc.map_or(false, |l| seg_neighbors.contains(&l))
-                {
+                if prev_loc.map_or(false, nmark_has) || next_loc.map_or(false, nmark_has) {
                     positions.push(j);
                 }
             }
@@ -776,15 +808,12 @@ fn try_exchange_with(
     let n_routes = sol.routes.len();
     let a = sol.routes[r1].steps[i];
     let a_loc = a.description(problem).location.index;
-    let neighbor_set: Option<HashSet<usize>> = match (granular, a_loc) {
-        (Some(g), Some(loc)) => Some(g.neighbors(loc).collect()),
-        _ => None,
-    };
 
     // Fast path: O(1) edge-delta per swap, lazy feasibility confirm best-first.
     let fast = granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem);
     if fast {
         let Some(aloc) = a_loc else { return };
+        nmark_set(granular.unwrap(), aloc, matrix.n);
         let route1 = &sol.routes[r1];
         let veh1 = &problem.vehicles[route1.vehicle_idx];
         let c1 = cost_coef(veh1);
@@ -806,9 +835,7 @@ fn try_exchange_with(
             for j in 0..n2 {
                 let b = route2.steps[j];
                 let Some(bloc) = step_loc(problem, b) else { continue };
-                if let Some(set) = &neighbor_set {
-                    if !set.contains(&bloc) { continue; }
-                }
+                if !nmark_has(bloc) { continue; }
                 if !veh1.has_skills(b.skills(problem)) { continue; }
                 let b_serv = b.description(problem).service as f64 * 1e-6;
                 // r1: a→b at i.
@@ -853,6 +880,11 @@ fn try_exchange_with(
         return;
     }
 
+    // Slow path (non-eligible / no granular): build the membership set once.
+    let neighbor_set: Option<HashSet<usize>> = match (granular, a_loc) {
+        (Some(g), Some(loc)) => Some(g.neighbors(loc).collect()),
+        _ => None,
+    };
     for r2 in 0..n_routes {
         if r2 == r1 { continue; }
         let route1 = &sol.routes[r1];
@@ -910,9 +942,9 @@ fn try_two_opt_star(
     let veh1 = &problem.vehicles[route1.vehicle_idx];
     let n1 = route1.steps.len();
     let anchor = route1.steps[i].description(problem).location.index;
-    let neighbor_set: Option<HashSet<usize>> = match (granular, anchor) {
-        (Some(g), Some(loc)) => Some(g.neighbors(loc).collect()),
-        _ => None,
+    let has_gran = match (granular, anchor) {
+        (Some(g), Some(loc)) => { nmark_set(g, loc, matrix.n); true }
+        _ => false,
     };
 
     for r2 in 0..n_routes {
@@ -927,11 +959,11 @@ fn try_two_opt_star(
         for j in 0..=n2 {
             // Granular: skip if neither (r1[i], r2[j]) edge nor the new
             // (r2[j-1], r1[i+1]) edge involves a near neighbor.
-            if let Some(set) = &neighbor_set {
+            if has_gran {
                 let r2_j_loc = if j < n2 {
                     route2.steps[j].description(problem).location.index
                 } else { None };
-                let near = r2_j_loc.map_or(false, |l| set.contains(&l));
+                let near = r2_j_loc.map_or(false, nmark_has);
                 if !near { continue; }
             }
 
@@ -999,9 +1031,9 @@ fn try_swap_star(
     let t1 = route1.steps[i];
     let t1_loc = t1.description(problem).location.index;
 
-    let neighbor_set: Option<HashSet<usize>> = match (granular, t1_loc) {
-        (Some(g), Some(loc)) => Some(g.neighbors(loc).collect()),
-        _ => None,
+    let has_gran = match (granular, t1_loc) {
+        (Some(g), Some(loc)) => { nmark_set(g, loc, matrix.n); true }
+        _ => false,
     };
 
     let mut r1_minus: Vec<TaskRef> = Vec::with_capacity(n1.saturating_sub(1));
@@ -1027,9 +1059,9 @@ fn try_swap_star(
             let t2 = route2.steps[j];
 
             // Granular filter: skip pairs where t2 is not near t1.
-            if let Some(set) = &neighbor_set {
+            if has_gran {
                 let l = t2.description(problem).location.index;
-                if l.map_or(true, |l| !set.contains(&l)) { continue; }
+                if l.map_or(true, |l| !nmark_has(l)) { continue; }
             }
             if !veh1.has_skills(t2.skills(problem)) { continue; }
 
@@ -1155,9 +1187,9 @@ fn try_cross_exchange_with(
     let veh1 = &problem.vehicles[route1.vehicle_idx];
 
     let anchor = route1.steps[i].description(problem).location.index;
-    let neighbor_set: Option<HashSet<usize>> = match (granular, anchor) {
-        (Some(g), Some(loc)) => Some(g.neighbors(loc).collect()),
-        _ => None,
+    let has_gran = match (granular, anchor) {
+        (Some(g), Some(loc)) => { nmark_set(g, loc, matrix.n); true }
+        _ => false,
     };
 
     let seg1: Vec<TaskRef> = route1.steps[i..i + 2].to_vec();
@@ -1175,9 +1207,9 @@ fn try_cross_exchange_with(
             let seg2: &[TaskRef] = &route2.steps[j..j + 2];
 
             // Granularity: at least one of seg2's locations should be near the anchor.
-            if let Some(set) = &neighbor_set {
+            if has_gran {
                 let any_near = seg2.iter().any(|t| {
-                    t.description(problem).location.index.map_or(false, |l| set.contains(&l))
+                    t.description(problem).location.index.map_or(false, nmark_has)
                 });
                 if !any_near { continue; }
             }
