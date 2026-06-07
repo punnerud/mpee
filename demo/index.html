@@ -45,11 +45,14 @@
 
   /* ---- sheet (bottom on mobile, side card on desktop) ---- */
   #sheet{
-    position:absolute;z-index:15;background:var(--panel);border:1px solid var(--line);
+    /* position:fixed (not absolute) so it anchors to the VISUAL viewport — on
+       mobile that keeps the whole sheet, incl. the mode chips at its top, above
+       the browser URL bar instead of behind it. dvh tracks the dynamic bar. */
+    position:fixed;z-index:15;background:var(--panel);border:1px solid var(--line);
     display:flex;flex-direction:column;transition:transform .26s ease;overflow:hidden;
-    left:0;right:0;bottom:0;border-radius:18px 18px 0 0;max-height:62vh;
-    box-shadow:0 -8px 30px rgba(0,0,0,.45);transform:translateY(105%);
-    padding-bottom:env(safe-area-inset-bottom);
+    left:0;right:0;bottom:0;border-radius:18px 18px 0 0;max-height:72dvh;
+    box-shadow:0 -8px 30px rgba(0,0,0,.45);transform:translateY(110%);
+    padding-bottom:calc(env(safe-area-inset-bottom) + 8px);
   }
   #sheet.open{transform:translateY(0)}
   .grab{align-self:center;width:38px;height:4px;border-radius:3px;background:#3a4954;margin:8px 0 4px}
@@ -243,7 +246,7 @@
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
 import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
-const BUILD = '3c0';
+const BUILD = '3d0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -304,7 +307,7 @@ async function boot() {
       fetchGunzip('./data/sf.pp.gz', x=>{p.pp=x;paint();}),
       fetchGunzip('./data/sf.ch.gz', x=>{p.ch=x;paint();}),
       fetchGunzip('./data/sf.names.gz', x=>{p.names=x;paint();}),
-      fetchGunzip('./data/sf.addr.gz', x=>{p.addr=x;paint();}).catch(()=>null),
+      fetchGunzip(`./data/sf.addr.gz?v=${BUILD}`, x=>{p.addr=x;paint();}).catch(()=>null),
     ]);
     $('load-msg').textContent = 'Building the in-browser engine…';
     engine = new Engine(pp, ch, names);
