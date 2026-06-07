@@ -31,9 +31,10 @@ export class Engine {
         }
     }
     /**
-     * Forward-geocode: street name → JSON `{name,lat,lon}`, or `null`.
-     * `near_lat`/`near_lon` finite → pick the match nearest that point
-     * (multi-city disambiguation); pass NaN to ignore.
+     * Forward-geocode: street (optionally "Street 42") → JSON. Address-level
+     * when the query has a number and an address sidecar is loaded (adds
+     * `housenumber`/`city`/`postcode`/`approximate`), else `{name,lat,lon}`.
+     * `near_*` finite → multi-city disambiguation; pass NaN to ignore.
      * @param {string} query
      * @param {number} near_lat
      * @param {number} near_lon
@@ -52,6 +53,14 @@ export class Engine {
         } finally {
             wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
         }
+    }
+    /**
+     * Whether a house-number address sidecar is loaded.
+     * @returns {boolean}
+     */
+    has_addresses() {
+        const ret = wasm.engine_has_addresses(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * Whether forward/reverse geocoding is available (a `.names` sidecar loaded).
@@ -85,6 +94,17 @@ export class Engine {
         } finally {
             wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
+    }
+    /**
+     * Attach the optional house-number address sidecar (`.addr` bytes fetched by
+     * JS). Call after construction; enables address-level forward/reverse. A
+     * no-op for empty input — kept separate from the constructor for back-compat.
+     * @param {Uint8Array} addr
+     */
+    load_addresses(addr) {
+        const ptr0 = passArray8ToWasm0(addr, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.engine_load_addresses(this.__wbg_ptr, ptr0, len0);
     }
     /**
      * Build the engine from the three cache files' bytes. `names` may be empty
@@ -176,8 +196,8 @@ export class Engine {
         return ret;
     }
     /**
-     * Reverse-geocode: nearest street name to a point. Returns the name, or an
-     * empty string if none / no sidecar.
+     * Reverse-geocode: nearest address ("Street 42, 0123 City") when an address
+     * sidecar is loaded, else the nearest street name; empty string if none.
      * @param {number} lat
      * @param {number} lon
      * @returns {string}
@@ -648,12 +668,12 @@ function __wbg_get_imports() {
             arg0.unmap();
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 135, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 140, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__he21e22a18e7c17bf);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 42, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 43, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h5751a1d6b4564570);
             return ret;
         },

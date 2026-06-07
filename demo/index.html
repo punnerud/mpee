@@ -229,7 +229,7 @@
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
 import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
-const BUILD = '2d0';
+const BUILD = '3a0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -282,16 +282,19 @@ async function boot() {
   try {
     if (typeof DecompressionStream === 'undefined') throw new Error('This browser lacks DecompressionStream — try a recent Chrome, Edge, Safari 16.4+ or Firefox 113+.');
     await init(`./engine/mpee_wasm_bg.wasm?v=${BUILD}`);
-    const w = { pp:0.32, ch:0.66, names:0.02 }, p = { pp:0, ch:0, names:0 };
-    const paint = () => $('load-bar').style.width = ((p.pp*w.pp + p.ch*w.ch + p.names*w.names)*100).toFixed(0)+'%';
-    $('load-msg').textContent = 'Downloading the San Francisco routing cache (~30 MB, one-time)…';
-    const [pp, ch, names] = await Promise.all([
+    const w = { pp:0.30, ch:0.62, names:0.02, addr:0.06 }, p = { pp:0, ch:0, names:0, addr:0 };
+    const paint = () => $('load-bar').style.width = ((p.pp*w.pp + p.ch*w.ch + p.names*w.names + p.addr*w.addr)*100).toFixed(0)+'%';
+    $('load-msg').textContent = 'Downloading the San Francisco routing + address cache (~32 MB, one-time)…';
+    // `.addr` (house numbers) is optional — if it 404s the demo stays street-only.
+    const [pp, ch, names, addr] = await Promise.all([
       fetchGunzip('./data/sf.pp.gz', x=>{p.pp=x;paint();}),
       fetchGunzip('./data/sf.ch.gz', x=>{p.ch=x;paint();}),
       fetchGunzip('./data/sf.names.gz', x=>{p.names=x;paint();}),
+      fetchGunzip('./data/sf.addr.gz', x=>{p.addr=x;paint();}).catch(()=>null),
     ]);
     $('load-msg').textContent = 'Building the in-browser engine…';
     engine = new Engine(pp, ch, names);
+    if (addr) engine.load_addresses(addr);   // enable house-number geocoding
     setupMap(); setupUI();
     $('load').style.display = 'none';
     $('searchbar').hidden = false;
@@ -341,7 +344,8 @@ function setupMap() {
     const lat = e.lngLat.lat, lon = e.lngLat.lng;
     if (!inBounds(lat, lon)) { outOfAreaWarning(); return; }
     if (mode === 'trip') {
-      const name = engine.has_names() ? (engine.reverse(lat, lon) || `${lat.toFixed(5)}, ${lon.toFixed(5)}`) : `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+      const canRev = engine.has_names() || engine.has_addresses();
+      const name = canRev ? (engine.reverse(lat, lon) || `${lat.toFixed(5)}, ${lon.toFixed(5)}`) : `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
       addStop(lat, lon, name);
     } else if (mode === 'cross') {
       crossClick(lat, lon);
@@ -575,7 +579,7 @@ function importCSV(text) {
     const parts = line.split(',').map(s=>s.trim());
     const lat = parseFloat(parts[0]), lon = parseFloat(parts[1]);
     if (isFinite(lat) && isFinite(lon)) {
-      const name = parts.slice(2).join(',') || (engine.has_names() ? (engine.reverse(lat,lon)||'') : '') || `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+      const name = parts.slice(2).join(',') || ((engine.has_names()||engine.has_addresses()) ? (engine.reverse(lat,lon)||'') : '') || `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
       stops.push({ lat, lon, name }); added++;
     } else {
       // treat the whole line as a street name → geocode
