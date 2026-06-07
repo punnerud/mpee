@@ -246,7 +246,7 @@
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
 import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
-const BUILD = '3d0';
+const BUILD = '3e0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
@@ -352,11 +352,13 @@ function setupMap() {
   map.on('movestart', hideHint);   // pan/zoom → remove the nudge
   map.on('click', (e) => {
     hideHint();
-    // On mobile, a tap on the map (outside the bottom sheet) dismisses an open
-    // sheet — this tap only closes it, it doesn't also drop a stop.
+    // On mobile, a tap on the map dismisses an open sheet. In TRIP mode that tap
+    // only closes the sheet (so you don't drop a stop by accident); in CROSS
+    // mode the same tap also registers the street, so picking "Street crossing"
+    // from the menu and tapping the map works on the first tap.
     if (isMobile() && $('sheet').classList.contains('open')) {
       $('sheet').classList.remove('open');
-      return;
+      if (mode === 'trip') return;
     }
     const lat = e.lngLat.lat, lon = e.lngLat.lng;
     if (!inBounds(lat, lon)) { outOfAreaWarning(); return; }
