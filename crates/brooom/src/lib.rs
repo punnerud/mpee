@@ -11,6 +11,8 @@ pub mod pyspell;
 pub mod error;
 pub mod problem;
 pub mod matrix;
+#[cfg(feature = "google")]
+pub mod matrix_google;
 pub mod broker;
 pub mod solution;
 pub mod eval;

@@ -12,7 +12,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "brooom"
 path = "src/main.rs"
-required-features = ["cli", "osrm"]
+required-features = ["cli", "osrm", "google"]
 
 # Feature flags
 #
@@ -33,10 +33,12 @@ required-features = ["cli", "osrm"]
 # `parallel` (rayon) and `gpu` (wgpu) are on by default for native; the wasm
 # build omits both (serial CPU solver, no wgpu) via --no-default-features.
 [features]
-default  = ["cli", "osrm", "parallel", "gpu"]
-full     = ["cli", "osrm", "neural", "parallel", "gpu"]
+default  = ["cli", "osrm", "google", "parallel", "gpu"]
+full     = ["cli", "osrm", "google", "neural", "parallel", "gpu"]
 cli      = ["clap", "tracing-subscriber/env-filter", "gpu", "pyspell"]
 osrm     = ["ureq"]
+# Google Distance Matrix provider for the cost-aware broker (per-element pricing).
+google   = ["ureq"]
 neural   = ["ort", "ndarray"]
 parallel = ["dep:rayon"]
 gpu      = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]

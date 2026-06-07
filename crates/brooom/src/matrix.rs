@@ -110,8 +110,114 @@ pub trait CellSource: MatrixSource {
 }
 
 impl CellSource for HaversineMatrix {}
+
+// Let a boxed provider be used generically (e.g. wrapped by the broker).
+impl MatrixSource for Box<dyn CellSource> {
+    fn build(&self, coords: &[[f64; 2]]) -> Result<Matrix> {
+        (**self).build(coords)
+    }
+}
+impl CellSource for Box<dyn CellSource> {
+    fn fetch_cells(&self, coords: &[[f64; 2]], req: &CellRequest) -> Result<CellResponse> {
+        (**self).fetch_cells(coords, req)
+    }
+}
+
+/// Generic per-origin batching for rectangular table APIs (OSRM, Google, any
+/// metered provider). Groups a `CellRequest` by origin and asks
+/// `fetch_row(origin, &dests)` for each, so the provider pays for ONLY the
+/// requested cells (the broker's skeleton) instead of a full N×N rectangle.
+/// This is the seam that makes the broker provider-agnostic: a new provider just
+/// supplies a per-origin row fetcher.
+pub fn per_origin_fetch<F>(req: &CellRequest, want_dist: bool, mut fetch_row: F) -> Result<CellResponse>
+where
+    F: FnMut(u32, &[u32]) -> Result<(Vec<i32>, Option<Vec<i32>>)>,
+{
+    use std::collections::HashMap;
+    let mut by_origin: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
+    for (idx, &(i, j)) in req.pairs.iter().enumerate() {
+        by_origin.entry(i).or_default().push((j, idx));
+    }
+    let mut dur = vec![0i32; req.pairs.len()];
+    let mut dist = if want_dist { Some(vec![0i32; req.pairs.len()]) } else { None };
+    for (origin, dests) in by_origin {
+        let dlist: Vec<u32> = dests.iter().map(|&(j, _)| j).collect();
+        let (rdur, rdist) = fetch_row(origin, &dlist)?;
+        for (k, &(_, pi)) in dests.iter().enumerate() {
+            dur[pi] = rdur[k];
+            if let (Some(out), Some(rd)) = (dist.as_mut(), rdist.as_ref()) {
+                out[pi] = rd[k];
+            }
+        }
+    }
+    Ok(CellResponse { dur, dist })
+}
+
 #[cfg(feature = "osrm")]
-impl CellSource for OsrmClient {}
+impl CellSource for OsrmClient {
+    /// Per-origin OSRM `/table` (sources=[origin], destinations=[…]) so only the
+    /// requested cells are fetched, not a full N×N. Destinations are tiled to
+    /// keep the URL bounded.
+    fn fetch_cells(&self, coords: &[[f64; 2]], req: &CellRequest) -> Result<CellResponse> {
+        per_origin_fetch(req, true, |origin, dests| self.table_row(coords, origin, dests))
+    }
+}
+
+#[cfg(feature = "osrm")]
+impl OsrmClient {
+    /// One OSRM `/table` row: durations+distances from `origin` to `dests`.
+    fn table_row(
+        &self,
+        coords: &[[f64; 2]],
+        origin: u32,
+        dests: &[u32],
+    ) -> Result<(Vec<i32>, Option<Vec<i32>>)> {
+        const TILE: usize = 90; // keep the coordinate list / URL bounded
+        let mut dur = Vec::with_capacity(dests.len());
+        let mut dist = Vec::with_capacity(dests.len());
+        for chunk in dests.chunks(TILE) {
+            // Coordinate list = [origin, dest0, dest1, …]; sources=0, destinations=1..
+            let o = coords[origin as usize];
+            let mut cs = format!("{:.6},{:.6}", o[0], o[1]);
+            for &d in chunk {
+                let c = coords[d as usize];
+                cs.push(';');
+                cs.push_str(&format!("{:.6},{:.6}", c[0], c[1]));
+            }
+            let dst_idx = (1..=chunk.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(";");
+            let url = format!(
+                "{}/table/v1/{}/{}?annotations=duration,distance&sources=0&destinations={}",
+                self.host.trim_end_matches('/'),
+                self.profile,
+                cs,
+                dst_idx
+            );
+            let resp: TableResp = ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(60))
+                .call()
+                .map_err(|e| Error::Http(format!("OSRM table row failed: {e}")))?
+                .into_json()
+                .map_err(|e| Error::Http(format!("OSRM JSON decode: {e}")))?;
+            if resp.code != "Ok" {
+                return Err(Error::Http(format!("OSRM error: {}", resp.code)));
+            }
+            let row = resp
+                .durations
+                .and_then(|d| d.into_iter().next())
+                .ok_or_else(|| Error::Http("OSRM missing durations row".into()))?;
+            for c in row {
+                dur.push(narrow_i32(c.unwrap_or(0.0).round() as i64));
+            }
+            if let Some(drow) = resp.distances.and_then(|d| d.into_iter().next()) {
+                for c in drow {
+                    dist.push(narrow_i32(c.unwrap_or(0.0).round() as i64));
+                }
+            }
+        }
+        let dist = if dist.len() == dur.len() { Some(dist) } else { None };
+        Ok((dur, dist))
+    }
+}
 
 /// Pull the requested cells out of a dense matrix (the `CellSource` default).
 pub fn gather_cells(full: &Matrix, req: &CellRequest) -> CellResponse {

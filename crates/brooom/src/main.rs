@@ -13,8 +13,10 @@ use std::io::Write;
 use clap::{Parser, ValueEnum};
 
 use brooom::{
+    broker::{BrokerMatrixSource, BrokerPolicy, CellDb},
     io::to_output,
-    matrix::{HaversineMatrix, MatrixSource, OsrmClient},
+    matrix::{CellSource, HaversineMatrix, MatrixSource, OsrmClient},
+    matrix_google::GoogleDistanceMatrix,
     solver::{solve_full, SolverConfig},
 };
 
@@ -24,6 +26,8 @@ mod serve;
 enum RoutingEngine {
     Haversine,
     Osrm,
+    /// Google Distance Matrix (per-element billing). Needs --google-key.
+    Google,
 }
 
 #[derive(Debug, Parser)]
@@ -64,6 +68,32 @@ struct Cli {
     /// OSRM profile.
     #[arg(long, default_value = "driving")]
     osrm_profile: String,
+
+    /// Google Distance Matrix API key (required when --routing google).
+    #[arg(long, default_value = "")]
+    google_key: String,
+
+    /// Wrap the matrix source in the cost-aware broker: buy only the cells the
+    /// solver reads (exact), derive the rest, reuse a local DB. Works with ANY
+    /// provider (--routing haversine/osrm/google or a self-hosted endpoint).
+    #[arg(long)]
+    broker: bool,
+
+    /// Persistent cell-DB path for cross-run reuse + frequency tracking (broker).
+    #[arg(long)]
+    matrix_db: Option<String>,
+
+    /// Hard buy budget, priced by --cost-policy; excess is demoted to derivation.
+    #[arg(long)]
+    buy_budget: Option<f64>,
+
+    /// Frequency prune: skip buying long-range cells to nodes seen < T (0 = off).
+    #[arg(long, default_value_t = 0)]
+    freq_threshold: u32,
+
+    /// Broker cost/policy spell (Rust-syntax PySpell over `broker.*`).
+    #[arg(long)]
+    cost_policy: Option<String>,
 
     /// Haversine assumed speed in km/h.
     #[arg(long, default_value_t = 50.0)]
@@ -403,12 +433,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _dim_guard = (!dimensions.is_empty())
         .then(|| brooom::DimensionGuard::install(dimensions));
 
-    let source: Box<dyn MatrixSource> = match cli.routing {
+    let provider: Box<dyn CellSource> = match cli.routing {
         RoutingEngine::Haversine => Box::new(HaversineMatrix {
             speed_mps: cli.speed_kmh * 1000.0 / 3600.0,
             detour: cli.detour,
         }),
         RoutingEngine::Osrm => Box::new(OsrmClient::new(cli.osrm_host.clone(), cli.osrm_profile.clone())),
+        RoutingEngine::Google => {
+            Box::new(GoogleDistanceMatrix::new(cli.google_key.clone(), cli.osrm_profile.clone()))
+        }
+    };
+    // The broker is provider-agnostic: it wraps ANY CellSource above, buying only
+    // the cells the solver reads (exact), deriving the rest, and reusing a local
+    // cell DB. Absent --broker, the provider is used directly (today's behaviour).
+    let source: Box<dyn MatrixSource> = if cli.broker {
+        let policy = BrokerPolicy {
+            buy_budget: cli.buy_budget,
+            freq_threshold: cli.freq_threshold,
+            ..Default::default()
+        };
+        let mut b = match &cli.matrix_db {
+            Some(p) => BrokerMatrixSource::with_db(provider, policy, CellDb::open(p, &cli.osrm_profile)),
+            None => BrokerMatrixSource::new(provider, policy),
+        };
+        if let Some(spell) = &cli.cost_policy {
+            let cf = brooom::pyspell::compile_broker_rust(spell)
+                .map_err(|e| format!("cost-policy spell: {e}"))?;
+            b = b.with_cost_fn(cf);
+        }
+        Box::new(b)
+    } else {
+        Box::new(provider)
     };
 
     // Effective hyperparameters — start from CLI values, optionally override

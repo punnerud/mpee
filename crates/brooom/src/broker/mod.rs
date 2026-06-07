@@ -18,7 +18,23 @@
 //!
 //! The broker is itself a [`MatrixSource`], so it drops into
 //! [`crate::solver::build_matrix`] transparently. Stage B adds a persistent
-//! cell DB + frequency prune; Stage C/D add PySpell pricing + a Google provider.
+//! cell DB + frequency prune; Stage C adds PySpell pricing; Stage D adds batched
+//! providers + a user surface.
+//!
+//! **Provider-agnostic.** The broker wraps ANY [`CellSource`] — the offline
+//! `HaversineMatrix`, an `OsrmClient`, the `GoogleDistanceMatrix` (per-element
+//! billing — where buying only the skeleton is a direct money saving), or your
+//! own endpoint. They all reuse the same per-origin batching
+//! ([`crate::matrix::per_origin_fetch`]); a new provider just supplies a row
+//! fetcher. Google is one example, not a dependency.
+//!
+//! **Compressed graph + partial delay overlay (design note).** The base provider
+//! can be a *compressed offline graph* (dijeng CH / a matcodec `.mtz`), giving
+//! free, complete free-flow distances; the paid provider is then queried only for
+//! a *partial "delay" overlay* on the cells that matter (hubs, congested
+//! corridors — ranked by the frequency counter), and the broker fills the rest
+//! from the offline base. That is the bridge to the temporal/forecast stage:
+//! buy a little live congestion, reuse it offline across similar days.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
