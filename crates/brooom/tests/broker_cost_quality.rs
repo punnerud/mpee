@@ -9,7 +9,7 @@
 
 use std::sync::Mutex;
 
-use brooom::broker::{BrokerMatrixSource, BrokerPolicy, DeriveMode};
+use brooom::broker::{BrokerMatrixSource, BrokerPolicy, CellDb, DeriveMode};
 use brooom::error::Result;
 use brooom::matrix::{
     gather_cells, haversine_m, CellRequest, CellResponse, CellSource, Matrix, MatrixSource,
@@ -125,6 +125,47 @@ fn skeleton_buys_few_reproduces_exact_derives_upper_bounds() {
     assert!(max_under <= 3, "cells under-estimated truth by {max_under}s (should be ~0)");
     let frac_close = close as f64 / (N * N - N) as f64;
     assert!(frac_close > 0.9, "only {:.1}% of cells within 2% of truth", frac_close * 100.0);
+}
+
+#[test]
+fn db_reuse_makes_second_solve_nearly_free() {
+    let (coords, truth) = make_world();
+    let path = std::env::temp_dir().join(format!("mpee_broker_db_{}.bin", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    // Run 1: cold DB — buys the skeleton, no hits.
+    let first_bought = {
+        let db = CellDb::open(&path, "car");
+        let broker = BrokerMatrixSource::with_db(
+            TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+            BrokerPolicy::default(),
+            db,
+        );
+        broker.build(&coords).unwrap();
+        let st = broker.last_stats();
+        assert!(st.cells_bought > 0, "cold DB must buy the skeleton");
+        assert_eq!(st.db_hits, 0, "cold DB has no hits");
+        st.cells_bought
+    };
+
+    // Run 2: warm DB (re-opened from disk) — same skeleton, all served free.
+    {
+        let db = CellDb::open(&path, "car");
+        let broker = BrokerMatrixSource::with_db(
+            TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+            BrokerPolicy::default(),
+            db,
+        );
+        broker.build(&coords).unwrap();
+        let st = broker.last_stats();
+        assert_eq!(st.cells_bought, 0, "warm DB should buy nothing the second time");
+        assert_eq!(st.db_hits, first_bought, "all skeleton cells served from the DB");
+    }
+
+    // Frequency counter accrued across the two runs.
+    let db = CellDb::open(&path, "car");
+    assert!(db.node_seen(coords[0]) >= 2, "node frequency should accrue across runs");
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

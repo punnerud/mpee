@@ -26,6 +26,9 @@ use std::sync::Mutex;
 use crate::error::Result;
 use crate::matrix::{CellRequest, CellSource, HaversineMatrix, Matrix, MatrixSource};
 
+mod cell_db;
+pub use cell_db::CellDb;
+
 /// How aggressively to derive instead of buy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeriveMode {
@@ -50,6 +53,11 @@ pub struct BrokerPolicy {
     /// Number of farthest-point landmarks whose rows/cols are bought and used to
     /// derive the long-range cells.
     pub max_landmarks: usize,
+    /// Frequency prune (Stage B): when > 0, skip BUYING long-range depot/landmark
+    /// cells to a node seen fewer than this many times across runs (it's derived
+    /// instead). 0 = off (safe default; never prunes). The K-nearest skeleton is
+    /// never pruned, so local search always reads exact data.
+    pub freq_threshold: u32,
 }
 
 impl Default for BrokerPolicy {
@@ -60,6 +68,7 @@ impl Default for BrokerPolicy {
             derive: DeriveMode::Skeleton,
             buy_depot_full: true,
             max_landmarks: 32,
+            freq_threshold: 0,
         }
     }
 }
@@ -69,7 +78,8 @@ impl Default for BrokerPolicy {
 pub struct BrokerStats {
     pub n: usize,
     pub cells_total: usize,  // n*n
-    pub cells_bought: usize, // requested from the provider
+    pub cells_bought: usize, // requested from the provider (DB misses)
+    pub db_hits: usize,      // skeleton cells served free from the persistent DB
     pub cells_derived: usize,
     pub landmarks: usize,
     /// True when the bought sub-matrix passed the triangle-inequality check and
@@ -90,12 +100,20 @@ impl BrokerStats {
 pub struct BrokerMatrixSource<S: CellSource> {
     inner: S,
     policy: BrokerPolicy,
+    db: Option<Mutex<CellDb>>,
     stats: Mutex<BrokerStats>,
 }
 
 impl<S: CellSource> BrokerMatrixSource<S> {
     pub fn new(inner: S, policy: BrokerPolicy) -> Self {
-        Self { inner, policy, stats: Mutex::new(BrokerStats::default()) }
+        Self { inner, policy, db: None, stats: Mutex::new(BrokerStats::default()) }
+    }
+
+    /// With a persistent cell DB: bought cells are reused across runs and a
+    /// per-node frequency counter accrues (Stage B). The DB is flushed at the
+    /// end of each `build()`.
+    pub fn with_db(inner: S, policy: BrokerPolicy, db: CellDb) -> Self {
+        Self { inner, policy, db: Some(Mutex::new(db)), stats: Mutex::new(BrokerStats::default()) }
     }
 
     /// Stats from the most recent `build()`.
@@ -118,6 +136,7 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
                 n,
                 cells_total: n * n,
                 cells_bought: n * n,
+                db_hits: 0,
                 cells_derived: 0,
                 landmarks: 0,
                 metric_ok: true,
@@ -130,17 +149,38 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
 
         // 2. Skeleton selection: K_buy nearest per node + depot + landmark rows/cols.
         let landmarks = pick_landmarks(&prior, self.policy.max_landmarks);
-        let req = self.skeleton(&prior, &landmarks);
+        let req = self.skeleton(&prior, &landmarks, coords);
 
-        // 3. Buy the skeleton.
-        let resp = self.inner.fetch_cells(coords, &req)?;
-        let cells_bought = req.pairs.len();
-
-        // Assemble: start from the prior, overwrite bought cells with truth.
+        // Assemble from the prior; we overwrite bought/known cells with truth.
         let mut dur = prior.durations.clone();
         let mut dist = prior.distances.clone();
-        let mut bought: HashSet<u64> = HashSet::with_capacity(cells_bought);
-        for (k, &(i, j)) in req.pairs.iter().enumerate() {
+        let mut bought: HashSet<u64> = HashSet::with_capacity(req.pairs.len());
+
+        // 3a. Serve known cells free from the persistent DB; the rest go to fetch.
+        let mut to_fetch: Vec<(u32, u32)> = Vec::with_capacity(req.pairs.len());
+        let mut db_hits = 0usize;
+        if let Some(m) = &self.db {
+            let db = m.lock().unwrap();
+            for &(i, j) in &req.pairs {
+                if let Some((d, mm)) = db.get(coords[i as usize], coords[j as usize]) {
+                    let idx = i as usize * n + j as usize;
+                    dur[idx] = d;
+                    if let Some(o) = dist.as_mut() { o[idx] = mm; }
+                    bought.insert(cell_key(i, j));
+                    db_hits += 1;
+                } else {
+                    to_fetch.push((i, j));
+                }
+            }
+        } else {
+            to_fetch.extend_from_slice(&req.pairs);
+        }
+
+        // 3b. Buy the misses from the provider.
+        let fetch_req = CellRequest { pairs: to_fetch };
+        let resp = self.inner.fetch_cells(coords, &fetch_req)?;
+        let cells_bought = fetch_req.pairs.len();
+        for (k, &(i, j)) in fetch_req.pairs.iter().enumerate() {
             let idx = i as usize * n + j as usize;
             dur[idx] = resp.dur[k];
             if let (Some(out), Some(rd)) = (dist.as_mut(), resp.dist.as_ref()) {
@@ -148,6 +188,22 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
             }
             bought.insert(cell_key(i, j));
         }
+
+        // 3c. Persist freshly bought cells + bump node frequencies, then flush.
+        if let Some(m) = &self.db {
+            let mut db = m.lock().unwrap();
+            for (k, &(i, j)) in fetch_req.pairs.iter().enumerate() {
+                let mm = resp.dist.as_ref().map(|x| x[k]).unwrap_or(0);
+                db.put(coords[i as usize], coords[j as usize], resp.dur[k], mm);
+            }
+            let mut seen_nodes: HashSet<u32> = HashSet::new();
+            for &(i, j) in &req.pairs {
+                if seen_nodes.insert(i) { db.bump_node(coords[i as usize]); }
+                if seen_nodes.insert(j) { db.bump_node(coords[j as usize]); }
+            }
+            db.flush();
+        }
+
         for i in 0..n {
             dur[i * n + i] = 0;
             if let Some(d) = dist.as_mut() {
@@ -171,6 +227,7 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
             n,
             cells_total: n * n,
             cells_bought,
+            db_hits,
             cells_derived,
             landmarks: landmarks.len(),
             metric_ok,
@@ -181,8 +238,11 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
 
 impl<S: CellSource> BrokerMatrixSource<S> {
     /// Build the must-buy cell set: each node's K_buy nearest (by the Haversine
-    /// prior), the depot row+col, and every landmark's row+col.
-    fn skeleton(&self, prior: &Matrix, landmarks: &[u32]) -> CellRequest {
+    /// prior), the depot row+col, and every landmark's row+col. With a warm DB
+    /// and `freq_threshold > 0`, long-range depot/landmark cells to rarely-seen
+    /// nodes are skipped (derived instead); the K-nearest skeleton is never
+    /// pruned, so local search always reads exact data.
+    fn skeleton(&self, prior: &Matrix, landmarks: &[u32], coords: &[[f64; 2]]) -> CellRequest {
         let n = prior.n;
         let k = self.k_buy().min(n.saturating_sub(1));
         let mut set: HashSet<u64> = HashSet::new();
@@ -193,7 +253,7 @@ impl<S: CellSource> BrokerMatrixSource<S> {
             }
         };
 
-        // K_buy nearest per node (by prior duration).
+        // K_buy nearest per node (by prior duration) — always bought.
         let mut buf: Vec<(i32, u32)> = Vec::with_capacity(n);
         for i in 0..n {
             buf.clear();
@@ -212,19 +272,37 @@ impl<S: CellSource> BrokerMatrixSource<S> {
             }
         }
 
+        // Frequency prune for long-range depot/landmark cells: skip the far node
+        // when it's been seen < T times across runs (rare = a one-off house).
+        let t = self.policy.freq_threshold;
+        let rare: Vec<bool> = if t > 0 {
+            if let Some(m) = &self.db {
+                let db = m.lock().unwrap();
+                (0..n).map(|i| db.node_seen(coords[i]) < t).collect()
+            } else {
+                vec![false; n]
+            }
+        } else {
+            vec![false; n]
+        };
+
         // Depot row + column (index 0).
         if self.policy.buy_depot_full {
-            for j in 0..n as u32 {
-                push(0, j, &mut set, &mut pairs);
-                push(j, 0, &mut set, &mut pairs);
+            for j in 0..n {
+                if !rare[j] {
+                    push(0, j as u32, &mut set, &mut pairs);
+                    push(j as u32, 0, &mut set, &mut pairs);
+                }
             }
         }
 
         // Landmark rows + columns (needed for min-plus derivation).
         for &l in landmarks {
-            for j in 0..n as u32 {
-                push(l, j, &mut set, &mut pairs);
-                push(j, l, &mut set, &mut pairs);
+            for j in 0..n {
+                if !rare[j] {
+                    push(l, j as u32, &mut set, &mut pairs);
+                    push(j as u32, l, &mut set, &mut pairs);
+                }
             }
         }
 
