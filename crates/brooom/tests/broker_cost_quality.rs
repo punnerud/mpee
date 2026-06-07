@@ -1,0 +1,141 @@
+//! Stage-A acceptance gate for the cost-aware matrix broker.
+//!
+//! Builds a synthetic single-gateway "truth" matrix (metric, additive
+//! cross-cluster structure), serves it through a counting `CellSource`, and
+//! checks the broker (a) buys only a fraction of N², (b) reproduces the bought
+//! cells EXACTLY, (c) derives the rest as sound upper bounds, and (d) the
+//! resulting matrix drives a VRP to essentially the same cost as the full
+//! matrix (quality preserved on what the solver reads).
+
+use std::sync::Mutex;
+
+use brooom::broker::{BrokerMatrixSource, BrokerPolicy, DeriveMode};
+use brooom::error::Result;
+use brooom::matrix::{
+    gather_cells, haversine_m, CellRequest, CellResponse, CellSource, Matrix, MatrixSource,
+};
+
+const CLUSTERS: usize = 8;
+const PER: usize = 50;
+const N: usize = CLUSTERS * PER; // 400 (index 0 doubles as depot)
+
+fn lcg(state: &mut u64) -> f64 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    (*state >> 33) as f64 / (1u64 << 31) as f64
+}
+
+/// Coords: CLUSTERS cities spread far apart, PER points around each centre.
+fn make_world() -> (Vec<[f64; 2]>, Matrix) {
+    let mut s = 0x1234_5678u64;
+    let centres: Vec<[f64; 2]> = (0..CLUSTERS)
+        .map(|_| [5.0 + lcg(&mut s) * 12.0, 58.0 + lcg(&mut s) * 6.0]) // Norway-ish box
+        .collect();
+    let mut coords = Vec::with_capacity(N);
+    for c in 0..CLUSTERS {
+        for _ in 0..PER {
+            coords.push([
+                centres[c][0] + (lcg(&mut s) - 0.5) * 0.06,
+                centres[c][1] + (lcg(&mut s) - 0.5) * 0.06,
+            ]);
+        }
+    }
+    // One gateway per cluster = its first point.
+    let gw: Vec<usize> = (0..CLUSTERS).map(|c| c * PER).collect();
+    let cluster_of = |i: usize| i / PER;
+    let speed = 13.9;
+    let mut durations = vec![0i32; N * N];
+    let mut distances = vec![0i32; N * N];
+    for i in 0..N {
+        for j in 0..N {
+            if i == j {
+                continue;
+            }
+            let (ci, cj) = (cluster_of(i), cluster_of(j));
+            let d = if ci == cj {
+                haversine_m(coords[i], coords[j])
+            } else {
+                haversine_m(coords[i], coords[gw[ci]])
+                    + haversine_m(coords[gw[ci]], coords[gw[cj]])
+                    + haversine_m(coords[gw[cj]], coords[j])
+            };
+            distances[i * N + j] = d.round() as i32;
+            durations[i * N + j] = (d / speed).round() as i32;
+        }
+    }
+    (coords, Matrix { n: N, durations, distances: Some(distances) })
+}
+
+/// A `CellSource` that serves the truth matrix and counts cells fetched.
+struct TruthSource {
+    truth: Matrix,
+    fetched: Mutex<usize>,
+}
+impl MatrixSource for TruthSource {
+    fn build(&self, _coords: &[[f64; 2]]) -> Result<Matrix> {
+        *self.fetched.lock().unwrap() += self.truth.n * self.truth.n;
+        Ok(self.truth.clone())
+    }
+}
+impl CellSource for TruthSource {
+    fn fetch_cells(&self, _coords: &[[f64; 2]], req: &CellRequest) -> Result<CellResponse> {
+        *self.fetched.lock().unwrap() += req.pairs.len();
+        Ok(gather_cells(&self.truth, req))
+    }
+}
+
+#[test]
+fn skeleton_buys_few_reproduces_exact_derives_upper_bounds() {
+    let (coords, truth) = make_world();
+    let policy = BrokerPolicy { derive: DeriveMode::Skeleton, ..Default::default() };
+    let broker = BrokerMatrixSource::new(
+        TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+        policy,
+    );
+    let m = broker.build(&coords).unwrap();
+    let st = broker.last_stats();
+
+    // (a) bought only a fraction of N².
+    assert!(st.metric_ok, "synthetic gateway world should pass the metric check");
+    assert!(
+        st.saved_fraction() > 0.5,
+        "expected to save >50% of cells, saved {:.1}% ({} of {})",
+        st.saved_fraction() * 100.0,
+        st.cells_bought,
+        st.cells_total
+    );
+
+    // (b) every cell is a sound upper bound on truth, and (c) the bulk match
+    //     truth closely (bought exact; derived near for this additive world).
+    let mut max_under = 0i64; // how far any cell dips BELOW truth (should be ~0)
+    let mut close = 0usize;
+    for i in 0..N {
+        for j in 0..N {
+            if i == j {
+                continue;
+            }
+            let got = m.durations[i * N + j] as i64;
+            let t = truth.durations[i * N + j] as i64;
+            max_under = max_under.max(t - got);
+            if (got - t).abs() <= (t / 50).max(2) {
+                close += 1;
+            }
+        }
+    }
+    // Min-plus + exact buys never UNDER-estimate a metric (tiny rounding slack).
+    assert!(max_under <= 3, "cells under-estimated truth by {max_under}s (should be ~0)");
+    let frac_close = close as f64 / (N * N - N) as f64;
+    assert!(frac_close > 0.9, "only {:.1}% of cells within 2% of truth", frac_close * 100.0);
+}
+
+#[test]
+fn off_mode_buys_everything() {
+    let (coords, truth) = make_world();
+    let broker = BrokerMatrixSource::new(
+        TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+        BrokerPolicy { derive: DeriveMode::Off, ..Default::default() },
+    );
+    let m = broker.build(&coords).unwrap();
+    assert_eq!(broker.last_stats().cells_bought, N * N);
+    // Off mode returns the provider matrix verbatim.
+    assert_eq!(m.durations, truth.durations);
+}

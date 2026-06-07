@@ -11,6 +11,7 @@ pub mod pyspell;
 pub mod error;
 pub mod problem;
 pub mod matrix;
+pub mod broker;
 pub mod solution;
 pub mod eval;
 pub mod granular;

@@ -82,6 +82,51 @@ pub trait MatrixSource: Send + Sync {
     fn build(&self, coords: &[[f64; 2]]) -> Result<Matrix>;
 }
 
+/// A subset of matrix cells to fetch — origin/destination index pairs. The
+/// cost-aware broker (see `crate::broker`) asks a provider for only the cells
+/// the solver will actually read instead of a full N×N.
+#[derive(Debug, Clone, Default)]
+pub struct CellRequest {
+    pub pairs: Vec<(u32, u32)>,
+}
+
+/// Durations (+ optional distances) parallel to a `CellRequest`'s `pairs`.
+#[derive(Debug, Clone, Default)]
+pub struct CellResponse {
+    pub dur: Vec<i32>,
+    pub dist: Option<Vec<i32>>,
+}
+
+/// A `MatrixSource` that can serve a SUBSET of cells. The default implementation
+/// just builds the full matrix and gathers the requested cells, so any existing
+/// source works unchanged; a metered provider (Google, batched OSRM) overrides
+/// `fetch_cells` to request only what's asked (Stage D). Implementors opt in
+/// explicitly (no blanket impl) so future providers can supply a real one.
+pub trait CellSource: MatrixSource {
+    fn fetch_cells(&self, coords: &[[f64; 2]], req: &CellRequest) -> Result<CellResponse> {
+        let full = self.build(coords)?;
+        Ok(gather_cells(&full, req))
+    }
+}
+
+impl CellSource for HaversineMatrix {}
+#[cfg(feature = "osrm")]
+impl CellSource for OsrmClient {}
+
+/// Pull the requested cells out of a dense matrix (the `CellSource` default).
+pub fn gather_cells(full: &Matrix, req: &CellRequest) -> CellResponse {
+    let n = full.n;
+    let mut dur = Vec::with_capacity(req.pairs.len());
+    let mut dist = full.distances.as_ref().map(|_| Vec::with_capacity(req.pairs.len()));
+    for &(i, j) in &req.pairs {
+        dur.push(full.durations[i as usize * n + j as usize]);
+        if let (Some(out), Some(d)) = (dist.as_mut(), full.distances.as_ref()) {
+            out.push(d[i as usize * n + j as usize]);
+        }
+    }
+    CellResponse { dur, dist }
+}
+
 // -------------------------------------------------------------------------
 // Haversine — straight-line distance, no external service.
 // -------------------------------------------------------------------------
