@@ -549,10 +549,32 @@ fn solve_scalar_with_extra_global(
     // basin) the perturbation search never finds. Gated to the HGS envelope
     // (single-dim capacity, job-only, homogeneous fleet) and small N (via
     // `lahc_on`). Off via BROOOM_NO_HGS.
-    let hgs_on = lahc_on
+    let hgs_candidate = lahc_on
         && crate::genetic::hgs_applicable(problem)
         && config.time_limit_ms.is_some() // HGS phase needs a wall-clock budget
         && std::env::var("BROOOM_NO_HGS").is_err();
+    // Route-flexibility gate: the giant-tour Split that powers HGS only helps when
+    // the optimal route COUNT is flexible — i.e. routes pack many jobs (wide time
+    // windows / long horizon). On tight-window instances routes are forced short,
+    // Split adds nothing, and HGS just steals budget from the proven ILS (small
+    // regression). Greedy jobs-per-route is a scale-invariant proxy that cleanly
+    // separates the two (measured: tight R1/RC1 ≈ 4–6, wide R2/RC2 ≈ 17–33).
+    // Override the threshold via BROOOM_HGS_MIN_ROUTELEN.
+    let hgs_on = if hgs_candidate {
+        let g = greedy_insertion(problem, matrix);
+        let routes = g.routes.iter().filter(|r| !r.steps.is_empty()).count().max(1);
+        let assigned: usize = g.routes.iter().map(|r| r.steps.len()).sum();
+        let avg_route_len = assigned as f64 / routes as f64;
+        let min_len: f64 = std::env::var("BROOOM_HGS_MIN_ROUTELEN")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(8.0);
+        if config.verbose {
+            eprintln!("brooom: HGS gate — greedy avg route len {:.1} (min {:.1}) ⇒ HGS {}",
+                avg_route_len, min_len, if avg_route_len >= min_len { "ON" } else { "off" });
+        }
+        avg_route_len >= min_len
+    } else {
+        false
+    };
     // HGS education passes: small (cold LS is the GA's budget — the default 50
     // would allow only a handful of generations). 4 passes is the sweet spot.
     let hgs_passes = config.max_local_search_passes.min(4);
@@ -566,11 +588,15 @@ fn solve_scalar_with_extra_global(
     let full_deadline = config
         .time_limit_ms
         .map(|ms| now + std::time::Duration::from_millis(ms));
+    // HGS-primary: a short ILS phase produces a seed + best-of safety floor, then
+    // HGS gets the bulk of the budget (measured sweet spot ~0.15; HGS reliably
+    // matches/beats the ILS on the gated wide-window instances). Override via
+    // BROOOM_HGS_SPLIT.
     let ils_frac: f64 = std::env::var("BROOOM_HGS_SPLIT")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|f: &f64| *f > 0.05 && *f < 0.95)
-        .unwrap_or(0.55);
+        .unwrap_or(0.15);
     let deadline = if hgs_on {
         config
             .time_limit_ms

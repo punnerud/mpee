@@ -64,9 +64,24 @@ fn arc_cost(matrix: &Matrix, c: CostCoef, a: usize, b: usize) -> f64 {
 /// the objective is the plain arc-based one: no span cost, no custom dimensions,
 /// no soft-penalty mode, and the route isn't multi-trip (reloads insert depot
 /// legs the simple arc walk doesn't model).
+/// Runtime switch for the fast LS path. `cluster_decompose` flips this OFF around
+/// its sub-solves so large-N (decomposed) results stay byte-identical to the
+/// pre-fast-LS engine — the fast path gives no end-to-end benefit there (the cold
+/// LS is a tiny fraction of the per-cluster budget) but would perturb tie-breaks.
+/// Small-N flat solves (incl. HGS education) keep it on. Production runs one
+/// top-level solve at a time, so the global flag is race-free there; in parallel
+/// tests a race only toggles the (cost-identical) path, never correctness.
+pub static FAST_LS_GLOBAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Set the global fast-LS switch, returning the previous value (so callers can
+/// restore it). Used by cluster_decompose to wrap its sub-solves.
+pub fn set_fast_ls_global(v: bool) -> bool {
+    FAST_LS_GLOBAL.swap(v, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Master switch for the fast LS path (off via BROOOM_NO_FAST_LS, for A/B).
 fn fast_ls_enabled() -> bool {
-    std::env::var("BROOOM_NO_FAST_LS").is_err()
+    FAST_LS_GLOBAL.load(std::sync::atomic::Ordering::Relaxed)
+        && std::env::var("BROOOM_NO_FAST_LS").is_err()
 }
 
 fn fast_cost_eligible(problem: &Problem) -> bool {

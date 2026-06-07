@@ -147,18 +147,39 @@ fn hgs_parallel_vs_pyvrp() {
     use web_time::{Duration, Instant};
     let refs = [("r205", 95415.0), ("r211", 75523.0), ("rc208", 77892.0),
                 ("r207", 79789.0), ("rc206", 105460.0)];
+    let seeds = [42u64, 7, 123];
     for (name, py) in refs {
         let (problem, matrix) = load(name);
         let granular = Granular::build(&matrix, 20);
-        brooom::solution::eval_cache_invalidate();
-        let t0 = Instant::now();
-        let deadline = Some(t0 + Duration::from_millis(10000));
-        // 11 islands ≈ logical cores; medium education (passes=4).
-        let sol = solve_genetic_parallel(&problem, &matrix, Some(&granular), 4, 42, deadline, 11, &[])
-            .expect("hgs solves");
-        let routes = sol.routes.iter().filter(|r| !r.steps.is_empty()).count();
-        let c = sol.summary.cost;
-        eprintln!("HGS-par {name}: cost={c:.0} routes={routes} gap={:+.2}% t={:.1}s",
-            (c - py) / py * 100.0, t0.elapsed().as_secs_f64());
+        let mut gaps: Vec<f64> = Vec::new();
+        for &seed in &seeds {
+            brooom::solution::eval_cache_invalidate();
+            let t0 = Instant::now();
+            let deadline = Some(t0 + Duration::from_millis(10000));
+            // 11 islands ≈ logical cores; medium education (passes=4).
+            let sol = solve_genetic_parallel(&problem, &matrix, Some(&granular), 4, seed, deadline, 11, &[])
+                .expect("hgs solves");
+            let routes = sol.routes.iter().filter(|r| !r.steps.is_empty()).count();
+            let c = sol.summary.cost;
+            let gap = (c - py) / py * 100.0;
+            gaps.push(gap);
+            eprintln!("HGS-par {name} seed{seed}: cost={c:.0} routes={routes} gap={gap:+.2}%");
+        }
+        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        let worst = gaps.iter().cloned().fold(f64::MIN, f64::max);
+        eprintln!("  >>> {name}: mean={mean:+.2}% worst={worst:+.2}%");
+    }
+}
+
+#[test]
+#[ignore]
+fn greedy_route_len() {
+    use brooom::insertion::greedy_insertion;
+    for inst in ["r101","rc101","c101","r201","rc201","r205","r211","rc208","r207","rc206","c201"] {
+        let (problem, matrix) = match std::panic::catch_unwind(|| load(inst)) { Ok(v)=>v, Err(_)=>continue };
+        let s = greedy_insertion(&problem, &matrix);
+        let routes = s.routes.iter().filter(|r| !r.steps.is_empty()).count();
+        let jobs: usize = s.routes.iter().map(|r| r.steps.len()).sum();
+        eprintln!("{inst:6} greedy routes={routes} jobs/route={:.1}", jobs as f64/routes.max(1) as f64);
     }
 }

@@ -1,3 +1,51 @@
+# Matching PyVRP on R2/RC2 — population HGS + O(1) local search (2026-06-07)
+
+The route-opening LS below narrowed the wide-window gap but left ~+1.5–3% to
+PyVRP. Two compounding changes close it to **near parity**:
+
+1. **O(1) cost-delta local search** (`local_search.rs`): each move's COST delta
+   is exact edge arithmetic (the objective is arc-based when `span_cost==0`); only
+   FEASIBILITY needs the full walk, confirmed lazily best-first. Cold LS **6–11×
+   faster** (r211 303→~35 ms), **byte-identical cost** (max rel diff 0.00e0,
+   `tests/incremental_ls.rs`). Gated to the homogeneous simple envelope;
+   `BROOOM_NO_FAST_LS` forces the old path. Disabled inside `cluster_decompose`
+   so the decomposed large-N path stays unchanged (N=1000 6-seed mean Δ −0.025%).
+
+2. **Population HGS** (`genetic.rs`): giant-tour Order-Crossover + **Split**
+   (Prins/Vidal optimal partition of a customer ordering into routes — it decides
+   the route COUNT optimally, the global move ILS lacks; Split recovers PyVRP's
+   r205 partition at +0.00%). The O(1) LS gives each offspring's education ~30 ms
+   instead of ~250 ms ⇒ **~900–2750 generations** per island in 10 s (was tens).
+   Run HGS-primary: a short ILS phase (`BROOOM_HGS_SPLIT`, default 0.15) seeds
+   island 0 (best-of safety floor), then HGS islands get the bulk of the budget.
+
+**Route-flexibility gate** (`solver.rs`): HGS only helps when the route count is
+flexible (wide windows ⇒ many jobs per route). Greedy jobs-per-route cleanly
+separates the families (tight R1/RC1 ≈ 4–6, wide R2/RC2 ≈ 17–33); HGS turns on
+only at ≥ 8 (`BROOOM_HGS_MIN_ROUTELEN`). Tight-window stays pure ILS ⇒ no
+regression there.
+
+## Results — default config, `-l 10 -m 16`, mean of 2 (vs PyVRP)
+
+| instance | vs ILS baseline | vs PyVRP |
+|----------|-----------------|----------|
+| r205  | −2.53% | +0.70% |
+| r207  | −3.11% | **+0.23%** |
+| r211  | −2.45% | +0.54% |
+| rc206 | −2.85% | +0.37% |
+| rc208 | −0.71% | +0.79% |
+| r201  | −1.71% | +2.48% |
+| rc201 | −1.16% | +4.30% |
+| r101 / rc101 / c101 (tight, HGS gated off) | ±0.0% | unchanged |
+
+Standalone HGS multi-seed (3 seeds) is low-variance: r205 +0.79%, r211 +1.05%,
+rc208 +0.64%, r207 +0.77%, rc206 +0.14% mean vs PyVRP (rc206 hits +0.00% twice).
+So we now **match PyVRP within ~0.2–0.8%** on the core wide-window set (was
++1.5–3%), beat OR-Tools, and keep the N≥1000 win and tight-window parity.
+Honest caveat: r201/rc201 (borderline-wide) improve but still trail PyVRP more.
+
+---
+
 # Closing the R2/RC2 gap to PyVRP — route-opening local search (SHIPPED, gated)
 
 ## The diagnosis (verified)
