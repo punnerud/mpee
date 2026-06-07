@@ -13,7 +13,7 @@ use std::io::Write;
 use clap::{Parser, ValueEnum};
 
 use brooom::{
-    broker::{BrokerMatrixSource, BrokerPolicy, CellDb},
+    broker::{BrokerMatrixSource, BrokerPolicy, CellDb, DepartureProfile, WeekdayClass},
     io::to_output,
     matrix::{CellSource, HaversineMatrix, MatrixSource, OsrmClient},
     matrix_google::GoogleDistanceMatrix,
@@ -94,6 +94,24 @@ struct Cli {
     /// Broker cost/policy spell (Rust-syntax PySpell over `broker.*`).
     #[arg(long)]
     cost_policy: Option<String>,
+
+    /// Temporal profile (broker, Stage E1): the departure window to build/reuse,
+    /// as `class:hour` — e.g. `workday:08` or `weekend:17`. Keys the cell DB by
+    /// (weekday-class, hour); a workday profile learned on one day is reused
+    /// offline for every weekday at that hour.
+    #[arg(long)]
+    departure: Option<String>,
+
+    /// Congestion/uncertainty weight (broker, Stage E1): a known arc's matrix
+    /// cell becomes `mean + W·std`, so high-variance (queue/incident) arcs cost
+    /// more and the solver routes around them. 0 = plain mean (default).
+    #[arg(long, default_value_t = 0.0)]
+    uncertainty_weight: f64,
+
+    /// Offline reuse (broker, Stage E1): serve the chosen departure window from
+    /// the cell DB and buy nothing new when the profile is warm.
+    #[arg(long)]
+    offline_reuse: bool,
 
     /// Haversine assumed speed in km/h.
     #[arg(long, default_value_t = 50.0)]
@@ -373,6 +391,28 @@ fn build_effective_options(
     Ok(opts)
 }
 
+/// Parse a `--departure` value (`class:hour`, e.g. `workday:08` / `weekend:17`)
+/// into a [`DepartureProfile`]. The class is `workday`/`weekday` or `weekend`;
+/// the hour is 0–23.
+fn parse_departure(s: &str) -> Result<DepartureProfile, Box<dyn std::error::Error>> {
+    let (class, hour) = s
+        .split_once(':')
+        .ok_or("--departure: expected `class:hour`, e.g. `workday:08`")?;
+    let weekday_class = match class.trim().to_ascii_lowercase().as_str() {
+        "workday" | "weekday" => WeekdayClass::Workday,
+        "weekend" => WeekdayClass::Weekend,
+        other => return Err(format!("--departure: unknown class `{other}` (use workday|weekend)").into()),
+    };
+    let hour: u8 = hour
+        .trim()
+        .parse()
+        .map_err(|_| "--departure: hour must be an integer 0–23")?;
+    if hour > 23 {
+        return Err("--departure: hour must be 0–23".into());
+    }
+    Ok(DepartureProfile { weekday_class, hour })
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("brooom: {e}");
@@ -447,9 +487,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // the cells the solver reads (exact), deriving the rest, and reusing a local
     // cell DB. Absent --broker, the provider is used directly (today's behaviour).
     let source: Box<dyn MatrixSource> = if cli.broker {
+        let departure = match &cli.departure {
+            Some(s) => Some(parse_departure(s)?),
+            None => None,
+        };
         let policy = BrokerPolicy {
             buy_budget: cli.buy_budget,
             freq_threshold: cli.freq_threshold,
+            departure,
+            uncertainty_weight: cli.uncertainty_weight,
+            offline_reuse: cli.offline_reuse,
             ..Default::default()
         };
         let mut b = match &cli.matrix_db {

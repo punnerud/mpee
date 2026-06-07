@@ -200,6 +200,8 @@ fn read_broker_field(bf: BrokerField, v: &BrokerVars) -> Value {
         BrokerField::CellsKnown => Value::Int(v.cells_known),
         BrokerField::CrossingCount => Value::Int(v.crossing_count),
         BrokerField::HaversineKm => Value::Float(v.haversine_km),
+        BrokerField::DepartureHour => Value::Int(v.departure_hour),
+        BrokerField::WeekdayClass => Value::Int(v.weekday_class),
     }
 }
 

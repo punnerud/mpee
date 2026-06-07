@@ -135,6 +135,8 @@ pub(crate) fn resolve_field(base: &str, field: &str, ctx: &mut Ctx) -> Result<Ex
                 "cells_known" => bf(BrokerField::CellsKnown),
                 "crossing_count" => bf(BrokerField::CrossingCount),
                 "haversine_km" => bf(BrokerField::HaversineKm),
+                "departure_hour" => bf(BrokerField::DepartureHour),
+                "weekday_class" => bf(BrokerField::WeekdayClass),
                 _ => Err(DslError::UnknownField { base: "broker", field: field.to_string() }),
             }
         }

@@ -19,7 +19,22 @@
 //! The broker is itself a [`MatrixSource`], so it drops into
 //! [`crate::solver::build_matrix`] transparently. Stage B adds a persistent
 //! cell DB + frequency prune; Stage C adds PySpell pricing; Stage D adds batched
-//! providers + a user surface.
+//! providers + a user surface; **Stage E1** adds temporal profiles.
+//!
+//! **Temporal profiles + congestion/uncertainty (Stage E1).** Travel times vary
+//! by time-of-day and weekday, and some arcs deviate from "normal" (queues,
+//! incidents) more than others. Set [`BrokerPolicy::departure`] to a
+//! [`DepartureProfile`] (a weekday class + hour) and the broker keys the cell DB
+//! by that window and bakes, per known arc, `mean + uncertainty_weight · std`
+//! into the **static** matrix: the typical travel time for that window plus a
+//! penalty proportional to how much the arc deviates from normal, so the solver
+//! (unchanged — the O(1) local search still sees a static matrix) routes around
+//! high-variance corridors and secures reliable ones. Weekday classes merge
+//! Mon–Fri, so one representative workday's hourly profile is **reused offline**
+//! for every weekday at that hour — buy a little live congestion once, replay it
+//! for free. This is intentionally a static matrix *per departure window*; true
+//! time-dependent (intra-route) travel times (TDVRP) would disable the fast
+//! local search and are out of scope here.
 //!
 //! **Provider-agnostic.** The broker wraps ANY [`CellSource`] — the offline
 //! `HaversineMatrix`, an `OsrmClient`, the `GoogleDistanceMatrix` (per-element
@@ -49,12 +64,12 @@ use crate::matrix::{CellRequest, CellSource, HaversineMatrix, Matrix, MatrixSour
 pub type BrokerCostFn = dyn Fn(&BrokerVars) -> Verdict + Send + Sync;
 
 mod cell_db;
-pub use cell_db::CellDb;
+pub use cell_db::{CellDb, CellStat, TimeBucket};
 
 /// Variables a PySpell cost/policy expression sees (the `broker.*` namespace).
 /// Fed to a compiled spell to price a batch, cap a budget, or decide buy/derive.
 /// (Stage C — see `crate::pyspell::compile_broker_rust`.)
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct BrokerVars {
     /// Number of locations in this solve.
     pub n: i64,
@@ -70,6 +85,76 @@ pub struct BrokerVars {
     pub crossing_count: i64,
     /// Straight-line km between the candidate pair (a cheap importance signal).
     pub haversine_km: f64,
+    /// Departure hour-of-day (0–23) of the chosen window, or -1 when no temporal
+    /// profile is set (Stage E1). Lets a cost spell buy live data only in rush
+    /// hours and reuse the offline profile otherwise.
+    pub departure_hour: i64,
+    /// Weekday class of the chosen window: 0 = workday (Mon–Fri), 1 = weekend,
+    /// or -1 when no temporal profile is set (Stage E1).
+    pub weekday_class: i64,
+}
+
+impl Default for BrokerVars {
+    fn default() -> Self {
+        // The temporal fields default to -1 ("no profile set"), distinct from the
+        // valid workday/midnight (0, 0) window, so a spell can branch on them.
+        Self {
+            n: 0,
+            batch_size: 0,
+            tier: 0,
+            budget_remaining: 0.0,
+            cells_known: 0,
+            crossing_count: 0,
+            haversine_km: 0.0,
+            departure_hour: -1,
+            weekday_class: -1,
+        }
+    }
+}
+
+/// Weekday class for a temporal profile (Stage E1). Mon–Fri are merged into one
+/// `Workday` class so a single representative workday's hourly congestion profile
+/// is reused offline for every weekday; the weekend is kept separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeekdayClass {
+    Workday,
+    Weekend,
+}
+
+impl WeekdayClass {
+    /// The DB/spell discriminant: 0 = workday, 1 = weekend.
+    pub fn code(self) -> u8 {
+        match self {
+            WeekdayClass::Workday => 0,
+            WeekdayClass::Weekend => 1,
+        }
+    }
+    /// Class of an ISO weekday number (1 = Monday … 7 = Sunday).
+    pub fn from_iso_weekday(dow: u8) -> Self {
+        if dow >= 6 {
+            WeekdayClass::Weekend
+        } else {
+            WeekdayClass::Workday
+        }
+    }
+}
+
+/// The departure window a temporal profile is built/queried for (Stage E1): a
+/// weekday class plus an hour-of-day bucket. The broker keys the cell DB by this
+/// window, so observing one workday's hourly cells lets every other workday at
+/// the same hour be served offline (`offline_reuse`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepartureProfile {
+    pub weekday_class: WeekdayClass,
+    /// Hour-of-day bucket (0–23).
+    pub hour: u8,
+}
+
+impl DepartureProfile {
+    /// The `(weekday_class, hour)` bucket passed to the cell DB.
+    fn bucket(self) -> (u8, u8) {
+        (self.weekday_class.code(), self.hour)
+    }
 }
 
 /// How aggressively to derive instead of buy.
@@ -109,6 +194,21 @@ pub struct BrokerPolicy {
     pub buy_budget: Option<f64>,
     /// Provider price tier passed to the cost spell.
     pub tier: i64,
+    /// Temporal profile (Stage E1): the departure window to build/query the cell
+    /// DB for. `Some` keys cells by `(weekday_class, hour)` and bakes the learned
+    /// per-window mean travel time (plus an uncertainty penalty) into the static
+    /// matrix. `None` = today's time-agnostic behaviour (Stages A–D).
+    pub departure: Option<DepartureProfile>,
+    /// Congestion/uncertainty weight (Stage E1): the matrix cell for a known arc
+    /// becomes `mean_dur + uncertainty_weight · std_dur`, so arcs that deviate
+    /// from "normal" (high variance — queues/incidents) cost more and the solver
+    /// routes around them. `0` = bake the plain mean (no penalty; safe default).
+    pub uncertainty_weight: f64,
+    /// Offline reuse (Stage E1): with a warm temporal profile, serve the chosen
+    /// window entirely from the DB and buy nothing new (the killer cost-saver —
+    /// one workday's data answers every similar day). Informational; the actual
+    /// reuse happens whenever a cell is already in the DB for the window.
+    pub offline_reuse: bool,
 }
 
 impl Default for BrokerPolicy {
@@ -122,6 +222,9 @@ impl Default for BrokerPolicy {
             freq_threshold: 0,
             buy_budget: None,
             tier: 0,
+            departure: None,
+            uncertainty_weight: 0.0,
+            offline_reuse: false,
         }
     }
 }
@@ -138,6 +241,11 @@ pub struct BrokerStats {
     /// True when the bought sub-matrix passed the triangle-inequality check and
     /// min-plus derivation was used; false ⇒ Haversine fill only.
     pub metric_ok: bool,
+    /// Temporal hotspots (Stage E1): skeleton cells whose learned travel-time
+    /// std-dev is a large fraction of the mean — congestion/uncertainty zones the
+    /// uncertainty penalty steers the solver around. 0 without a temporal profile
+    /// or a warm DB.
+    pub hotspots: usize,
 }
 
 impl BrokerStats {
@@ -207,6 +315,7 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
                 cells_derived: 0,
                 landmarks: 0,
                 metric_ok: true,
+                hotspots: 0,
             };
             return Ok(m);
         }
@@ -223,16 +332,28 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
         let mut dist = prior.distances.clone();
         let mut bought: HashSet<u64> = HashSet::with_capacity(req.pairs.len());
 
+        // Temporal window (Stage E1): the (weekday_class, hour) bucket the cell DB
+        // is keyed by, or None for the time-agnostic Stages A–D behaviour.
+        let when: cell_db::TimeBucket = self.policy.departure.map(|d| d.bucket());
+        let w = self.policy.uncertainty_weight;
+        // Bake a known cell's statistics into the static matrix: the typical
+        // travel time plus a congestion/uncertainty penalty proportional to how
+        // much it deviates from "normal". With no history (count<=1) std=0, so
+        // this is just the mean — graceful degradation to Stage A/B.
+        let bake = |s: cell_db::CellStat| -> i32 { (s.mean_dur as f64 + w * s.std_dur).round() as i32 };
+
         // 3a. Serve known cells free from the persistent DB; the rest go to fetch.
         let mut to_fetch: Vec<(u32, u32)> = Vec::with_capacity(req.pairs.len());
         let mut db_hits = 0usize;
+        let mut hotspots = 0usize;
         if let Some(m) = &self.db {
             let db = m.lock().unwrap();
             for &(i, j) in &req.pairs {
-                if let Some((d, mm)) = db.get(coords[i as usize], coords[j as usize]) {
+                if let Some(s) = db.get(coords[i as usize], coords[j as usize], when) {
                     let idx = i as usize * n + j as usize;
-                    dur[idx] = d;
-                    if let Some(o) = dist.as_mut() { o[idx] = mm; }
+                    dur[idx] = bake(s);
+                    if let Some(o) = dist.as_mut() { o[idx] = s.mean_dist; }
+                    if is_hotspot(&s) { hotspots += 1; }
                     bought.insert(cell_key(i, j));
                     db_hits += 1;
                 } else {
@@ -248,12 +369,16 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
         // (K-nearest comes first in `req.pairs`, so the LS-critical cells survive)
         // and demote the rest to derivation.
         if let (Some(budget), Some(cf)) = (self.policy.buy_budget, &self.cost_fn) {
+            let (dep_hour, dep_class) = match self.policy.departure {
+                Some(d) => (d.hour as i64, d.weekday_class.code() as i64),
+                None => (-1, -1),
+            };
             let full = to_fetch.len();
-            if batch_cost(cf.as_ref(),full, n, self.policy.tier, budget, db_hits) > budget {
+            if batch_cost(cf.as_ref(), full, n, self.policy.tier, budget, db_hits, dep_hour, dep_class) > budget {
                 let (mut lo, mut hi) = (0usize, full);
                 while lo < hi {
                     let mid = (lo + hi + 1) / 2;
-                    if batch_cost(cf.as_ref(),mid, n, self.policy.tier, budget, db_hits) <= budget {
+                    if batch_cost(cf.as_ref(), mid, n, self.policy.tier, budget, db_hits, dep_hour, dep_class) <= budget {
                         lo = mid;
                     } else {
                         hi = mid - 1;
@@ -276,12 +401,22 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
             bought.insert(cell_key(i, j));
         }
 
-        // 3c. Persist freshly bought cells + bump node frequencies, then flush.
+        // 3c. Persist freshly bought cells (a new observation in this window) +
+        // bump node frequencies, then flush. Re-reading the accumulated stat and
+        // baking it back means a freshly bought cell carries any congestion/
+        // uncertainty learned on earlier days, not just today's single sample.
         if let Some(m) = &self.db {
             let mut db = m.lock().unwrap();
             for (k, &(i, j)) in fetch_req.pairs.iter().enumerate() {
                 let mm = resp.dist.as_ref().map(|x| x[k]).unwrap_or(0);
-                db.put(coords[i as usize], coords[j as usize], resp.dur[k], mm);
+                let (ci, cj) = (coords[i as usize], coords[j as usize]);
+                db.observe(ci, cj, when, resp.dur[k], mm);
+                if let Some(s) = db.get(ci, cj, when) {
+                    let idx = i as usize * n + j as usize;
+                    dur[idx] = bake(s);
+                    if let Some(o) = dist.as_mut() { o[idx] = s.mean_dist; }
+                    if is_hotspot(&s) { hotspots += 1; }
+                }
             }
             let mut seen_nodes: HashSet<u32> = HashSet::new();
             for &(i, j) in &req.pairs {
@@ -318,6 +453,7 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
             cells_derived,
             landmarks: landmarks.len(),
             metric_ok,
+            hotspots,
         };
         Ok(Matrix { n, durations: dur, distances: dist })
     }
@@ -402,15 +538,34 @@ fn cell_key(i: u32, j: u32) -> u64 {
     ((i as u64) << 32) | j as u64
 }
 
+/// A skeleton cell is a temporal hotspot (Stage E1) when its learned travel-time
+/// std-dev is a meaningful fraction of the mean (≥15%) over ≥2 observations — a
+/// congestion/uncertainty zone the uncertainty penalty steers the solver around.
+#[inline]
+fn is_hotspot(s: &cell_db::CellStat) -> bool {
+    s.count >= 2 && s.std_dur >= 0.15 * (s.mean_dur as f64).max(1.0)
+}
+
 /// Price a batch of `batch` cells via the cost spell. Penalty → its value;
 /// Feasible → free; Infeasible → unaffordable (∞).
-fn batch_cost(cf: &BrokerCostFn, batch: usize, n: usize, tier: i64, budget: f64, known: usize) -> f64 {
+fn batch_cost(
+    cf: &BrokerCostFn,
+    batch: usize,
+    n: usize,
+    tier: i64,
+    budget: f64,
+    known: usize,
+    dep_hour: i64,
+    dep_class: i64,
+) -> f64 {
     let vars = BrokerVars {
         n: n as i64,
         batch_size: batch as i64,
         tier,
         budget_remaining: budget,
         cells_known: known as i64,
+        departure_hour: dep_hour,
+        weekday_class: dep_class,
         ..Default::default()
     };
     match cf(&vars) {

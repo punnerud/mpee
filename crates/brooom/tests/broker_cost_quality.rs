@@ -228,6 +228,177 @@ fn buy_budget_caps_cells_bought() {
     assert!(st.cells_bought as f64 >= budget * 0.9, "budget should be ~saturated");
 }
 
+// ---- Stage E1: temporal profiles + congestion/uncertainty -----------------
+
+use brooom::broker::{DepartureProfile, WeekdayClass};
+
+/// A `CellSource` that serves the truth matrix scaled by a constant factor —
+/// stands in for a different time-of-day congestion level (rush = >1.0).
+struct ScaledSource {
+    truth: Matrix,
+}
+impl ScaledSource {
+    fn new(truth: &Matrix, factor: f64) -> Self {
+        let durations: Vec<i32> =
+            truth.durations.iter().map(|&d| (d as f64 * factor).round() as i32).collect();
+        ScaledSource {
+            truth: Matrix { n: truth.n, durations, distances: truth.distances.clone() },
+        }
+    }
+}
+impl MatrixSource for ScaledSource {
+    fn build(&self, _coords: &[[f64; 2]]) -> Result<Matrix> {
+        Ok(self.truth.clone())
+    }
+}
+impl CellSource for ScaledSource {
+    fn fetch_cells(&self, _coords: &[[f64; 2]], req: &CellRequest) -> Result<CellResponse> {
+        Ok(gather_cells(&self.truth, req))
+    }
+}
+
+fn total_duration(m: &Matrix) -> i64 {
+    m.durations.iter().map(|&d| d as i64).sum()
+}
+
+#[test]
+fn temporal_db_welford_and_bucketing() {
+    // The cell DB keys by (weekday_class, hour) and carries a Welford mean +
+    // std over every observation in that bucket. Distinct buckets never alias,
+    // and the stats survive a flush/reopen.
+    let path = std::env::temp_dir().join(format!("mpee_broker_temporal_{}.bin", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let a = [10.0, 60.0];
+    let b = [10.1, 60.1];
+    let workday_8: brooom::broker::TimeBucket = Some((0, 8));
+    let weekend_8: brooom::broker::TimeBucket = Some((1, 8));
+
+    {
+        let mut db = CellDb::open(&path, "car");
+        // Workday 08:00 sees [100, 140] → mean 120, population std 20.
+        db.observe(a, b, workday_8, 100, 1000);
+        db.observe(a, b, workday_8, 140, 1000);
+        // Weekend 08:00 is a *separate* bucket (free-flowing): one sample at 90.
+        db.observe(a, b, weekend_8, 90, 1000);
+        db.flush();
+    }
+
+    let db = CellDb::open(&path, "car");
+    let s = db.get(a, b, workday_8).expect("workday bucket present after reopen");
+    assert_eq!(s.mean_dur, 120, "Welford mean over [100,140]");
+    assert_eq!(s.count, 2);
+    assert!((s.std_dur - 20.0).abs() < 1e-6, "population std over [100,140] is 20, got {}", s.std_dur);
+    let w = db.get(a, b, weekend_8).expect("weekend bucket present");
+    assert_eq!(w.mean_dur, 90, "weekend bucket does not alias the workday one");
+    assert!(w.std_dur < 1e-9, "single weekend sample has zero variance");
+    // A bucket never observed is absent.
+    assert!(db.get(a, b, Some((0, 17))).is_none(), "unseen window is unknown");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn offline_reuse_serves_other_days_free() {
+    // Observe one representative workday-08:00 (cold build), then a *different*
+    // weekday at the same hour maps to the same (workday, 08) bucket → served
+    // entirely from the DB, buying nothing new (the killer cost-saver).
+    let (coords, truth) = make_world();
+    let path = std::env::temp_dir().join(format!("mpee_broker_offline_{}.bin", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let departure = Some(DepartureProfile { weekday_class: WeekdayClass::Workday, hour: 8 });
+
+    let first_bought = {
+        let broker = BrokerMatrixSource::with_db(
+            TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+            BrokerPolicy { departure, ..Default::default() },
+            CellDb::open(&path, "car"),
+        );
+        broker.build(&coords).unwrap();
+        let st = broker.last_stats();
+        assert!(st.cells_bought > 0, "cold workday profile must buy the skeleton");
+        st.cells_bought
+    };
+
+    // A later "Thursday" at 08:00 — same class+hour bucket, warm DB.
+    let broker = BrokerMatrixSource::with_db(
+        TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+        BrokerPolicy { departure, ..Default::default() },
+        CellDb::open(&path, "car"),
+    );
+    let m = broker.build(&coords).unwrap();
+    let st = broker.last_stats();
+    assert_eq!(st.cells_bought, 0, "warm workday profile buys nothing on another day");
+    assert_eq!(st.db_hits, first_bought, "every skeleton cell served from the profile");
+    // The baked matrix reflects the learned means (≈ truth here; one sample).
+    assert_eq!(m.durations[0 * N + PER], truth.durations[0 * N + PER]);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn rush_hour_profile_costs_more_than_offpeak() {
+    // The same places, two time-of-day profiles: a rush window (×1.6 travel
+    // time) must bake a strictly larger matrix than the off-peak window (×1.0).
+    let (coords, truth) = make_world();
+    let rush = BrokerMatrixSource::new(
+        ScaledSource::new(&truth, 1.6),
+        BrokerPolicy {
+            departure: Some(DepartureProfile { weekday_class: WeekdayClass::Workday, hour: 8 }),
+            ..Default::default()
+        },
+    );
+    let offpeak = BrokerMatrixSource::new(
+        ScaledSource::new(&truth, 1.0),
+        BrokerPolicy {
+            departure: Some(DepartureProfile { weekday_class: WeekdayClass::Workday, hour: 13 }),
+            ..Default::default()
+        },
+    );
+    let mr = rush.build(&coords).unwrap();
+    let mo = offpeak.build(&coords).unwrap();
+    assert!(
+        total_duration(&mr) > total_duration(&mo),
+        "rush profile ({}) should exceed off-peak ({})",
+        total_duration(&mr),
+        total_duration(&mo)
+    );
+}
+
+#[test]
+fn uncertainty_weight_penalises_high_variance_cells() {
+    // Seed a few depot-row cells with cross-day variance (queue zones), then let
+    // the broker bake `mean + W·std`: those arcs cost more than their mean and
+    // register as hotspots, so the solver routes around them.
+    let (coords, truth) = make_world();
+    let path = std::env::temp_dir().join(format!("mpee_broker_uncert_{}.bin", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let when: brooom::broker::TimeBucket = Some((0, 8));
+
+    // Cell (0,j) observed on two "days" as 100 then 140 → mean 120, std 20.
+    {
+        let mut db = CellDb::open(&path, "car");
+        for j in 1..4usize {
+            db.observe(coords[0], coords[j], when, 100, 1000);
+            db.observe(coords[0], coords[j], when, 140, 1000);
+        }
+        db.flush();
+    }
+
+    let broker = BrokerMatrixSource::with_db(
+        TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+        BrokerPolicy {
+            departure: Some(DepartureProfile { weekday_class: WeekdayClass::Workday, hour: 8 }),
+            uncertainty_weight: 2.0,
+            ..Default::default()
+        },
+        CellDb::open(&path, "car"),
+    );
+    let m = broker.build(&coords).unwrap();
+    let st = broker.last_stats();
+    assert!(st.hotspots >= 3, "the three high-variance cells should be flagged, got {}", st.hotspots);
+    // mean 120 + 2·std(20) = 160 baked into the static matrix.
+    assert_eq!(m.durations[0 * N + 1], 160, "uncertainty penalty baked: mean(120) + 2*std(20)");
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn off_mode_buys_everything() {
     let (coords, truth) = make_world();

@@ -132,6 +132,11 @@ pub enum BrokerField {
     CrossingCount,
     /// `broker.haversine_km` — straight-line km of the candidate pair.
     HaversineKm,
+    /// `broker.departure_hour` — hour-of-day (0–23) of the chosen temporal
+    /// window, or -1 when no profile is set (Stage E1).
+    DepartureHour,
+    /// `broker.weekday_class` — 0 = workday, 1 = weekend, -1 = no profile (E1).
+    WeekdayClass,
 }
 
 /// List-valued fields (kept separate so they're never read as scalars).

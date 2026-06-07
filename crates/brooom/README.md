@@ -267,6 +267,24 @@ BROOOM_GPU_REPEATS=4 BROOOM_GPU_KICK=8 BROOOM_PENALTY_LS=1 \
 | `--options PATH`        | none    | JSON file with an `options` object (`objective` + `dimensions`), merged over the input's `options` |
 | `--dimensions JSON`     | none    | Inline JSON list of custom accumulator dimensions |
 | `--warm-start PATH`     | none    | Vroom-style solution JSON to seed local search (strictly safe) |
+| `--broker`              | off     | Cost-aware matrix broker: buy only the cells the solver reads, derive the rest ([docs](docs/matrix-broker.md)) |
+| `--matrix-db PATH`      | none    | Broker cell DB: reuse bought cells across runs + frequency counter |
+| `--buy-budget N`        | none    | Broker hard spend cap (priced by `--cost-policy`); excess is derived |
+| `--cost-policy SPELL`   | none    | Broker cost/buy policy (PySpell over `broker.*`) |
+| `--departure CLASS:HOUR`| none    | Broker temporal profile (e.g. `workday:08`) — learn one day, reuse offline |
+| `--uncertainty-weight W`| 0       | Broker: bake `mean + W·std` so queue-prone arcs cost more |
+| `--offline-reuse`       | off     | Broker: serve the chosen window from the DB; buy nothing when warm |
+
+### Cost-aware matrix broker — pay only for the cells you use
+
+When the matrix comes from a **paid/limited** provider (Google Distance Matrix, a
+metered OSRM, your own endpoint), the broker buys only the thin *skeleton* the
+local search actually reads, **derives** the long-range rest, **reuses** a local
+DB across runs (warm DB → zero buys the second time), and — with temporal
+profiles — **learns one representative day of traffic and replays it offline** for
+every similar day, baking congestion/uncertainty into the matrix so the solver
+routes around the queues. Provider-agnostic; absent `--broker`, routing is
+unchanged. **Full story + sales argument: [`docs/matrix-broker.md`](docs/matrix-broker.md).**
 
 ### Environment variables
 

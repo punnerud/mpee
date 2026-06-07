@@ -1,4 +1,4 @@
-//! Persistent cell database for the matrix broker (Stage B).
+//! Persistent cell database for the matrix broker (Stage B + temporal E1).
 //!
 //! Bought cells are keyed by **quantised coordinates** (not matrix index), so a
 //! distance learned in one solve is reused by any later solve that touches the
@@ -7,6 +7,16 @@
 //! buying precisely; rarely-touched houses (low count) can be derived instead
 //! (the frequency prune, opt-in via `freq_threshold`). The store is a small
 //! best-effort flat file, modelled on `cache.rs`.
+//!
+//! **Temporal profiles (Stage E1).** The cell key optionally folds in a
+//! `(weekday_class, hour)` bucket, and each cell carries **running statistics**
+//! instead of a single number: a Welford mean + variance over every observation
+//! in that time bucket. The mean is the typical (e.g. rush-hour) travel time;
+//! the std-dev is the *uncertainty* — how much this arc deviates from "normal"
+//! (a queue/incident signal). The killer cost-saver: observe one representative
+//! workday's hourly cells, then reuse those time-of-day patterns OFFLINE for
+//! every similar day — the key is a weekday *class* (Mon–Fri merged), not a
+//! date, so Tuesday-08:00 data answers Thursday-08:00 with zero new buys.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -14,7 +24,66 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 5] = b"MBKZ1";
+// Bumped from MBKZ1: cells now carry Welford statistics and an optional
+// (weekday_class, hour) bucket in the key. MBKZ1 files load as empty (the DB is
+// a cache, not a source of truth — a clean break is acceptable).
+const MAGIC: &[u8; 5] = b"MBKZ2";
+
+/// A time bucket for a cell observation: `(weekday_class, hour)`. `weekday_class`
+/// is `0` for a workday (Mon–Fri merged) and `1` for the weekend; `hour` is the
+/// hour-of-day (0–23). Passing `None` keys the cell time-agnostically (Stages
+/// A–D behaviour — one bucket for all observations).
+pub type TimeBucket = Option<(u8, u8)>;
+
+/// What a cell lookup returns: the running mean duration/distance and the
+/// duration's std-dev (the uncertainty signal). `count` is how many
+/// observations back it (0 = unknown).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CellStat {
+    pub mean_dur: i32,
+    pub mean_dist: i32,
+    /// Std-dev of the duration over all observations in this (cell, time)
+    /// bucket — the "deviation from normal" used as a congestion/uncertainty
+    /// penalty by the broker.
+    pub std_dur: f64,
+    pub count: u32,
+}
+
+/// Welford running mean + variance for one cell/time bucket.
+#[derive(Debug, Clone, Copy, Default)]
+struct Welford {
+    count: u32,
+    mean_dur: f64,
+    m2_dur: f64,
+    mean_dist: f64,
+}
+
+impl Welford {
+    #[inline]
+    fn observe(&mut self, dur: i32, dist: i32) {
+        self.count += 1;
+        let n = self.count as f64;
+        let d = dur as f64;
+        let delta = d - self.mean_dur;
+        self.mean_dur += delta / n;
+        self.m2_dur += delta * (d - self.mean_dur);
+        self.mean_dist += (dist as f64 - self.mean_dist) / n;
+    }
+    #[inline]
+    fn stat(&self) -> CellStat {
+        let std_dur = if self.count > 0 {
+            (self.m2_dur / self.count as f64).max(0.0).sqrt()
+        } else {
+            0.0
+        };
+        CellStat {
+            mean_dur: self.mean_dur.round() as i32,
+            mean_dist: self.mean_dist.round() as i32,
+            std_dur,
+            count: self.count,
+        }
+    }
+}
 
 /// Quantise a coordinate component to ~6 decimal degrees (sub-metre).
 #[inline]
@@ -32,8 +101,8 @@ fn node_key(c: [f64; 2]) -> u64 {
 pub struct CellDb {
     path: PathBuf,
     profile: u64,
-    /// cell key → (duration_s, distance_m, seen_count)
-    cells: HashMap<u64, (i32, i32, u32)>,
+    /// cell key → running statistics for that (coord-pair, time-bucket).
+    cells: HashMap<u64, Welford>,
     /// node key → seen_count (accrues across runs)
     node_seen: HashMap<u64, u32>,
     dirty: bool,
@@ -56,27 +125,42 @@ impl CellDb {
         db
     }
 
+    /// Key for a directed coord pair in a time bucket. `when = None` folds all
+    /// observations into one bucket (time-agnostic, Stages A–D). `when =
+    /// Some((class, hour))` keys per weekday-class + hour, so a workday-08:00
+    /// profile is distinct from a weekend-08:00 one — and reused across all days
+    /// of the same class.
     #[inline]
-    pub fn cell_key(&self, ci: [f64; 2], cj: [f64; 2]) -> u64 {
+    pub fn cell_key(&self, ci: [f64; 2], cj: [f64; 2], when: TimeBucket) -> u64 {
         let mut h = DefaultHasher::new();
         self.profile.hash(&mut h);
         node_key(ci).hash(&mut h);
         node_key(cj).hash(&mut h);
+        // Tag the temporal dimension so a time-keyed cell never aliases a
+        // time-agnostic one (the `1u8` discriminant before the bucket).
+        match when {
+            Some((class, hour)) => {
+                1u8.hash(&mut h);
+                class.hash(&mut h);
+                hour.hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
         h.finish()
     }
 
-    /// Known (duration, distance) for a directed coord pair, if cached.
-    pub fn get(&self, ci: [f64; 2], cj: [f64; 2]) -> Option<(i32, i32)> {
-        let k = self.cell_key(ci, cj);
-        self.cells.get(&k).map(|&(d, m, _)| (d, m))
+    /// Known statistics for a directed coord pair in a time bucket, if cached.
+    pub fn get(&self, ci: [f64; 2], cj: [f64; 2], when: TimeBucket) -> Option<CellStat> {
+        let k = self.cell_key(ci, cj, when);
+        self.cells.get(&k).map(|w| w.stat())
     }
 
-    /// Record a bought cell.
-    pub fn put(&mut self, ci: [f64; 2], cj: [f64; 2], dur: i32, dist: i32) {
-        let k = self.cell_key(ci, cj);
-        let e = self.cells.entry(k).or_insert((dur, dist, 0));
-        e.0 = dur;
-        e.1 = dist;
+    /// Record one observation of a cell (Welford update). Repeated calls in the
+    /// same (cell, time) bucket build up the mean (typical travel time) and the
+    /// std-dev (uncertainty / deviation from normal).
+    pub fn observe(&mut self, ci: [f64; 2], cj: [f64; 2], when: TimeBucket, dur: i32, dist: i32) {
+        let k = self.cell_key(ci, cj, when);
+        self.cells.entry(k).or_default().observe(dur, dist);
         self.dirty = true;
     }
 
@@ -97,25 +181,27 @@ impl CellDb {
 
     fn load(&mut self) {
         let bytes = match std::fs::read(&self.path) {
-            Ok(b) if b.len() >= 5 + 16 && &b[..5] == MAGIC => b,
+            Ok(b) if b.len() >= 5 + 8 && &b[..5] == MAGIC => b,
             _ => return,
         };
         let mut o = 5usize;
         let rd_u64 = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
-        let rd_i32 = |b: &[u8], o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         let rd_u32 = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let rd_f64 = |b: &[u8], o: usize| f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
         let ncells = rd_u64(&bytes, o) as usize;
         o += 8;
+        // Each cell record: key(8) + count(4) + mean_dur(8) + m2_dur(8) + mean_dist(8) = 36 bytes.
         for _ in 0..ncells {
-            if o + 20 > bytes.len() {
+            if o + 36 > bytes.len() {
                 return;
             }
             let key = rd_u64(&bytes, o);
-            let dur = rd_i32(&bytes, o + 8);
-            let dist = rd_i32(&bytes, o + 12);
-            let seen = rd_u32(&bytes, o + 16);
-            o += 20;
-            self.cells.insert(key, (dur, dist, seen));
+            let count = rd_u32(&bytes, o + 8);
+            let mean_dur = rd_f64(&bytes, o + 12);
+            let m2_dur = rd_f64(&bytes, o + 20);
+            let mean_dist = rd_f64(&bytes, o + 28);
+            o += 36;
+            self.cells.insert(key, Welford { count, mean_dur, m2_dur, mean_dist });
         }
         if o + 8 > bytes.len() {
             return;
@@ -138,14 +224,16 @@ impl CellDb {
         if !self.dirty {
             return;
         }
-        let mut buf: Vec<u8> = Vec::with_capacity(5 + 8 + self.cells.len() * 20 + 8 + self.node_seen.len() * 12);
+        let mut buf: Vec<u8> =
+            Vec::with_capacity(5 + 8 + self.cells.len() * 36 + 8 + self.node_seen.len() * 12);
         buf.extend_from_slice(MAGIC);
         buf.extend_from_slice(&(self.cells.len() as u64).to_le_bytes());
-        for (&k, &(dur, dist, seen)) in &self.cells {
+        for (&k, w) in &self.cells {
             buf.extend_from_slice(&k.to_le_bytes());
-            buf.extend_from_slice(&dur.to_le_bytes());
-            buf.extend_from_slice(&dist.to_le_bytes());
-            buf.extend_from_slice(&seen.to_le_bytes());
+            buf.extend_from_slice(&w.count.to_le_bytes());
+            buf.extend_from_slice(&w.mean_dur.to_le_bytes());
+            buf.extend_from_slice(&w.m2_dur.to_le_bytes());
+            buf.extend_from_slice(&w.mean_dist.to_le_bytes());
         }
         buf.extend_from_slice(&(self.node_seen.len() as u64).to_le_bytes());
         for (&k, &seen) in &self.node_seen {

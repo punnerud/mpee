@@ -88,6 +88,15 @@ it**, which is where the speed and memory wins come from.
   *total* wall-clock (matrix + solve) beats the OSRM+VROOM split, and it keeps
   going where they OOM (50 k on a laptop). At N ≥ 1,000 it beats the field on
   solution quality too.
+- **Paid matrix? Buy almost none of it.** If your travel times come from a
+  per-call API (Google Distance Matrix, a metered OSRM), the **cost-aware matrix
+  broker** buys only the thin skeleton the solver actually reads, derives the
+  long-range rest, and reuses a local DB so the same cell is never bought twice
+  (warm DB → zero buys next run). Temporal profiles take it further: **learn one
+  representative day of live traffic, then replay it offline** for every similar
+  day — congestion and uncertainty baked into the matrix so the solver routes
+  around the queues. Offline by default; a few paid cells only when reality
+  demands it. ([docs](crates/brooom/docs/matrix-broker.md))
 - **No manual zoning — feed it the whole fleet.** The usual way to make large
   VRP tractable is to hand-carve the area into territories/groupings and solve
   each separately, then stitch. MPEE doesn't ask for that: it **auto-decomposes
