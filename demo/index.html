@@ -144,7 +144,7 @@
   }
   #opt-hint::before{content:'';position:absolute;top:-5px;right:14px;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:5px solid var(--accent)}
   /* Small address read-out, sitting just left of the bottom-right zoom control. */
-  #addr-hud{position:fixed;right:52px;bottom:12px;z-index:5;max-width:min(62vw,440px);
+  #addr-hud{position:fixed;right:52px;bottom:34px;z-index:6;max-width:min(62vw,440px);
     background:rgba(14,20,25,.86);border:1px solid var(--line);border-radius:9px;
     padding:6px 10px;font-size:.82rem;color:var(--muted);backdrop-filter:blur(6px);
     display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;
@@ -243,7 +243,7 @@
 <script type="module">
 // ?v= cache-busts the engine on each deploy (GitHub Pages caches assets ~10 min).
 import init, { Engine, webgpu_probe } from './engine/mpee_wasm.js?v=2d0';
-const BUILD = '3b0';
+const BUILD = '3c0';
 
 const SF = { lng: -122.4194, lat: 37.7749 };
 const $ = (id) => document.getElementById(id);
