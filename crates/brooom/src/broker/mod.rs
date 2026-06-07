@@ -21,13 +21,40 @@
 //! cell DB + frequency prune; Stage C/D add PySpell pricing + a Google provider.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use crate::constraint::Verdict;
 use crate::error::Result;
 use crate::matrix::{CellRequest, CellSource, HaversineMatrix, Matrix, MatrixSource};
 
+/// A compiled cost/policy function over [`BrokerVars`] — produced by
+/// `crate::pyspell::compile_broker_rust` (or any closure). The broker prices a
+/// batch with it and trims buying to stay under `buy_budget`.
+pub type BrokerCostFn = dyn Fn(&BrokerVars) -> Verdict + Send + Sync;
+
 mod cell_db;
 pub use cell_db::CellDb;
+
+/// Variables a PySpell cost/policy expression sees (the `broker.*` namespace).
+/// Fed to a compiled spell to price a batch, cap a budget, or decide buy/derive.
+/// (Stage C — see `crate::pyspell::compile_broker_rust`.)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BrokerVars {
+    /// Number of locations in this solve.
+    pub n: i64,
+    /// Cells in the batch being priced.
+    pub batch_size: i64,
+    /// Provider price tier (0 = base).
+    pub tier: i64,
+    /// Remaining buy budget before this batch.
+    pub budget_remaining: f64,
+    /// Cells already known (DB hits) this solve.
+    pub cells_known: i64,
+    /// How many times the candidate node has been seen across runs (frequency).
+    pub crossing_count: i64,
+    /// Straight-line km between the candidate pair (a cheap importance signal).
+    pub haversine_km: f64,
+}
 
 /// How aggressively to derive instead of buy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +85,14 @@ pub struct BrokerPolicy {
     /// instead). 0 = off (safe default; never prunes). The K-nearest skeleton is
     /// never pruned, so local search always reads exact data.
     pub freq_threshold: u32,
+    /// Hard cap on what may be spent buying cells, priced by the broker's
+    /// `cost_fn` (Stage C). When the skeleton's buy cost would exceed this, the
+    /// buy list is trimmed — keeping the K-nearest prefix (LS-critical) and
+    /// demoting the rest to derivation. `None` = no cap (safe default). Requires
+    /// a `cost_fn` (see `BrokerMatrixSource::with_cost_fn`).
+    pub buy_budget: Option<f64>,
+    /// Provider price tier passed to the cost spell.
+    pub tier: i64,
 }
 
 impl Default for BrokerPolicy {
@@ -69,6 +104,8 @@ impl Default for BrokerPolicy {
             buy_depot_full: true,
             max_landmarks: 32,
             freq_threshold: 0,
+            buy_budget: None,
+            tier: 0,
         }
     }
 }
@@ -101,19 +138,33 @@ pub struct BrokerMatrixSource<S: CellSource> {
     inner: S,
     policy: BrokerPolicy,
     db: Option<Mutex<CellDb>>,
+    cost_fn: Option<Arc<BrokerCostFn>>,
     stats: Mutex<BrokerStats>,
 }
 
 impl<S: CellSource> BrokerMatrixSource<S> {
     pub fn new(inner: S, policy: BrokerPolicy) -> Self {
-        Self { inner, policy, db: None, stats: Mutex::new(BrokerStats::default()) }
+        Self { inner, policy, db: None, cost_fn: None, stats: Mutex::new(BrokerStats::default()) }
     }
 
     /// With a persistent cell DB: bought cells are reused across runs and a
     /// per-node frequency counter accrues (Stage B). The DB is flushed at the
     /// end of each `build()`.
     pub fn with_db(inner: S, policy: BrokerPolicy, db: CellDb) -> Self {
-        Self { inner, policy, db: Some(Mutex::new(db)), stats: Mutex::new(BrokerStats::default()) }
+        Self {
+            inner,
+            policy,
+            db: Some(Mutex::new(db)),
+            cost_fn: None,
+            stats: Mutex::new(BrokerStats::default()),
+        }
+    }
+
+    /// Attach a compiled cost/policy function (Stage C) used to price buys
+    /// against `policy.buy_budget`. See `crate::pyspell::compile_broker_rust`.
+    pub fn with_cost_fn(mut self, cost_fn: Arc<BrokerCostFn>) -> Self {
+        self.cost_fn = Some(cost_fn);
+        self
     }
 
     /// Stats from the most recent `build()`.
@@ -174,6 +225,26 @@ impl<S: CellSource> MatrixSource for BrokerMatrixSource<S> {
             }
         } else {
             to_fetch.extend_from_slice(&req.pairs);
+        }
+
+        // 3a-bis. Budget trim (Stage C): if a cost_fn + buy_budget are set and the
+        // miss list would exceed the budget, keep the largest affordable prefix
+        // (K-nearest comes first in `req.pairs`, so the LS-critical cells survive)
+        // and demote the rest to derivation.
+        if let (Some(budget), Some(cf)) = (self.policy.buy_budget, &self.cost_fn) {
+            let full = to_fetch.len();
+            if batch_cost(cf.as_ref(),full, n, self.policy.tier, budget, db_hits) > budget {
+                let (mut lo, mut hi) = (0usize, full);
+                while lo < hi {
+                    let mid = (lo + hi + 1) / 2;
+                    if batch_cost(cf.as_ref(),mid, n, self.policy.tier, budget, db_hits) <= budget {
+                        lo = mid;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                to_fetch.truncate(lo);
+            }
         }
 
         // 3b. Buy the misses from the provider.
@@ -313,6 +384,24 @@ impl<S: CellSource> BrokerMatrixSource<S> {
 #[inline]
 fn cell_key(i: u32, j: u32) -> u64 {
     ((i as u64) << 32) | j as u64
+}
+
+/// Price a batch of `batch` cells via the cost spell. Penalty → its value;
+/// Feasible → free; Infeasible → unaffordable (∞).
+fn batch_cost(cf: &BrokerCostFn, batch: usize, n: usize, tier: i64, budget: f64, known: usize) -> f64 {
+    let vars = BrokerVars {
+        n: n as i64,
+        batch_size: batch as i64,
+        tier,
+        budget_remaining: budget,
+        cells_known: known as i64,
+        ..Default::default()
+    };
+    match cf(&vars) {
+        Verdict::Penalty(x) => x,
+        Verdict::Feasible => 0.0,
+        Verdict::Infeasible => f64::INFINITY,
+    }
 }
 
 /// Farthest-point landmark sampling on the prior (greedy max-min).

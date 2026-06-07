@@ -121,6 +121,30 @@ fn wrap_arc(program: Arc<ArcProgram>) -> Arc<TransitFn> {
     Arc::new(move |ctx: &ArcCtx| eval::run_arc(&program, ctx).unwrap_or(0))
 }
 
+/// A compiled matrix-broker cost/policy expression: maps a [`BrokerVars`]
+/// snapshot to a [`Verdict`] (number → price/penalty; bool → buy/skip). Used by
+/// `crate::broker` to price API requests and decide buy/derive/skip in the same
+/// DSL as the routing constraints. A broker spell is structurally a global one
+/// over the `broker.*` namespace, so it reuses the global front-end.
+pub type BrokerFn = dyn Fn(&crate::broker::BrokerVars) -> Verdict + Send + Sync;
+
+/// Compile a broker cost/policy expression in **Rust** syntax.
+pub fn compile_broker_rust(src: &str) -> Result<Arc<BrokerFn>, DslError> {
+    let program = Arc::new(rust_frontend::compile_rust_global(src)?);
+    Ok(Arc::new(move |v: &crate::broker::BrokerVars| {
+        eval::run_broker(&program, v).unwrap_or(Verdict::Infeasible)
+    }))
+}
+
+/// Python-syntax counterpart of [`compile_broker_rust`].
+#[cfg(feature = "pyspell-python")]
+pub fn compile_broker_python(src: &str) -> Result<Arc<BrokerFn>, DslError> {
+    let program = Arc::new(py_frontend::compile_python_global(src)?);
+    Ok(Arc::new(move |v: &crate::broker::BrokerVars| {
+        eval::run_broker(&program, v).unwrap_or(Verdict::Infeasible)
+    }))
+}
+
 /// Probe bound a program can contribute to the fast insertion probe, if it is a
 /// single `field <= const` hard bound on a probe-visible field.
 pub fn probe_bound_of(program: &Program) -> Option<ProbeBound> {

@@ -11,10 +11,12 @@ use crate::global_constraint::SolutionView;
 
 use crate::dimension::ArcCtx;
 
+use crate::broker::BrokerVars;
+
 use super::error::DslError;
 use super::ir::{
-    ArcField, ArcProgram, BinOp, BoolOp, Builtin, CmpOp, Expr, Field, GlobalProgram, ListField,
-    Program, SolutionField, UnOp, Value,
+    ArcField, ArcProgram, BinOp, BoolOp, BrokerField, Builtin, CmpOp, Expr, Field, GlobalProgram,
+    ListField, Program, SolutionField, UnOp, Value,
 };
 
 /// The data a tree-walk reads its leaf fields from. A per-route program walks a
@@ -29,6 +31,9 @@ trait Frame {
     fn read_solution_field(&self, sf: SolutionField) -> Result<Value, DslError>;
     fn read_arc_field(&self, _af: ArcField) -> Result<Value, DslError> {
         Err(DslError::Type("`arc.*` is only available in a dimension-transit expression".into()))
+    }
+    fn read_broker_field(&self, _bf: BrokerField) -> Result<Value, DslError> {
+        Err(DslError::Type("`broker.*` is only available in a broker cost/policy expression".into()))
     }
 }
 
@@ -141,6 +146,63 @@ fn read_arc_field(af: ArcField, ctx: &ArcCtx) -> Value {
     }
 }
 
+struct BrokerFrame {
+    vars: BrokerVars,
+    locals: Vec<Value>,
+    budget: u32,
+}
+
+impl Frame for BrokerFrame {
+    fn budget(&mut self) -> &mut u32 {
+        &mut self.budget
+    }
+    fn locals(&self) -> &[Value] {
+        &self.locals
+    }
+    fn read_field(&self, _fld: Field) -> Result<Value, DslError> {
+        Err(DslError::Type("`route.*`/`vehicle.*` is not available in a broker expression".into()))
+    }
+    fn read_list_field(&self, _lf: ListField) -> Result<Value, DslError> {
+        Err(DslError::Type("list fields are not available in a broker expression".into()))
+    }
+    fn read_solution_field(&self, _sf: SolutionField) -> Result<Value, DslError> {
+        Err(DslError::Type("`solution.*` is not available in a broker expression".into()))
+    }
+    fn read_broker_field(&self, bf: BrokerField) -> Result<Value, DslError> {
+        Ok(read_broker_field(bf, &self.vars))
+    }
+}
+
+/// Evaluate a broker cost/policy program against one [`BrokerVars`] snapshot. A
+/// numeric result is the price/penalty (per the `value_to_verdict` contract); a
+/// bool is a buy/skip decision. Reuses the `GlobalProgram` shape — a broker
+/// spell is structurally a global one over the `broker.*` namespace.
+pub fn run_broker(program: &GlobalProgram, vars: &BrokerVars) -> Result<Verdict, DslError> {
+    let mut f = BrokerFrame {
+        vars: *vars,
+        locals: vec![Value::Int(0); program.n_locals as usize],
+        budget: program.max_steps,
+    };
+    for b in &program.body {
+        let v = eval(&b.expr, &mut f)?;
+        f.locals[b.slot as usize] = v;
+    }
+    let out = eval(&program.ret, &mut f)?;
+    value_to_verdict(out)
+}
+
+fn read_broker_field(bf: BrokerField, v: &BrokerVars) -> Value {
+    match bf {
+        BrokerField::N => Value::Int(v.n),
+        BrokerField::BatchSize => Value::Int(v.batch_size),
+        BrokerField::Tier => Value::Int(v.tier),
+        BrokerField::BudgetRemaining => Value::Float(v.budget_remaining),
+        BrokerField::CellsKnown => Value::Int(v.cells_known),
+        BrokerField::CrossingCount => Value::Int(v.crossing_count),
+        BrokerField::HaversineKm => Value::Float(v.haversine_km),
+    }
+}
+
 /// Evaluate a compiled program against one finished route, mapping its final
 /// value to a `Verdict`:
 /// * `bool`   → `Feasible` / `Infeasible`
@@ -213,6 +275,7 @@ fn eval(e: &Expr, f: &mut dyn Frame) -> Result<Value, DslError> {
         Expr::Field(fld) => f.read_field(*fld),
         Expr::SolutionField(sf) => f.read_solution_field(*sf),
         Expr::ArcField(af) => f.read_arc_field(*af),
+        Expr::BrokerField(bf) => f.read_broker_field(*bf),
         Expr::ListField(lf) => f.read_list_field(*lf),
         Expr::Bin(op, a, b) => {
             let (x, y) = (eval(a, f)?, eval(b, f)?);

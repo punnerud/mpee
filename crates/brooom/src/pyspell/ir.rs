@@ -113,6 +113,27 @@ pub enum ArcField {
     ArcDuration,
 }
 
+/// Scalar fields readable from a matrix-broker cost/policy context
+/// (`crate::broker::BrokerVars`), used only by a broker program. Lets users
+/// price API requests and express buy/derive/skip policy in the same DSL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokerField {
+    /// `broker.n` — locations in this solve.
+    N,
+    /// `broker.batch_size` — cells in the batch being priced.
+    BatchSize,
+    /// `broker.tier` — provider price tier.
+    Tier,
+    /// `broker.budget_remaining` — buy budget left.
+    BudgetRemaining,
+    /// `broker.cells_known` — cells already cached (DB hits).
+    CellsKnown,
+    /// `broker.crossing_count` — node frequency across runs.
+    CrossingCount,
+    /// `broker.haversine_km` — straight-line km of the candidate pair.
+    HaversineKm,
+}
+
 /// List-valued fields (kept separate so they're never read as scalars).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListField {
@@ -189,6 +210,8 @@ pub enum Expr {
     SolutionField(SolutionField),
     /// An `arc.*` scalar — only valid inside a dimension-transit program.
     ArcField(ArcField),
+    /// A `broker.*` scalar — only valid inside a broker cost/policy program.
+    BrokerField(BrokerField),
     ListField(ListField),
     Local(u16),
     Bin(BinOp, Box<Expr>, Box<Expr>),

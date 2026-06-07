@@ -168,6 +168,66 @@ fn db_reuse_makes_second_solve_nearly_free() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[cfg(feature = "pyspell")]
+#[test]
+fn pricing_and_policy_spells_evaluate() {
+    use brooom::broker::BrokerVars;
+    use brooom::constraint::Verdict;
+
+    // Tiered cost: tier 0 = 5/cell, tier 1 = 4/cell.
+    let cost = brooom::pyspell::compile_broker_rust(
+        "if broker.tier == 0 { broker.batch_size * 5 } else { broker.batch_size * 4 }",
+    )
+    .unwrap();
+    assert!(matches!(
+        cost(&BrokerVars { batch_size: 100, tier: 0, ..Default::default() }),
+        Verdict::Penalty(p) if (p - 500.0).abs() < 1e-6
+    ));
+    assert!(matches!(
+        cost(&BrokerVars { batch_size: 100, tier: 1, ..Default::default() }),
+        Verdict::Penalty(p) if (p - 400.0).abs() < 1e-6
+    ));
+
+    // Buy/skip predicate: buy hubs (seen ≥ 10) or near pairs (< 5 km).
+    let policy = brooom::pyspell::compile_broker_rust(
+        "broker.crossing_count >= 10 || broker.haversine_km < 5.0",
+    )
+    .unwrap();
+    assert!(matches!(
+        policy(&BrokerVars { crossing_count: 12, ..Default::default() }),
+        Verdict::Feasible
+    ));
+    assert!(matches!(
+        policy(&BrokerVars { crossing_count: 1, haversine_km: 9.0, ..Default::default() }),
+        Verdict::Infeasible
+    ));
+}
+
+#[cfg(feature = "pyspell")]
+#[test]
+fn buy_budget_caps_cells_bought() {
+    let (coords, truth) = make_world();
+    // Price = 1 per cell; cap the spend at 5000 cells.
+    let cost = brooom::pyspell::compile_broker_rust("broker.batch_size").unwrap();
+    let budget = 5000.0;
+    let policy = BrokerPolicy { buy_budget: Some(budget), ..Default::default() };
+    let broker = BrokerMatrixSource::new(
+        TruthSource { truth: truth.clone(), fetched: Mutex::new(0) },
+        policy,
+    )
+    .with_cost_fn(cost);
+    broker.build(&coords).unwrap();
+    let st = broker.last_stats();
+    assert!(st.cells_bought > 0, "should still buy the affordable prefix");
+    assert!(
+        st.cells_bought as f64 <= budget,
+        "bought {} cells, over the {budget} budget",
+        st.cells_bought
+    );
+    // The full skeleton is far larger than 5000, so the budget actually bites.
+    assert!(st.cells_bought as f64 >= budget * 0.9, "budget should be ~saturated");
+}
+
 #[test]
 fn off_mode_buys_everything() {
     let (coords, truth) = make_world();

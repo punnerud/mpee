@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use super::error::DslError;
 use super::ir::{
-    ArcField, ArcProgram, Builtin, CmpOp, Expr, Field, GlobalProgram, LetBinding, ListField,
-    Program, SolutionField, Value, DEFAULT_MAX_STEPS,
+    ArcField, ArcProgram, BrokerField, Builtin, CmpOp, Expr, Field, GlobalProgram, LetBinding,
+    ListField, Program, SolutionField, Value, DEFAULT_MAX_STEPS,
 };
 
 pub(crate) struct Ctx {
@@ -121,6 +121,21 @@ pub(crate) fn resolve_field(base: &str, field: &str, ctx: &mut Ctx) -> Result<Ex
                 "max_route_load" => sf(SolutionField::MaxRouteLoad),
                 "average_duration" => sf(SolutionField::AverageDuration),
                 _ => Err(DslError::UnknownField { base: "solution", field: field.to_string() }),
+            }
+        }
+        // Broker cost/policy fields, only meaningful inside a broker program. The
+        // evaluator's context decides whether they read.
+        "broker" => {
+            let bf = |b: BrokerField| Ok(Expr::BrokerField(b));
+            match field {
+                "n" => bf(BrokerField::N),
+                "batch_size" => bf(BrokerField::BatchSize),
+                "tier" => bf(BrokerField::Tier),
+                "budget_remaining" => bf(BrokerField::BudgetRemaining),
+                "cells_known" => bf(BrokerField::CellsKnown),
+                "crossing_count" => bf(BrokerField::CrossingCount),
+                "haversine_km" => bf(BrokerField::HaversineKm),
+                _ => Err(DslError::UnknownField { base: "broker", field: field.to_string() }),
             }
         }
         _ => Err(DslError::UnknownName(base.to_string())),
