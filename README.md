@@ -457,9 +457,10 @@ mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
     --cache data/greater-london-latest.osm.pbf
 #   → 50 stops, 3 vehicles used, 60.0 km total (solved in 4.6s)
 
-# 4. Geocode within the same area, offline (street ⇄ coordinate, + crossings):
-mpee reverse  51.5080,-0.1281 --cache data/greater-london-latest.osm.pbf  # → Trafalgar Square
-mpee geocode  "Baker Street"  --cache data/greater-london-latest.osm.pbf  # → 51.522072,-0.157497
+# 4. Geocode within the same area, offline — streets AND house numbers:
+mpee reverse  51.5080,-0.1281 --cache data/greater-london-latest.osm.pbf  # → Baker Street 221B, NW1 London
+mpee geocode  "Baker Street 221B" --cache data/greater-london-latest.osm.pbf  # → 51.5237,-0.1585
+mpee geocode  "Baker Street"  --cache data/greater-london-latest.osm.pbf  # → 51.522072,-0.157497 (street)
 mpee crossing "Oxford Street" "Regent Street" --cache data/...            # → Oxford Circus (LAT,LON)
 ```
 
@@ -470,8 +471,9 @@ import mpee
 r = mpee.Router("data/greater-london-latest.osm.pbf.pp", "data/greater-london-latest.osm.pbf.ch")
 leg = r.route(51.5080, -0.1281, 51.5138, -0.0984)     # {distance_km, duration_min, ...}
 plan = r.optimize(stops, vehicles=5, capacity=20)      # multi-vehicle VRP
-name = r.reverse(51.5080, -0.1281)                     # → "Trafalgar Square" (offline geocoding)
-hit  = r.geocode("Baker Street")                       # → {"name", "lat", "lon"}
+name = r.reverse(51.5080, -0.1281)                     # → "Baker Street 221B, NW1 London" (house number when available)
+hit  = r.geocode("Baker Street 221B")                  # → {"name","housenumber","lat","lon","city","postcode","approximate"}
+hit  = r.geocode_address("Baker Street", "221B")       # same, street + number passed separately
 xs   = r.intersection("Oxford Street", "Regent Street")# → [{"lat","lon"}, ...] (street crossings)
 ```
 

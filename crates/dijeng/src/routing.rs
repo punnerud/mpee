@@ -34,6 +34,9 @@ pub struct RoutingService {
     /// lookups reuse `snap_grid`; forward lookups scan the distinct names.
     /// `None` when no `.names` sidecar was attached.
     names: Option<crate::names::NameTable>,
+    /// Optional house-number address index (`.addr` sidecar). Independent of the
+    /// routing graph (own coords + grid). Enables address-level forward/reverse.
+    addresses: Option<crate::addresses::AddressIndex>,
     /// Optional plain road adjacency (the `.pp` forward CSR, same node order as
     /// `coords`/`names`). Used by `street_segments` to draw a whole street.
     road_graph: Option<crate::graph::CsrGraph>,
@@ -77,6 +80,7 @@ impl RoutingService {
             inv_perm: inv.into(),
             snap_grid,
             names: None,
+            addresses: None,
             road_graph: None,
         }
     }
@@ -96,6 +100,7 @@ impl RoutingService {
             inv_perm: Buffer::from(Vec::new()),
             snap_grid,
             names: None,
+            addresses: None,
             road_graph: None,
         }
     }
@@ -160,6 +165,49 @@ impl RoutingService {
     /// Whether a street-name sidecar is loaded (geocoding available).
     pub fn has_names(&self) -> bool {
         self.names.is_some()
+    }
+
+    /// Attach a house-number address index (the `.addr` sidecar). Enables
+    /// `geocode_address`/`reverse_address`/`address_query`. Independent of the
+    /// graph, so no node-count check.
+    pub fn set_addresses(&mut self, idx: crate::addresses::AddressIndex) {
+        self.addresses = Some(idx);
+    }
+
+    /// Whether a house-number address index is loaded.
+    pub fn has_addresses(&self) -> bool {
+        self.addresses.is_some()
+    }
+
+    /// Forward address geocode: `street` + `number` → a coordinate-bearing hit.
+    /// `near` disambiguates a street name shared by several towns. Exact number
+    /// wins; otherwise the nearest number on the street (with `approximate`
+    /// set). `None` if no address sidecar / the street doesn't resolve.
+    pub fn geocode_address(
+        &self,
+        street: &str,
+        number: &str,
+        near: Option<(f32, f32)>,
+    ) -> Option<crate::addresses::AddressHit> {
+        self.addresses.as_ref()?.forward(street, number, near)
+    }
+
+    /// Reverse address geocode: the nearest address point to `(lat, lon)`.
+    /// `None` if no address sidecar is loaded.
+    pub fn reverse_address(&self, lat: f32, lon: f32) -> Option<crate::addresses::AddressHit> {
+        self.addresses.as_ref()?.reverse(lat, lon)
+    }
+
+    /// Convenience: resolve a *combined* query like "Karl Johans gate 42" at
+    /// address level. Returns `None` when the query has no trailing number or no
+    /// address matches — so callers can fall back to street-level [`geocode`].
+    pub fn address_query(
+        &self,
+        query: &str,
+        near: Option<(f32, f32)>,
+    ) -> Option<crate::addresses::AddressHit> {
+        let (street, number) = split_house_number(query);
+        self.geocode_address(street, number?, near)
     }
 
     /// Reverse-geocode: the street name nearest to `(lat, lon)`. Snaps to the
@@ -425,4 +473,35 @@ fn haversine_m(lat1: f32, lon1: f32, lat2: f32, lon2: f32) -> f32 {
     let a = (dlat / 2.0).sin().powi(2) + l1.cos() * l2.cos() * (dlon / 2.0).sin().powi(2);
     let c = 2.0 * a.sqrt().asin();
     (r * c) as f32
+}
+
+/// Split a combined address query ("Karl Johans gate 42") into
+/// `(street, Some("42"))`. The number is the last whitespace-separated token
+/// that starts with an ASCII digit (covers "42", "42B", "42-44"); otherwise the
+/// whole input is the street and the number is `None`. (Number-last convention,
+/// as in Norwegian/most European addresses.)
+pub fn split_house_number(query: &str) -> (&str, Option<&str>) {
+    let q = query.trim();
+    if let Some(pos) = q.rfind(char::is_whitespace) {
+        let last = q[pos + 1..].trim();
+        if last.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return (q[..pos].trim_end(), Some(last));
+        }
+    }
+    (q, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_house_number;
+
+    #[test]
+    fn splits_trailing_house_number() {
+        assert_eq!(split_house_number("Karl Johans gate 42"), ("Karl Johans gate", Some("42")));
+        assert_eq!(split_house_number("Storgata 1A"), ("Storgata", Some("1A")));
+        assert_eq!(split_house_number("Storgata 42-44"), ("Storgata", Some("42-44")));
+        assert_eq!(split_house_number("Main St"), ("Main St", None));
+        assert_eq!(split_house_number("Bjørndal"), ("Bjørndal", None));
+        assert_eq!(split_house_number("  Foo bar 7 "), ("Foo bar", Some("7")));
+    }
 }

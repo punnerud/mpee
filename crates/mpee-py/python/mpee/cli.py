@@ -3,8 +3,8 @@
 Subcommands:
     route      point-to-point driving route (distance + time)
     optimize   multi-vehicle delivery optimization (VRP) over your own stops
-    reverse    reverse-geocode: nearest street name to a LAT,LON point
-    geocode    forward-geocode: look up a street by name -> its LAT,LON
+    reverse    reverse-geocode: nearest address (house number) to a LAT,LON point
+    geocode    forward-geocode: "Street 42" or a street name -> its LAT,LON
     crossing   intersection search: where two named streets cross
     download   fetch an OSM extract from Geofabrik
     build      preprocess a .osm.pbf into a routable .pp + .ch cache
@@ -328,14 +328,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_cache_args(po)
     po.set_defaults(func=cmd_optimize)
 
-    prv = sub.add_parser("reverse", help="reverse-geocode: nearest street name to a point")
+    prv = sub.add_parser("reverse", help="reverse-geocode: nearest address (house number) to a point")
     prv.add_argument("point", type=_latlon, metavar="LAT,LON")
     prv.add_argument("--json", action="store_true", help="emit JSON")
     _add_cache_args(prv)
     prv.set_defaults(func=cmd_reverse)
 
-    pg = sub.add_parser("geocode", help="forward-geocode: street name -> LAT,LON")
-    pg.add_argument("query", help="street name (case-insensitive; substring matches)")
+    pg = sub.add_parser("geocode", help="forward-geocode: \"Street 42\" or a street name -> LAT,LON")
+    pg.add_argument("query", help="address or street (e.g. \"Baker Street 221B\" or \"Baker Street\")")
     pg.add_argument("--near", metavar="LAT,LON",
                     help="on a multi-city cache, return the match nearest this point")
     pg.add_argument("--json", action="store_true", help="emit JSON")

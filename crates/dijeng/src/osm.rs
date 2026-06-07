@@ -6,6 +6,7 @@
 //! to the two-pass strategy (filter ways → figure out which nodes we need →
 //! second pass to fetch coordinates).
 
+use crate::addresses::AddrRec;
 use crate::cache;
 use crate::graph::CsrGraph;
 use crate::osm_profile::{Profile, kmh_to_mps, parse_maxspeed};
@@ -13,6 +14,167 @@ use osmpbf::{BlobDecode, BlobReader, Element, ElementReader};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Address tags collected from one OSM element (`addr:*`).
+#[derive(Clone, Default)]
+struct NodeAddr {
+    housenumber: Option<Box<str>>,
+    street: Option<Box<str>>,
+    city: Option<Box<str>>,
+    postcode: Option<Box<str>>,
+    /// `addr:interpolation` value when present (ways only).
+    interpolation: Option<Box<str>>,
+}
+
+impl NodeAddr {
+    fn read(k: &str, v: &str, a: &mut NodeAddr) {
+        match k {
+            "addr:housenumber" => a.housenumber = Some(v.into()),
+            "addr:street" => a.street = Some(v.into()),
+            "addr:city" => a.city = Some(v.into()),
+            "addr:postcode" => a.postcode = Some(v.into()),
+            "addr:interpolation" => a.interpolation = Some(v.into()),
+            _ => {}
+        }
+    }
+    fn has_any(&self) -> bool {
+        self.housenumber.is_some()
+            || self.street.is_some()
+            || self.city.is_some()
+            || self.postcode.is_some()
+    }
+}
+
+/// Parse accumulator for one PBF block / the whole sequential pass.
+#[derive(Default)]
+struct ParseAcc {
+    ways: Vec<WayRec>,
+    nodes: Vec<(i64, f32, f32)>,
+    /// Nodes carrying `addr:*` (id + tags); coords resolved later from the map.
+    addr_nodes: Vec<(i64, NodeAddr)>,
+    /// Building/area ways with `addr:housenumber`+`addr:street` (centroid later).
+    way_addrs: Vec<(Vec<i64>, NodeAddr)>,
+    /// `addr:interpolation` ways (refs + rule); endpoints looked up in addr_nodes.
+    interp_ways: Vec<(Vec<i64>, Box<str>)>,
+}
+
+impl ParseAcc {
+    fn merge(&mut self, mut o: ParseAcc) {
+        self.ways.append(&mut o.ways);
+        self.nodes.append(&mut o.nodes);
+        self.addr_nodes.append(&mut o.addr_nodes);
+        self.way_addrs.append(&mut o.way_addrs);
+        self.interp_ways.append(&mut o.interp_ways);
+    }
+}
+
+#[inline]
+fn leading_int(s: &str) -> Option<i64> {
+    let d: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    d.parse().ok()
+}
+
+/// Resolve collected `addr:*` data into address points. Standalone nodes use
+/// their own coord; building ways use a centroid of their refs; interpolation
+/// ways synthesize intermediate numbers between consecutive numbered endpoints.
+fn resolve_addresses(
+    addr_nodes: Vec<(i64, NodeAddr)>,
+    way_addrs: Vec<(Vec<i64>, NodeAddr)>,
+    interp_ways: Vec<(Vec<i64>, Box<str>)>,
+    node_coords: &HashMap<i64, (f32, f32)>,
+) -> Vec<AddrRec> {
+    let mk = |lat: f32, lon: f32, hn: &str, st: &str, a: &NodeAddr| AddrRec {
+        lat,
+        lon,
+        housenumber: hn.to_string(),
+        street: st.to_string(),
+        city: a.city.as_deref().map(|s| s.to_string()),
+        postcode: a.postcode.as_deref().map(|s| s.to_string()),
+    };
+    let node_addr: HashMap<i64, &NodeAddr> = addr_nodes.iter().map(|(id, a)| (*id, a)).collect();
+    let mut out: Vec<AddrRec> = Vec::new();
+
+    // Standalone address nodes.
+    for (id, a) in &addr_nodes {
+        if let (Some(hn), Some(st)) = (&a.housenumber, &a.street) {
+            if let Some(&(lat, lon)) = node_coords.get(id) {
+                out.push(mk(lat, lon, hn, st, a));
+            }
+        }
+    }
+
+    // Building/area ways → centroid of resolved refs.
+    for (refs, a) in &way_addrs {
+        if let (Some(hn), Some(st)) = (&a.housenumber, &a.street) {
+            let (mut sx, mut sy, mut k) = (0f64, 0f64, 0u32);
+            let mut last: Option<i64> = None;
+            for r in refs {
+                if last == Some(*r) {
+                    continue; // skip the repeated closing ref
+                }
+                last = Some(*r);
+                if let Some(&(lat, lon)) = node_coords.get(r) {
+                    sx += lat as f64;
+                    sy += lon as f64;
+                    k += 1;
+                }
+            }
+            if k > 0 {
+                out.push(mk((sx / k as f64) as f32, (sy / k as f64) as f32, hn, st, a));
+            }
+        }
+    }
+
+    // Interpolation ways → synthesize numbers between numbered endpoints.
+    for (refs, rule_s) in &interp_ways {
+        let rule = rule_s.trim().to_lowercase();
+        let step_num: Option<i64> = rule.parse().ok();
+        // numbered endpoints in way order, with coord + addr
+        let pts: Vec<(i64, (f32, f32), &NodeAddr)> = refs
+            .iter()
+            .filter_map(|r| {
+                let a = *node_addr.get(r)?;
+                let n = leading_int(a.housenumber.as_deref()?)?;
+                let c = *node_coords.get(r)?;
+                Some((n, c, a))
+            })
+            .collect();
+        for w in pts.windows(2) {
+            let (n0, c0, a0) = w[0];
+            let (n1, c1, _a1) = w[1];
+            if n1 <= n0 || n1 - n0 > 2000 {
+                continue; // malformed / decreasing / absurd range
+            }
+            let st = match a0.street.as_deref() {
+                Some(s) => s,
+                None => continue,
+            };
+            let step = match (rule.as_str(), step_num) {
+                ("all", _) => 1,
+                ("even", _) | ("odd", _) => 2,
+                (_, Some(s)) if s > 0 => s,
+                _ => 1,
+            };
+            let mut k = n0;
+            while k <= n1 {
+                let parity_ok = match rule.as_str() {
+                    "even" => k % 2 == 0,
+                    "odd" => k % 2 != 0,
+                    _ => true,
+                };
+                if parity_ok {
+                    let t = (k - n0) as f32 / (n1 - n0) as f32;
+                    let lat = c0.0 + (c1.0 - c0.0) * t;
+                    let lon = c0.1 + (c1.1 - c0.1) * t;
+                    out.push(mk(lat, lon, &k.to_string(), st, a0));
+                }
+                k += step;
+            }
+        }
+    }
+
+    out
+}
 
 /// Load (or parse and cache) an OSM-derived CSR graph for the given profile.
 /// Returns `(graph, coords, edge_dist)` where `graph.edge_w` is duration in
@@ -62,8 +224,8 @@ pub fn load_with_cache<P: AsRef<Path>>(
 
     // The .csr cache stores routing data only; street names are reconstructed
     // by `build::build_cache`, which calls `load_osm_routing_par` directly.
-    let (g, coords, edge_dist, _names, _name_pool, _street_nodes) =
-        load_osm_routing_par(pbf, profile)?;
+    let parse = load_osm_routing_par(pbf, profile)?;
+    let (g, coords, edge_dist) = (parse.graph, parse.coords, parse.edge_dist);
     let t = std::time::Instant::now();
     if let Err(e) = cache::save(cache_p, &g, &coords, &edge_dist) {
         eprintln!("[osm/{}] failed to save cache: {e}", profile.name());
@@ -88,33 +250,48 @@ pub fn load_with_cache<P: AsRef<Path>>(
 pub fn load_osm_routing_par<P: AsRef<Path>>(
     path: P,
     profile: Profile,
-) -> std::io::Result<ParseResult> {
+) -> std::io::Result<OsmParse> {
     let path = path.as_ref();
     println!("[osm] opening {} (parallel)", path.display());
 
     let blob_reader = BlobReader::from_path(path).map_err(io_err)?;
     let t = std::time::Instant::now();
 
-    type Acc = (Vec<WayRec>, Vec<(i64, f32, f32)>);
-
-    let (ways, nodes_data) = blob_reader
+    let acc = blob_reader
         .par_bridge()
         .filter_map(|res| res.ok())
         .filter_map(|blob| match blob.decode() {
             Ok(BlobDecode::OsmData(block)) => Some(block),
             _ => None,
         })
-        .map(|block| -> Acc {
+        .map(|block| -> ParseAcc {
             // Reasonable pre-allocation — a typical PrimitiveBlock has 8000 elements.
-            let mut ways: Vec<WayRec> = Vec::with_capacity(64);
-            let mut nodes: Vec<(i64, f32, f32)> = Vec::with_capacity(8000);
+            let mut acc = ParseAcc {
+                ways: Vec::with_capacity(64),
+                nodes: Vec::with_capacity(8000),
+                ..Default::default()
+            };
             for elem in block.elements() {
                 match elem {
                     Element::Node(n) => {
-                        nodes.push((n.id(), n.lat() as f32, n.lon() as f32));
+                        acc.nodes.push((n.id(), n.lat() as f32, n.lon() as f32));
+                        let mut a = NodeAddr::default();
+                        for (k, v) in n.tags() {
+                            NodeAddr::read(k, v, &mut a);
+                        }
+                        if a.has_any() {
+                            acc.addr_nodes.push((n.id(), a));
+                        }
                     }
                     Element::DenseNode(n) => {
-                        nodes.push((n.id(), n.lat() as f32, n.lon() as f32));
+                        acc.nodes.push((n.id(), n.lat() as f32, n.lon() as f32));
+                        let mut a = NodeAddr::default();
+                        for (k, v) in n.tags() {
+                            NodeAddr::read(k, v, &mut a);
+                        }
+                        if a.has_any() {
+                            acc.addr_nodes.push((n.id(), a));
+                        }
                     }
                     Element::Way(w) => {
                         let mut hw: Option<&str> = None;
@@ -122,6 +299,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
                         let mut oneway: OneWay = OneWay::No;
                         let mut roundabout = false;
                         let mut name: Option<&str> = None;
+                        let mut addr = NodeAddr::default();
                         for (k, v) in w.tags() {
                             match k {
                                 "highway" => hw = Some(v),
@@ -137,7 +315,7 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
                                         roundabout = true;
                                     }
                                 }
-                                _ => {}
+                                _ => NodeAddr::read(k, v, &mut addr),
                             }
                         }
                         if let Some(h) = hw {
@@ -151,36 +329,41 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
                                 if refs.len() >= 2 {
                                     let speed_kmh = profile.speed_kmh(h, maxspeed);
                                     let speed_mps = kmh_to_mps(speed_kmh).max(0.5);
-                                    ways.push((refs, oneway, speed_mps, name.map(|s| s.into())));
+                                    acc.ways.push((refs, oneway, speed_mps, name.map(|s| s.into())));
                                 }
                             }
+                        }
+                        // Address-bearing way (independent of being drivable).
+                        if let Some(rule) = addr.interpolation.clone() {
+                            acc.interp_ways.push((w.refs().collect(), rule));
+                        }
+                        if addr.housenumber.is_some() && addr.street.is_some() {
+                            acc.way_addrs.push((w.refs().collect(), addr));
                         }
                     }
                     Element::Relation(_) => {}
                 }
             }
-            (ways, nodes)
+            acc
         })
-        .reduce(
-            || (Vec::new(), Vec::new()),
-            |mut a, mut b| {
-                a.0.append(&mut b.0);
-                a.1.append(&mut b.1);
-                a
-            },
-        );
+        .reduce(ParseAcc::default, |mut a, b| {
+            a.merge(b);
+            a
+        });
 
+    let ParseAcc { ways, nodes, addr_nodes, way_addrs, interp_ways } = acc;
     println!(
-        "[osm] parallel parse: {:.2} s — {} nodes, {} drivable ways",
+        "[osm] parallel parse: {:.2} s — {} nodes, {} drivable ways, {} addr-nodes",
         t.elapsed().as_secs_f64(),
-        nodes_data.len(),
-        ways.len()
+        nodes.len(),
+        ways.len(),
+        addr_nodes.len(),
     );
 
     // Build HashMap for coordinate lookup.
     let t2 = std::time::Instant::now();
-    let mut node_coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(nodes_data.len());
-    for (id, lat, lon) in nodes_data {
+    let mut node_coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(nodes.len());
+    for (id, lat, lon) in nodes {
         node_coords.insert(id, (lat, lon));
     }
     println!(
@@ -189,14 +372,16 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
         node_coords.len()
     );
 
-    finalize_csr(ways, node_coords)
+    let addresses = resolve_addresses(addr_nodes, way_addrs, interp_ways, &node_coords);
+    println!("[osm] addresses: {} points (nodes + way centroids + interpolation)", addresses.len());
+    finalize_csr(ways, node_coords, addresses)
 }
 
 /// Single-pass parse: collect all node coordinates + drivable ways.
 pub fn load_osm_routing<P: AsRef<Path>>(
     path: P,
     profile: Profile,
-) -> std::io::Result<ParseResult> {
+) -> std::io::Result<OsmParse> {
     let path = path.as_ref();
     println!("[osm] opening {}", path.display());
 
@@ -205,6 +390,9 @@ pub fn load_osm_routing<P: AsRef<Path>>(
     // read the file in a single pass.
     let mut node_coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(8_000_000);
     let mut ways: Vec<WayRec> = Vec::with_capacity(300_000);
+    let mut addr_nodes: Vec<(i64, NodeAddr)> = Vec::new();
+    let mut way_addrs: Vec<(Vec<i64>, NodeAddr)> = Vec::new();
+    let mut interp_ways: Vec<(Vec<i64>, Box<str>)> = Vec::new();
     let mut total_nodes = 0usize;
     let mut total_ways = 0usize;
     let mut kept_ways = 0usize;
@@ -216,10 +404,24 @@ pub fn load_osm_routing<P: AsRef<Path>>(
             Element::Node(n) => {
                 total_nodes += 1;
                 node_coords.insert(n.id(), (n.lat() as f32, n.lon() as f32));
+                let mut a = NodeAddr::default();
+                for (k, v) in n.tags() {
+                    NodeAddr::read(k, v, &mut a);
+                }
+                if a.has_any() {
+                    addr_nodes.push((n.id(), a));
+                }
             }
             Element::DenseNode(n) => {
                 total_nodes += 1;
                 node_coords.insert(n.id(), (n.lat() as f32, n.lon() as f32));
+                let mut a = NodeAddr::default();
+                for (k, v) in n.tags() {
+                    NodeAddr::read(k, v, &mut a);
+                }
+                if a.has_any() {
+                    addr_nodes.push((n.id(), a));
+                }
             }
             Element::Way(w) => {
                 total_ways += 1;
@@ -228,6 +430,7 @@ pub fn load_osm_routing<P: AsRef<Path>>(
                 let mut oneway: OneWay = OneWay::No;
                 let mut roundabout = false;
                 let mut name: Option<&str> = None;
+                let mut addr = NodeAddr::default();
                 for (k, v) in w.tags() {
                     match k {
                         "highway" => hw = Some(v),
@@ -243,7 +446,7 @@ pub fn load_osm_routing<P: AsRef<Path>>(
                                 roundabout = true;
                             }
                         }
-                        _ => {}
+                        _ => NodeAddr::read(k, v, &mut addr),
                     }
                 }
                 if let Some(h) = hw {
@@ -262,27 +465,48 @@ pub fn load_osm_routing<P: AsRef<Path>>(
                         }
                     }
                 }
+                if let Some(rule) = addr.interpolation.clone() {
+                    interp_ways.push((w.refs().collect(), rule));
+                }
+                if addr.housenumber.is_some() && addr.street.is_some() {
+                    way_addrs.push((w.refs().collect(), addr));
+                }
             }
             Element::Relation(_) => {}
         })
         .map_err(io_err)?;
     println!(
-        "[osm] single-pass parse: {:.2} s — {} nodes stored, {} ways total, {} drivable",
+        "[osm] single-pass parse: {:.2} s — {} nodes stored, {} ways total, {} drivable, {} addr-nodes",
         t.elapsed().as_secs_f64(),
         total_nodes,
         total_ways,
-        kept_ways
+        kept_ways,
+        addr_nodes.len(),
     );
 
-    finalize_csr(ways, node_coords)
+    let addresses = resolve_addresses(addr_nodes, way_addrs, interp_ways, &node_coords);
+    println!("[osm] addresses: {} points (nodes + way centroids + interpolation)", addresses.len());
+    finalize_csr(ways, node_coords, addresses)
 }
 
-type ParseResult = (CsrGraph, Vec<(f32, f32)>, Vec<f32>, Vec<u32>, Vec<String>, Vec<Vec<u32>>);
+/// Everything one OSM parse produces: the routing graph + per-edge distances,
+/// the street-name data for the `.names` sidecar, and the resolved address
+/// points for the `.addr` sidecar (independent of the graph).
+pub struct OsmParse {
+    pub graph: CsrGraph,
+    pub coords: Vec<(f32, f32)>,
+    pub edge_dist: Vec<f32>,
+    pub node_name: Vec<u32>,
+    pub name_pool: Vec<String>,
+    pub street_nodes: Vec<Vec<u32>>,
+    pub addresses: Vec<AddrRec>,
+}
 
 fn finalize_csr(
     ways: Vec<WayRec>,
     node_coords: HashMap<i64, (f32, f32)>,
-) -> std::io::Result<ParseResult> {
+    addresses: Vec<AddrRec>,
+) -> std::io::Result<OsmParse> {
     use crate::names::NO_NAME;
     let t = std::time::Instant::now();
     let mut id_map: HashMap<i64, u32> = HashMap::with_capacity(1_500_000);
@@ -404,7 +628,15 @@ fn finalize_csr(
         named,
         g.n,
     );
-    Ok((g, coords, edge_dist, node_name, name_pool, street_nodes))
+    Ok(OsmParse {
+        graph: g,
+        coords,
+        edge_dist,
+        node_name,
+        name_pool,
+        street_nodes,
+        addresses,
+    })
 }
 
 #[derive(Clone, Copy)]

@@ -263,7 +263,7 @@
     <div class="grid">
       <div class="card"><div class="ico">🧭</div><h3>Point-to-point routes</h3><p>Driving distance + time between two coordinates, with optional geometry.</p></div>
       <div class="card"><div class="ico">🚚</div><h3>Multi-vehicle VRP</h3><p>Best routes for <em>N</em> vehicles over your own stops — capacities, skills, time windows, mixed fleets.</p></div>
-      <div class="card"><div class="ico">🔎</div><h3>Offline geocoding</h3><p>Street&nbsp;⇄&nbsp;coordinate and street-crossing lookup, reusing the same cache. No separate index.</p></div>
+      <div class="card"><div class="ico">🔎</div><h3>Offline geocoding</h3><p>Address&nbsp;⇄&nbsp;coordinate down to the house number, plus street-crossing lookup, reusing the same cache. No separate index.</p></div>
       <div class="card"><div class="ico">🗺️</div><h3>Bring your own area</h3><p>Any OpenStreetMap extract sized to where you operate. One downloaded area, one cache.</p></div>
     </div>
     <blockquote>
@@ -614,9 +614,10 @@ mpee optimize --stops stops.txt --vehicles 5 --capacity 20 \
 #   stops: 50  vehicles used: 3/5  unassigned: 0
 #   total: 60.0 km, 115 min  (solved in 4.6s)</code></pre>
 
-    <h3>4. Geocode within the area (offline)</h3>
-    <pre><code>mpee reverse  51.5080,-0.1281 --cache data/greater-london-latest.osm.pbf  # → Trafalgar Square
-mpee geocode  "Baker Street"  --cache data/greater-london-latest.osm.pbf  # → 51.522072,-0.157497
+    <h3>4. Geocode within the area (offline) — streets &amp; house numbers</h3>
+    <pre><code>mpee reverse  51.5080,-0.1281 --cache data/greater-london-latest.osm.pbf  # → Baker Street 221B, NW1 London
+mpee geocode  "Baker Street 221B" --cache data/greater-london-latest.osm.pbf  # → 51.5237,-0.1585
+mpee geocode  "Baker Street"  --cache data/greater-london-latest.osm.pbf  # → 51.522072,-0.157497 (street)
 mpee crossing "Oxford Street" "Regent Street" --cache ...                 # → Oxford Circus (LAT,LON)</code></pre>
   </section>
 
@@ -642,9 +643,10 @@ print(leg["distance_km"], "km,", leg["duration_min"], "min")
 stops = [(51.51, -0.12), (51.49, -0.10)]          # your (lat, lon) list
 plan = r.optimize(stops, vehicles=5, capacity=20, time_limit_s=5.0)
 
-# Geocoding (needs the .names sidecar built by `mpee build`).
-r.reverse(51.5080, -0.1281)                        # → "Trafalgar Square"
-r.geocode("Baker Street")                          # → {"name", "lat", "lon"}
+# Geocoding (the .names + .addr sidecars are built by `mpee build`).
+r.reverse(51.5080, -0.1281)                        # → "Baker Street 221B, NW1 London"
+r.geocode("Baker Street 221B")                      # → {"name","housenumber","lat","lon","city","postcode","approximate"}
+r.geocode("Baker Street")                          # → {"name", "lat", "lon"}  (street-level)
 r.intersection("Oxford Street", "Regent Street")   # → [{"lat", "lon"}, …]
 
 # Other helpers: r.snap(lat, lon), r.table(stops), r.bbox(),
@@ -657,14 +659,39 @@ r.intersection("Oxford Street", "Regent Street")   # → [{"lat", "lon"}, …]
   </section>
 
   <section id="geocoding">
-    <h2>Geocoding without a separate index</h2>
+    <h2>Geocoding — streets <em>and</em> house numbers</h2>
     <p>
       Street names live on the OpenStreetMap road, so MPEE attaches them to the
       road nodes during the build and writes a small, deletable
       <code>.names</code> sidecar. <strong>Reverse</strong> reuses the routing
       snap grid; <strong>forward</strong> scans the area's distinct street names;
       <strong>crossing</strong> is the set intersection of two streets' node
-      lists. Street-level (street + coordinate), not house numbers.
+      lists.
+    </p>
+    <p>
+      <strong>House numbers too.</strong> The build also parses OSM
+      <code>addr:*</code> — from address nodes, building-polygon centroids, and
+      <code>addr:interpolation</code> ways — into a separate, deletable
+      <code>.addr</code> sidecar (its own coordinates + spatial grid, independent
+      of the road graph). So you can resolve a full address both ways:
+    </p>
+    <pre><code># forward: "Street 42" → coordinate (+ city/postcode)
+mpee geocode "Städtle 1" --cache liechtenstein.osm.pbf      # → 47.1410,9.5215  (Vaduz)
+
+# reverse: coordinate → nearest full address
+mpee reverse 47.1410,9.5209 --cache liechtenstein.osm.pbf   # → Lettstrasse 2, 9490 Vaduz
+
+# missing number? the nearest existing number on the street, flagged approximate
+mpee geocode "Lettstrasse 9999" --cache liechtenstein.osm.pbf  # → Lettstrasse 74  (approx)
+
+# Python — geocode("Street 42") "just works"; or pass them apart:
+#   r.geocode("Städtle 1")  →  {"name","housenumber","lat","lon","city","postcode","approximate"}
+#   r.geocode_address("Städtle", "1")
+#   r.reverse(47.1410, 9.5209)  →  "Lettstrasse 2, 9490 Vaduz"</code></pre>
+    <p class="muted" style="font-size:.88rem">
+      Optional and back-compatible: a cache without a <code>.addr</code> still
+      answers street-level queries exactly as before. A street name shared by
+      several towns is disambiguated with <code>--near</code>.
     </p>
 
     <h3>Lightweight: geocoding needs no <code>.ch</code></h3>

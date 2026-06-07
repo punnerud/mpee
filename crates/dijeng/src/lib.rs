@@ -1,6 +1,7 @@
 // Modules that need OS threads / mmap / OSM parsing are native-only. The
 // remaining set (buffer, graph, geo_index, dijeng, ch, cache*, names, routing,
 // osm_profile, polyline) compiles to wasm32 for the in-browser demo.
+pub mod addresses;
 #[cfg(feature = "native")]
 pub mod auto;
 #[cfg(feature = "native")]

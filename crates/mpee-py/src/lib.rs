@@ -395,6 +395,17 @@ impl Router {
                 Err(e) => eprintln!("[mpee] ignoring names sidecar {names_path}: {e}"),
             }
         }
+        // House-number address sidecar (optional; enables address geocoding).
+        let addr_path = pp_path
+            .strip_suffix(".pp")
+            .map(|base| format!("{base}.addr"))
+            .unwrap_or_else(|| format!("{pp_path}.addr"));
+        if std::path::Path::new(&addr_path).is_file() {
+            match dijeng::addresses::AddressIndex::load_mmap(&addr_path) {
+                Ok(ai) => routing.set_addresses(ai),
+                Err(e) => eprintln!("[mpee] ignoring address sidecar {addr_path}: {e}"),
+            }
+        }
         Ok(Self { routing, _pp: pp })
     }
 
@@ -434,6 +445,7 @@ impl Router {
         d.set_item("pp_path", res.pp_path.to_string_lossy().to_string())?;
         d.set_item("ch_path", res.ch_path.to_string_lossy().to_string())?;
         d.set_item("names_path", res.names_path.to_string_lossy().to_string())?;
+        d.set_item("addr_path", res.addr_path.to_string_lossy().to_string())?;
         d.set_item("nodes", res.nodes)?;
         d.set_item("edges", res.edges)?;
         d.set_item("build_secs", res.build_secs)?;
@@ -477,6 +489,18 @@ impl Router {
     /// nearest road node has no name. The sidecar is produced automatically by
     /// `Router.build` / `mpee build` (no separate indexing step).
     fn reverse(&self, lat: f32, lon: f32) -> Option<String> {
+        // Prefer a full "Street 42, 0123 City" address when the .addr sidecar is
+        // loaded; otherwise fall back to the nearest street name.
+        if let Some(h) = self.routing.reverse_address(lat, lon) {
+            let mut s = format!("{} {}", h.street, h.housenumber);
+            match (h.postcode, h.city) {
+                (Some(pc), Some(c)) => s.push_str(&format!(", {pc} {c}")),
+                (None, Some(c)) => s.push_str(&format!(", {c}")),
+                (Some(pc), None) => s.push_str(&format!(", {pc}")),
+                (None, None) => {}
+            }
+            return Some(s);
+        }
         self.routing.reverse(lat, lon).map(|s| s.to_string())
     }
 
@@ -492,9 +516,28 @@ impl Router {
     fn geocode<'py>(
         &self, py: Python<'py>, query: &str, near: Option<(f32, f32)>,
     ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        // If the query carries a house number ("Storgata 42") and an address
+        // sidecar is loaded, resolve to address level; the dict then also has
+        // "housenumber"/"city"/"postcode"/"approximate".
+        let (street_part, number) = dijeng::routing::split_house_number(query);
+        if number.is_some() {
+            if let Some(h) = self.routing.address_query(query, near) {
+                let d = PyDict::new_bound(py);
+                d.set_item("name", h.street)?;
+                d.set_item("housenumber", h.housenumber)?;
+                d.set_item("lat", h.lat)?;
+                d.set_item("lon", h.lon)?;
+                d.set_item("city", h.city)?;
+                d.set_item("postcode", h.postcode)?;
+                d.set_item("approximate", h.approximate)?;
+                return Ok(Some(d));
+            }
+        }
+        // Street-level fallback (strip the number if one was present).
+        let q = if number.is_some() { street_part } else { query };
         let hit = match near {
-            Some((la, lo)) => self.routing.geocode_near(query, la, lo),
-            None => self.routing.geocode(query),
+            Some((la, lo)) => self.routing.geocode_near(q, la, lo),
+            None => self.routing.geocode(q),
         };
         match hit {
             Some((lat, lon, name)) => {
@@ -502,6 +545,31 @@ impl Router {
                 d.set_item("name", name)?;
                 d.set_item("lat", lat)?;
                 d.set_item("lon", lon)?;
+                Ok(Some(d))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Forward-geocode a street + house number explicitly. Returns a dict
+    /// `{"name","housenumber","lat","lon","city","postcode","approximate"}` or
+    /// `None`. `near=(lat,lon)` disambiguates a name shared by several towns.
+    /// Exact number → `approximate=False`; if missing, the nearest number on the
+    /// street is returned with `approximate=True`.
+    #[pyo3(signature = (street, number, near = None))]
+    fn geocode_address<'py>(
+        &self, py: Python<'py>, street: &str, number: &str, near: Option<(f32, f32)>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match self.routing.geocode_address(street, number, near) {
+            Some(h) => {
+                let d = PyDict::new_bound(py);
+                d.set_item("name", h.street)?;
+                d.set_item("housenumber", h.housenumber)?;
+                d.set_item("lat", h.lat)?;
+                d.set_item("lon", h.lon)?;
+                d.set_item("city", h.city)?;
+                d.set_item("postcode", h.postcode)?;
+                d.set_item("approximate", h.approximate)?;
                 Ok(Some(d))
             }
             None => Ok(None),
@@ -539,6 +607,11 @@ impl Router {
     /// Whether a street-name sidecar is loaded (i.e. geocoding is available).
     fn has_names(&self) -> bool {
         self.routing.has_names()
+    }
+
+    /// Whether a house-number address sidecar is loaded (address geocoding).
+    fn has_addresses(&self) -> bool {
+        self.routing.has_addresses()
     }
 
     /// Whether a `.ch` cache is loaded — i.e. `route`/`optimize`/`solve`/`table`

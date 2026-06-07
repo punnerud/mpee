@@ -10,7 +10,7 @@ data leaving your machine:
 
 - 🧭 **Point-to-point routes** — driving distance + time between two coordinates.
 - 🚚 **Multi-vehicle optimization (VRP)** — best routes for *N* vehicles over your own stops, with capacities.
-- 🔎 **Offline geocoding** — street name ⇄ coordinate, plus street-crossing lookup, reusing the same cache (no extra index; street-level).
+- 🔎 **Offline geocoding** — address ⇄ coordinate down to the house number (`addr:*` nodes, building centroids, interpolation ways), plus street-crossing lookup, reusing the same cache (no extra index).
 - 🗺️ **Bring your own area** — any OpenStreetMap extract sized to where you operate (a city, a region). Not a route-anywhere-on-Earth offline map: one downloaded area, one cache.
 - ⚡ **Fast & small** — a Rust engine (CH routing + `brooom` VRP solver) using CPU **and** GPU; the engine itself is under ~50 MB (the map cache scales with the area).
 
@@ -88,21 +88,28 @@ Tune the fleet with `--vehicles` and `--capacity`; bound the search with
 `--time SECONDS`; pin the depot with `--depot LAT,LON` (defaults to the
 centroid of the stops).
 
-## 4. Look up street names (geocoding)
+## 4. Geocoding — streets *and* house numbers
 
-`mpee build` also writes a small `.names` sidecar next to the cache, so the
-same area answers street ⇄ coordinate lookups — offline, with **no separate
-index**. Reverse reuses the routing snap; forward scans the area's distinct
-street names.
+`mpee build` writes two small, deletable sidecars next to the cache: `.names`
+(street names) and `.addr` (house numbers, from OSM `addr:*` nodes, building
+centroids, and interpolation ways). The same area then answers address ⇄
+coordinate lookups — offline, with **no separate index**. Reverse reuses the
+routing snap; forward scans the area's distinct street names, then the matched
+street's numbers.
 
 ```bash
-# coordinate → nearest street name
+# coordinate → nearest full address (house number when available)
 mpee reverse 51.5080,-0.1281 --cache data/greater-london.osm.pbf
-#  → Trafalgar Square
+#  → Baker Street 221B, NW1 London
 
-# street name → coordinate (case-insensitive; substring matches)
+# "Street number" → coordinate (the number is split off automatically)
+mpee geocode "Baker Street 221B" --cache data/greater-london.osm.pbf
+#  → Baker Street 221B, NW1 London
+#  → 51.5237,-0.1585
+# a missing number returns the nearest one on the street, flagged "(approx)".
+
+# street only (no number) → street-level coordinate, as before
 mpee geocode "Baker Street" --cache data/greater-london.osm.pbf
-#  → Baker Street
 #  → 51.522072,-0.157497
 
 # where two streets cross → one LAT,LON per shared node (may be several)
@@ -111,6 +118,12 @@ mpee crossing "Oxford Street" "Regent Street" --cache data/greater-london.osm.pb
 #  → 51.515244,-0.141946
 #  → ...
 ```
+
+From Python, `geocode("Baker Street 221B")` returns
+`{"name","housenumber","lat","lon","city","postcode","approximate"}`, or pass
+the parts separately with `geocode_address("Baker Street", "221B")`;
+`reverse(lat, lon)` returns the numbered address string. A cache without a
+`.addr` sidecar still answers street-level queries unchanged.
 
 A crossing is the road node two streets *share* (no polyline maths), so a
 junction modelled with several nodes returns several points — pick the one you

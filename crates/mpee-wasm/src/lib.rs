@@ -80,6 +80,24 @@ impl Engine {
         self.routing.has_names()
     }
 
+    /// Attach the optional house-number address sidecar (`.addr` bytes fetched by
+    /// JS). Call after construction; enables address-level forward/reverse. A
+    /// no-op for empty input — kept separate from the constructor for back-compat.
+    pub fn load_addresses(&mut self, addr: &[u8]) {
+        if addr.is_empty() {
+            return;
+        }
+        match dijeng::addresses::AddressIndex::load_bytes(addr) {
+            Ok(ai) => self.routing.set_addresses(ai),
+            Err(e) => web_log(&format!("[mpee] ignoring address sidecar: {e}")),
+        }
+    }
+
+    /// Whether a house-number address sidecar is loaded.
+    pub fn has_addresses(&self) -> bool {
+        self.routing.has_addresses()
+    }
+
     /// Bounding box of the loaded area as JSON `{min_lat,min_lon,max_lat,max_lon}`.
     pub fn bbox(&self) -> String {
         let (mut mnla, mut mxla, mut mnlo, mut mxlo) =
@@ -127,20 +145,48 @@ impl Engine {
         Ok(out.to_string())
     }
 
-    /// Reverse-geocode: nearest street name to a point. Returns the name, or an
-    /// empty string if none / no sidecar.
+    /// Reverse-geocode: nearest address ("Street 42, 0123 City") when an address
+    /// sidecar is loaded, else the nearest street name; empty string if none.
     pub fn reverse(&self, lat: f32, lon: f32) -> String {
+        if let Some(h) = self.routing.reverse_address(lat, lon) {
+            let mut s = format!("{} {}", h.street, h.housenumber);
+            match (h.postcode, h.city) {
+                (Some(pc), Some(c)) => s.push_str(&format!(", {pc} {c}")),
+                (None, Some(c)) => s.push_str(&format!(", {c}")),
+                (Some(pc), None) => s.push_str(&format!(", {pc}")),
+                (None, None) => {}
+            }
+            return s;
+        }
         self.routing.reverse(lat, lon).unwrap_or("").to_string()
     }
 
-    /// Forward-geocode: street name → JSON `{name,lat,lon}`, or `null`.
-    /// `near_lat`/`near_lon` finite → pick the match nearest that point
-    /// (multi-city disambiguation); pass NaN to ignore.
+    /// Forward-geocode: street (optionally "Street 42") → JSON. Address-level
+    /// when the query has a number and an address sidecar is loaded (adds
+    /// `housenumber`/`city`/`postcode`/`approximate`), else `{name,lat,lon}`.
+    /// `near_*` finite → multi-city disambiguation; pass NaN to ignore.
     pub fn geocode(&self, query: &str, near_lat: f32, near_lon: f32) -> String {
-        let hit = if near_lat.is_finite() && near_lon.is_finite() {
-            self.routing.geocode_near(query, near_lat, near_lon)
+        let near = if near_lat.is_finite() && near_lon.is_finite() {
+            Some((near_lat, near_lon))
         } else {
-            self.routing.geocode(query)
+            None
+        };
+        let (street_part, number) = dijeng::routing::split_house_number(query);
+        if number.is_some() {
+            if let Some(h) = self.routing.address_query(query, near) {
+                return serde_json::json!({
+                    "name": h.street, "housenumber": h.housenumber,
+                    "lat": h.lat, "lon": h.lon,
+                    "city": h.city, "postcode": h.postcode,
+                    "approximate": h.approximate,
+                })
+                .to_string();
+            }
+        }
+        let q = if number.is_some() { street_part } else { query };
+        let hit = match near {
+            Some((la, lo)) => self.routing.geocode_near(q, la, lo),
+            None => self.routing.geocode(q),
         };
         match hit {
             Some((lat, lon, name)) => serde_json::json!({

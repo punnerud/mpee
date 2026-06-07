@@ -142,8 +142,9 @@ enum Cmd {
         pp: Option<PathBuf>,
     },
 
-    /// Reverse-geocode: the nearest street name to a LAT,LON point. Offline,
-    /// using the `.names` sidecar built alongside the cache (no extra index).
+    /// Reverse-geocode: the nearest address (house number when available, else
+    /// street name) to a LAT,LON point. Offline, using the `.names`/`.addr`
+    /// sidecars built alongside the cache (no extra index).
     Reverse {
         /// Point as "LAT,LON" (e.g. 59.913,10.752). Negative values OK.
         #[arg(allow_hyphen_values = true)]
@@ -157,10 +158,12 @@ enum Cmd {
         pp: Option<PathBuf>,
     },
 
-    /// Forward-geocode: look up a street by name → its LAT,LON. Offline;
+    /// Forward-geocode: "Street 42" → its LAT,LON (house number split off
+    /// automatically; a missing number returns the nearest one on the street).
+    /// A query without a number resolves to the street. Offline;
     /// case-insensitive and matches substrings (e.g. "karl johan").
     Geocode {
-        /// Street name to look up.
+        /// Address or street, e.g. "Karl Johans gate 42" or "Karl Johans gate".
         query: String,
         /// Disambiguate on a multi-city cache: return the match nearest this
         /// "LAT,LON" reference point (e.g. the city centre).
@@ -502,6 +505,9 @@ fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool, keep_csr: b
     if !res.cached && res.names_path.is_file() {
         eprintln!("  names: {} (street names for `mpee reverse`/`geocode` — delete to save space)", res.names_path.display());
     }
+    if !res.cached && res.addr_path.is_file() {
+        eprintln!("  addr: {} (house numbers for `mpee geocode \"Street 42\"`/`reverse` — delete to save space)", res.addr_path.display());
+    }
     Ok(())
 }
 
@@ -565,14 +571,38 @@ fn load_geocoder(pp_path: &Path) -> Result<dijeng::routing::RoutingService> {
             Err(e) => eprintln!("WARN: ignoring names sidecar {names_path}: {e}"),
         }
     }
+
+    // Optional house-number address sidecar (missing ⇒ street-only geocoding).
+    let addr_path = pp_str
+        .strip_suffix(".pp")
+        .map(|b| format!("{b}.addr"))
+        .unwrap_or_else(|| format!("{pp_str}.addr"));
+    if Path::new(&addr_path).is_file() {
+        match dijeng::addresses::AddressIndex::load_mmap(&addr_path) {
+            Ok(ai) => svc.set_addresses(ai),
+            Err(e) => eprintln!("WARN: ignoring address sidecar {addr_path}: {e}"),
+        }
+    }
     Ok(svc)
+}
+
+/// Format an address hit as "Street 42, 0123 City".
+fn fmt_addr(h: &dijeng::addresses::AddressHit) -> String {
+    let mut s = format!("{} {}", h.street, h.housenumber);
+    match (&h.postcode, &h.city) {
+        (Some(pc), Some(c)) => s.push_str(&format!(", {pc} {c}")),
+        (None, Some(c)) => s.push_str(&format!(", {c}")),
+        (Some(pc), None) => s.push_str(&format!(", {pc}")),
+        (None, None) => {}
+    }
+    s
 }
 
 fn cmd_reverse(point: (f64, f64), pp_path: &Path) -> Result<()> {
     let svc = load_geocoder(pp_path)?;
-    if !svc.has_names() {
+    if !svc.has_names() && !svc.has_addresses() {
         bail!(
-            "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \
+            "no .names/.addr sidecar next to {} — rebuild the cache (`mpee build`) with this \
              version to enable geocoding",
             pp_path.display()
         );
@@ -580,9 +610,13 @@ fn cmd_reverse(point: (f64, f64), pp_path: &Path) -> Result<()> {
     let (lat, lon) = (point.0 as f32, point.1 as f32);
     let snapped = svc.coords[svc.nearest_node(lat, lon) as usize];
     let snap_d = haversine_m(point, (snapped.0 as f64, snapped.1 as f64));
-    match svc.reverse(lat, lon) {
-        Some(name) => println!("{name}"),
-        None => println!("(no street name on the nearest road)"),
+    // Prefer a full house-numbered address; fall back to the street name.
+    match svc.reverse_address(lat, lon) {
+        Some(h) => println!("{}", fmt_addr(&h)),
+        None => match svc.reverse(lat, lon) {
+            Some(name) => println!("{name}"),
+            None => println!("(no street name on the nearest road)"),
+        },
     }
     println!("nearest road: ({:.5}, {:.5})  [{:.0} m away]", snapped.0, snapped.1, snap_d);
     if snap_d > 500.0 {
@@ -593,23 +627,36 @@ fn cmd_reverse(point: (f64, f64), pp_path: &Path) -> Result<()> {
 
 fn cmd_geocode(query: &str, near: Option<(f64, f64)>, pp_path: &Path) -> Result<()> {
     let svc = load_geocoder(pp_path)?;
-    if !svc.has_names() {
+    if !svc.has_names() && !svc.has_addresses() {
         bail!(
-            "no .names sidecar next to {} — rebuild the cache (`mpee build`) with this \
+            "no .names/.addr sidecar next to {} — rebuild the cache (`mpee build`) with this \
              version to enable geocoding",
             pp_path.display()
         );
     }
-    let hit = match near {
-        Some((la, lo)) => svc.geocode_near(query, la as f32, lo as f32),
-        None => svc.geocode(query),
+    let near_f = near.map(|(la, lo)| (la as f32, lo as f32));
+    let (street_part, number) = dijeng::routing::split_house_number(query);
+    // If the query carries a house number, resolve it at address level first.
+    if number.is_some() {
+        if let Some(h) = svc.address_query(query, near_f) {
+            println!("{}{}", fmt_addr(&h), if h.approximate { "  (approx — nearest number)" } else { "" });
+            println!("{:.6},{:.6}", h.lat, h.lon);
+            return Ok(());
+        }
+    }
+    // Fall back to street-level geocoding. When the query had a trailing number
+    // (but no address sidecar / no match), geocode the street part alone.
+    let q = if number.is_some() { street_part } else { query };
+    let hit = match near_f {
+        Some((la, lo)) => svc.geocode_near(q, la, lo),
+        None => svc.geocode(q),
     };
     match hit {
         Some((lat, lon, name)) => {
             println!("{name}");
             println!("{lat:.6},{lon:.6}");
         }
-        None => bail!("no street matching {query:?} found in this area"),
+        None => bail!("no street/address matching {query:?} found in this area"),
     }
     Ok(())
 }

@@ -23,6 +23,8 @@ pub struct BuildResult {
     pub ch_path: PathBuf,
     /// Street-name sidecar for offline geocoding (written on a full build).
     pub names_path: PathBuf,
+    /// House-number address sidecar for offline address geocoding.
+    pub addr_path: PathBuf,
     pub nodes: usize,
     pub edges: usize,
     /// Wall time of the CH-contraction step, in seconds (0.0 when reused).
@@ -102,6 +104,7 @@ pub fn build_cache(
     let pp_path = PathBuf::from(format!("{base}.pp"));
     let ch_path = PathBuf::from(format!("{base}.ch"));
     let names_path = PathBuf::from(format!("{base}.names"));
+    let addr_path = PathBuf::from(format!("{base}.addr"));
 
     // Reuse an existing cache unless asked to rebuild — repeated library calls
     // (e.g. from an agent) then return instantly instead of re-contracting.
@@ -114,6 +117,7 @@ pub fn build_cache(
             pp_path,
             ch_path,
             names_path,
+            addr_path,
             nodes,
             edges: 0,
             build_secs: 0.0,
@@ -128,8 +132,15 @@ pub fn build_cache(
     // in the same pass. A fresh build therefore always re-parses rather than
     // reading an existing `.csr`; the `.csr` is only re-written when keep_csr
     // is set, as a parse accelerator for other tools.
-    let (graph, coords, edge_dist, node_name, name_pool, street_nodes) =
-        osm::load_osm_routing_par(pbf, profile).map_err(|e| format!("osm load: {e}"))?;
+    let osm::OsmParse {
+        graph,
+        coords,
+        edge_dist,
+        node_name,
+        name_pool,
+        street_nodes,
+        addresses,
+    } = osm::load_osm_routing_par(pbf, profile).map_err(|e| format!("osm load: {e}"))?;
     if keep_csr {
         if let Err(e) = cache::save(&csr_path, &graph, &coords, edge_dist.as_slice()) {
             eprintln!("[build] failed to write .csr accelerator: {e}");
@@ -203,6 +214,14 @@ pub fn build_cache(
         eprintln!("[build] failed to write names sidecar: {e}");
     }
 
+    // House-number address sidecar (independent of the routing graph — its own
+    // coords + grid, so no node permutation applies). Deletable like .names.
+    match crate::addresses::save(&addr_path, &addresses) {
+        Ok(n) if progress => println!("[build] address sidecar: {n} points → {}", addr_path.display()),
+        Ok(_) => {}
+        Err(e) => eprintln!("[build] failed to write address sidecar: {e}"),
+    }
+
     // The .csr is only a PBF-parse accelerator for rebuilds; routing/solve use
     // .pp + .ch. Drop any stale one by default to keep the footprint small.
     if !keep_csr {
@@ -214,6 +233,7 @@ pub fn build_cache(
         pp_path,
         ch_path,
         names_path,
+        addr_path,
         nodes: pre.graph.n,
         edges: pre.graph.m(),
         build_secs,
