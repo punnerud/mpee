@@ -99,13 +99,27 @@
   .eyebrow{color:var(--accent); font-weight:700; letter-spacing:.08em; text-transform:uppercase; font-size:.78rem}
   h1{font-size:clamp(2rem,5vw,3rem); line-height:1.1; margin:.3em 0 .25em; letter-spacing:-.02em}
   .lede{font-size:1.18rem; color:var(--muted); max-width:62ch; margin:0 0 1.4em}
-  /* Rotating "stack we replace" word in the hero lede. Static fallback = the
-     default text "OSRM + VROOM" (visible with JS off); the full enumerated list
+  /* Rotating "stack we replace" word in the hero lede — a button that cycles the
+     name and, on click, drops down the full list. Static fallback = the default
+     text "OSRM + VROOM" (visible with JS off); the full enumerated list also
      lives in an adjacent .sr-only span so screen readers and LLMs read it all. */
-  .rot{display:inline-block; color:var(--accent); font-weight:700; white-space:nowrap;
-       transition:opacity .25s ease, transform .25s ease}
+  .rot-wrap{position:relative; display:inline-block}
+  button.rot{font:inherit; background:none; border:0; padding:0; margin:0; cursor:pointer;
+       color:var(--accent); font-weight:700; white-space:nowrap; line-height:inherit;
+       border-bottom:1px dashed currentColor; transition:opacity .25s ease, transform .25s ease}
+  button.rot:hover{filter:brightness(1.12)}
   .rot.swap{opacity:0; transform:translateY(-.25em)}
-  @media (prefers-reduced-motion: reduce){ .rot{transition:none} }
+  /* A <span> (not <ul>) so it's valid inside the <p class="lede">; styled as a
+     block dropdown. */
+  .rot-menu{display:block; position:absolute; top:100%; left:0; margin:7px 0 0; padding:6px;
+       background:var(--card); border:1px solid var(--line); border-radius:10px;
+       box-shadow:0 10px 30px rgba(0,0,0,.18); z-index:50; font-size:.95rem; font-weight:600;
+       color:var(--fg); opacity:0; transform:translateY(-4px); pointer-events:none;
+       transition:opacity .18s ease, transform .18s ease}
+  .rot-menu.open{opacity:1; transform:none; pointer-events:auto}
+  .rot-opt{display:block; padding:6px 12px; border-radius:6px; white-space:nowrap; cursor:pointer}
+  .rot-opt:hover{background:var(--accent-weak)}
+  @media (prefers-reduced-motion: reduce){ button.rot, .rot-menu{transition:none} }
   .sr-only{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden;
            clip:rect(0 0 0 0); white-space:nowrap; border:0}
   .badges{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:1.5em}
@@ -191,7 +205,7 @@
     <div class="eyebrow">MPEE · Rust routing engine</div>
     <h1>Offline route calculations &amp; optimization</h1>
     <p class="lede">
-      One Rust engine that replaces the <span class="rot" id="rot-stack" aria-hidden="true">OSRM&nbsp;+&nbsp;VROOM</span><span class="sr-only">OSRM + VROOM — and equivalently OSRM + PyVRP, OSRM + OR-Tools, Valhalla + VROOM, GraphHopper + OR-Tools, or Google Distance Matrix + OR-Tools</span>
+      One Rust engine that replaces the <span class="rot-wrap"><button type="button" class="rot" id="rot-stack" aria-haspopup="listbox" aria-expanded="false" aria-label="Router-plus-solver stacks MPEE replaces — click to list them">OSRM&nbsp;+&nbsp;VROOM</button><span class="rot-menu" id="rot-menu" role="listbox" aria-label="Router + solver stacks MPEE replaces"><span class="rot-opt" role="option">OSRM + VROOM</span><span class="rot-opt" role="option">OSRM + PyVRP</span><span class="rot-opt" role="option">OSRM + OR-Tools</span><span class="rot-opt" role="option">Valhalla + VROOM</span><span class="rot-opt" role="option">GraphHopper + OR-Tools</span><span class="rot-opt" role="option">Google Distance Matrix + OR-Tools</span></span></span><span class="sr-only">OSRM + VROOM — and equivalently OSRM + PyVRP, OSRM + OR-Tools, Valhalla + VROOM, GraphHopper + OR-Tools, or Google Distance Matrix + OR-Tools</span>
       stack — routing and vehicle-routing optimization in a single process.
       Download one area once, then route, optimize, and geocode it
       <strong>fully offline</strong>.
@@ -1089,29 +1103,56 @@ r.has_routing() -> bool      # routing available (a .ch was loaded)</code></pre>
   })();
 
   // Hero: rotate the "stack we replace" through the common router + solver
-  // combos, showing MPEE stands in for all of them — not just OSRM + VROOM.
-  // Progressive enhancement: the static HTML keeps "OSRM + VROOM" as the no-JS
-  // fallback, and an adjacent .sr-only span enumerates every combo so screen
-  // readers and LLMs read the full list without running this script. Honours
-  // prefers-reduced-motion (leaves the text static).
+  // combos (showing MPEE stands in for all of them, not just OSRM + VROOM), and
+  // on click drop down the full list — auto-closing after 5 s or on an outside
+  // click / Escape. Progressive enhancement: the static HTML keeps "OSRM + VROOM"
+  // as the no-JS fallback, the <ul> + an adjacent .sr-only span enumerate every
+  // combo so screen readers and LLMs read the full list without this script, and
+  // the rotation honours prefers-reduced-motion (the dropdown still works).
   (function () {
     var el = document.getElementById('rot-stack');
+    var menu = document.getElementById('rot-menu');
     if (!el) return;
-    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reduce) return;
     var STACKS = [
       'OSRM + VROOM', 'OSRM + PyVRP', 'OSRM + OR-Tools',
       'Valhalla + VROOM', 'GraphHopper + OR-Tools', 'Google Matrix + OR-Tools'
     ];
-    var i = 0;
-    setInterval(function () {
-      i = (i + 1) % STACKS.length;
-      el.classList.add('swap');
-      setTimeout(function () {
-        el.textContent = STACKS[i];
-        el.classList.remove('swap');
-      }, 260);
-    }, 2400);
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var i = 0, open = false, closeTimer = null;
+
+    // Rotation (paused while the dropdown is open so text never shifts under it).
+    if (!reduce) {
+      setInterval(function () {
+        if (open) return;
+        i = (i + 1) % STACKS.length;
+        el.classList.add('swap');
+        setTimeout(function () { el.textContent = STACKS[i]; el.classList.remove('swap'); }, 260);
+      }, 2400);
+    }
+
+    if (!menu) return;
+    function arm() { clearTimeout(closeTimer); closeTimer = setTimeout(closeMenu, 5000); }
+    function openMenu() {
+      open = true; menu.classList.add('open'); el.setAttribute('aria-expanded', 'true'); arm();
+    }
+    function closeMenu() {
+      open = false; menu.classList.remove('open'); el.setAttribute('aria-expanded', 'false');
+      clearTimeout(closeTimer);
+    }
+    el.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (open) closeMenu(); else openMenu();
+    });
+    // Reading a list item closes the menu; hovering it keeps it open.
+    menu.addEventListener('click', function (e) { e.stopPropagation(); closeMenu(); });
+    menu.addEventListener('mouseenter', function () { clearTimeout(closeTimer); });
+    menu.addEventListener('mouseleave', function () { if (open) arm(); });
+    document.addEventListener('click', function (e) {
+      if (open && !menu.contains(e.target) && e.target !== el) closeMenu();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (open && (e.key === 'Escape' || e.key === 'Esc')) closeMenu();
+    });
   })();
 </script>
 </body>
