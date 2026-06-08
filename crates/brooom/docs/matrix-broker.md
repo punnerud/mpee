@@ -14,6 +14,24 @@ If those numbers come from a per-element-billed API, the naïve cost is **N²
 calls** — 160,000 for a 400-stop run, most of them long-range cells the solver
 never even consults. That is the bill the broker deletes.
 
+### How much you save (illustrative)
+
+At a typical per-element price of **~$5 / 1,000 elements** (illustrative — check
+your provider's tier), a 400-stop matrix is:
+
+| | Elements bought | Cost / solve | Daily re-plan, per quarter |
+|---|--:|--:|--:|
+| **Naïve N²** | 160,000 | **~$800** | **~$24,000** |
+| **Broker, cold** (skeleton only, <50 %) | < ~80,000 | < ~$400 (once) | — |
+| **Broker, warm DB / offline profile** | **0** | **≈ $0** | **≈ $0** |
+
+The first run pays for the skeleton; **every later run over the same area is
+essentially free** — the warm cache never re-buys a cell, and a temporal profile
+learned on one workday is replayed offline for every similar day. The recurring
+per-call matrix bill becomes a one-time cost. (Numbers scale with *N²* for the
+naïve path but only with the skeleton for the broker, so the gap widens fast at
+larger *N*.)
+
 ---
 
 ## Why it saves money (the four levers)

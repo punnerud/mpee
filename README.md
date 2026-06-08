@@ -21,8 +21,10 @@ out of RAM, on **CPU + GPU**.
 > matrices** (matcodec — bring a matrix from anywhere, store it 7–10× smaller,
 > stream it bigger than RAM, random-access it compressed), and a **cost-aware
 > matrix broker** that buys only the cells the solver reads from a paid API,
-> derives the rest, and learns one day of live traffic to **replay offline**. You
-> assemble an optimizer for *your* problem.
+> derives the rest, caches them so the same cell is never bought twice, and learns
+> one day of live traffic to **replay offline** — turning a recurring per-call
+> matrix bill into a one-time skeleton (often **≈ $0 per later run**). You assemble
+> an optimizer for *your* problem.
 
 > 🌐 **[Live demo → punnerud.github.io/mpee/demo](https://punnerud.github.io/mpee/demo/)** —
 > the whole engine compiled to WebAssembly, running **in your browser** over a
@@ -590,6 +592,14 @@ matcodec validate   matrix.json          # warns on anomalies; exits non-zero on
 
 ### Cost-aware matrix broker — pay only for the cells you use
 
+> **The money story.** A 400-stop run is an *N²* = **160,000-element** matrix. At a
+> typical per-element API price (~$5 / 1,000 elements, illustrative) that's **~$800
+> bought naively — every solve**. Re-plan daily and it's **~$24,000/quarter**. The
+> broker buys only the skeleton the solver reads (**<50 %**, often far less), so the
+> first run is a fraction of that, and **every later run is ≈ $0**: a warm local DB
+> never buys the same cell twice, and a temporal profile learned on one workday is
+> **replayed offline** for every similar day. You pay once; you reuse forever.
+
 The flip side of *compressing* a matrix you already have is **not buying** one you
 don't. When the matrix has to come from a **paid/metered** provider (Google
 Distance Matrix, a billed OSRM, an internal endpoint), a full *N×N* is wasteful:
@@ -618,7 +628,8 @@ brooom -i fleet.json --routing google --google-key "$KEY" --broker \
        --uncertainty-weight 1.0 --offline-reuse
 ```
 
-Full write-up: [`crates/brooom/docs/matrix-broker.md`](crates/brooom/docs/matrix-broker.md).
+**→ How much you save, the four cost levers, and every flag:
+[`crates/brooom/docs/matrix-broker.md`](crates/brooom/docs/matrix-broker.md).**
 
 ---
 

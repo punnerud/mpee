@@ -275,9 +275,11 @@
       — bring a matrix from anywhere, store it 7–10× smaller, stream it bigger
       than RAM, random-access it compressed), and a <strong>cost-aware matrix
       broker</strong> that buys only the cells the solver reads from a paid API,
-      derives the rest, and learns one day of live traffic to <strong>replay
-      offline</strong>. You assemble an optimizer for <em>your</em> problem — not
-      just call a solver.
+      derives the rest, never buys the same cell twice, and learns one day of live
+      traffic to <strong>replay offline</strong> — turning a recurring per-call
+      matrix bill into a one-time skeleton (often <strong>≈&nbsp;$0 per later
+      run</strong>). You assemble an optimizer for <em>your</em> problem — not just
+      call a solver.
     </p>
     <blockquote>
       <p><strong>Scope:</strong> MPEE covers a single downloaded area — it is not
@@ -504,6 +506,18 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     </p>
 
     <h3>Pay only for the matrix you use — the cost-aware broker <span class="muted" style="font-weight:400">· new · cost / delay</span></h3>
+    <blockquote>
+      <p><strong>The money story.</strong> A 400-stop run is an <em>N²</em> =
+      <strong>160,000-element</strong> matrix. At a typical per-element API price
+      (~$5&nbsp;/&nbsp;1,000 elements, illustrative) that's <strong>~$800 bought
+      naively — every solve</strong>; re-plan daily and it's
+      <strong>~$24,000/quarter</strong>. The broker buys only the skeleton the
+      solver reads (<strong>&lt;50&nbsp;%</strong>, often far less), so the first
+      run is a fraction of that and <strong>every later run is ≈&nbsp;$0</strong> —
+      a warm local cache never buys the same cell twice, and a temporal profile
+      learned on one workday is <strong>replayed offline</strong> for every similar
+      day. Pay once; reuse forever.</p>
+    </blockquote>
     <p>
       The flip side of <em>compressing</em> a matrix you have is <strong>not
       buying</strong> one you don't. When the matrix must come from a
@@ -534,7 +548,7 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       Provider-agnostic (Google is an example, not a dependency); pairs naturally
       with a compressed offline graph as the free base plus a thin paid “delay”
       overlay. Absent the broker, routing is byte-for-byte unchanged.
-      <a href="https://github.com/punnerud/mpee/blob/main/crates/brooom/docs/matrix-broker.md">Full write-up →</a>
+      <a href="https://github.com/punnerud/mpee/blob/main/crates/brooom/docs/matrix-broker.md"><strong>How much you save, the four cost levers &amp; every flag →</strong></a>
     </p>
 
     <h3>Real maps, not just synthetic <span class="muted" style="font-weight:400">· real OSM road distances, seed-reproducible</span></h3>
