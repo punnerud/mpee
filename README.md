@@ -4,7 +4,9 @@
 
 <sub>▶ **[Live demo →](https://punnerud.github.io/mpee/demo/)** — the whole engine compiled to WebAssembly (+ WebGPU), running in your browser.</sub>
 
-**One Rust engine that replaces the OSRM + VROOM stack** — routing *and*
+**One Rust engine that replaces the OSRM + VROOM stack** — and equally the
+OSRM + PyVRP, OSRM + OR-Tools, Valhalla + VROOM, GraphHopper + OR-Tools, or
+Google Distance Matrix + OR-Tools router-plus-solver combos: routing *and*
 vehicle-routing optimization in a single process, sharing memory directly.
 Download one area once, then route, optimize, and geocode it **fully offline**.
 
