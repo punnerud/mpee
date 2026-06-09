@@ -11,7 +11,7 @@ use web_time::Instant;
 use crate::error::{Error, Result};
 use crate::granular::Granular;
 use crate::insertion::{greedy_insertion, greedy_insertion_seeded};
-use crate::local_search::{local_search, local_search_full, route_split_pass};
+use crate::local_search::{local_search, local_search_full, local_search_seeded, route_split_pass};
 use crate::matrix::{resolve_coords, Matrix, MatrixSource};
 use crate::problem::Problem;
 use crate::solution::{Solution, TaskRef};
@@ -738,17 +738,52 @@ fn solve_scalar_with_extra_global(
             // walk can reach a higher-route basin. No time limit ⇒ a fixed cap.
             let max_perturb = (problem.jobs.len() / 10).clamp(1, 25);
             let max_iters = if deadline.is_some() { usize::MAX } else { ils_iters.max(1) * 80 };
+            // Seeded re-convergence: `cur` is always LS-converged, so only the
+            // perturbed region needs re-probing (see local_search_seeded).
+            // BROOOM_NO_SEEDED_LS forces the old full-reset behaviour for A/B.
+            let seeded_ls = std::env::var("BROOOM_NO_SEEDED_LS").is_err();
+            let mut iters: u64 = 0;
             for _ in 0..max_iters {
                 if let Some(d) = deadline {
                     if Instant::now() >= d { break; }
                 }
+                iters += 1;
                 let mut perturbed = cur.clone();
                 let n_moves = rng.gen_range(1..=max_perturb);
-                perturb_small(&mut perturbed, n_moves, 0.08, &mut rng, problem, matrix);
-                local_search(
-                    problem, matrix, &mut perturbed,
-                    config.max_local_search_passes, gran,
-                );
+                let mut touched = perturb_small(&mut perturbed, n_moves, 0.08, &mut rng, problem, matrix);
+                if seeded_ls {
+                    // Spatial spillover: a task in an UNTOUCHED route may gain an
+                    // improving move into the perturbed region (freed capacity /
+                    // TW slack), so also unsettle every task that has a touched
+                    // location among its granular neighbours. Without this the
+                    // seeded restart converges to worse optima on tight-window
+                    // instances (measured +0.5% on rc101).
+                    if let Some(g) = gran {
+                        let touched_locs: std::collections::HashSet<usize> = touched
+                            .iter()
+                            .filter_map(|t| t.description(problem).location.index)
+                            .collect();
+                        for r in &perturbed.routes {
+                            for &t in &r.steps {
+                                if touched.contains(&t) { continue; }
+                                if let Some(loc) = t.description(problem).location.index {
+                                    if g.neighbors(loc).any(|nb| touched_locs.contains(&nb)) {
+                                        touched.insert(t);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    local_search_seeded(
+                        problem, matrix, &mut perturbed,
+                        config.max_local_search_passes, gran, &touched,
+                    );
+                } else {
+                    local_search(
+                        problem, matrix, &mut perturbed,
+                        config.max_local_search_passes, gran,
+                    );
+                }
                 let cc = perturbed.summary.cost;
                 // New global best → keep it, and (exhaustive-on-best) give it a
                 // full no-don't-look-bit polish, à la PyVRP `exhaustive_on_best`.
@@ -774,6 +809,9 @@ fn solve_scalar_with_extra_global(
                     hist[hidx] = cur_cost;
                 }
                 hidx = (hidx + 1) % hist_len;
+            }
+            if std::env::var("BROOOM_ILS_DEBUG").is_ok() {
+                eprintln!("ILS-LAHC seed={seed}: iters={iters} best={best_cost:.0}");
             }
             sol = best_sol;
         } else if ils_iters > 0 && ils_kick > 0.0 {
@@ -1403,6 +1441,10 @@ pub fn build_matrix(problem: &mut Problem, source: Option<&dyn MatrixSource>) ->
 /// substance that local search won't trivially re-absorb it — the move that lets
 /// the search reach a higher-route basin (our diagnosed R2/RC2 gap). Greedy LS
 /// alone can't take this (it's temporarily worse); pair it with LAHC acceptance.
+/// Returns the set of tasks whose routes were modified (every task in a route
+/// the perturbation rewrote). The ILS loop feeds this to `local_search_seeded`
+/// so re-convergence only re-probes the perturbed region — the same
+/// route-level invalidation rule the LS itself applies after a move.
 pub fn perturb_small<R: rand::Rng>(
     sol: &mut Solution,
     n_moves: usize,
@@ -1410,14 +1452,15 @@ pub fn perturb_small<R: rand::Rng>(
     rng: &mut R,
     problem: &Problem,
     matrix: &Matrix,
-) {
+) -> std::collections::HashSet<crate::solution::TaskRef> {
     use crate::solution::{evaluate_route, Route, RouteMetrics, TaskRef};
+    let mut touched: std::collections::HashSet<TaskRef> = std::collections::HashSet::new();
     for _ in 0..n_moves {
         let nonempty: Vec<usize> = (0..sol.routes.len())
             .filter(|&r| !sol.routes[r].steps.is_empty())
             .collect();
         if nonempty.is_empty() {
-            return;
+            return touched;
         }
         let r1 = nonempty[rng.gen_range(0..nonempty.len())];
         let len1 = sol.routes[r1].steps.len();
@@ -1452,6 +1495,8 @@ pub fn perturb_small<R: rand::Rng>(
                 evaluate_route(problem, matrix, veh1, &s1)
             };
             if let (Ok(m1), Ok(m2)) = (m1, evaluate_route(problem, matrix, veh2, &seg)) {
+                touched.extend(s1.iter().copied());
+                touched.extend(seg.iter().copied());
                 sol.routes[r1].steps = s1;
                 sol.routes[r1].metrics = m1;
                 sol.routes.push(Route { vehicle_idx: v2, steps: seg, metrics: m2 });
@@ -1473,6 +1518,7 @@ pub fn perturb_small<R: rand::Rng>(
             s.insert(pos, task);
             let veh = &problem.vehicles[sol.routes[r1].vehicle_idx];
             if let Ok(m) = evaluate_route(problem, matrix, veh, &s) {
+                touched.extend(s.iter().copied());
                 sol.routes[r1].steps = s;
                 sol.routes[r1].metrics = m;
             }
@@ -1486,6 +1532,8 @@ pub fn perturb_small<R: rand::Rng>(
                 evaluate_route(problem, matrix, veh1, &s1),
                 evaluate_route(problem, matrix, veh2, &s2),
             ) {
+                touched.extend(s1.iter().copied());
+                touched.extend(s2.iter().copied());
                 sol.routes[r1].steps = s1;
                 sol.routes[r1].metrics = m1;
                 sol.routes[r2].steps = s2;
@@ -1495,6 +1543,7 @@ pub fn perturb_small<R: rand::Rng>(
     }
     sol.routes.retain(|r| !r.steps.is_empty());
     sol.recompute_summary(problem);
+    touched
 }
 
 pub fn kick<R: rand::Rng>(

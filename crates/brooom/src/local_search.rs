@@ -187,8 +187,43 @@ pub fn local_search(
     max_passes: usize,
     granular: Option<&Granular>,
 ) {
-    let mut settled: HashSet<TaskRef> = HashSet::new();
+    local_search_with_settled(problem, matrix, sol, max_passes, granular, HashSet::new());
+}
 
+/// Local search that starts with the don't-look bits pre-populated. Used by the
+/// ILS loop to re-converge after a small perturbation: the working solution was
+/// already LS-converged, so every task in an UNTOUCHED route still carries a
+/// valid "no improving move" verdict under the don't-look-bit semantics
+/// (verdicts are only invalidated when the task's own route changes — exactly
+/// the rule the move-application below uses). Seeding those verdicts skips
+/// re-probing the whole solution and makes one ILS iteration cost
+/// O(perturbed region), not O(N) — the trick PyVRP's ILS uses to run orders of
+/// magnitude more iterations in the same budget.
+pub fn local_search_seeded(
+    problem: &Problem,
+    matrix: &Matrix,
+    sol: &mut Solution,
+    max_passes: usize,
+    granular: Option<&Granular>,
+    unsettled: &HashSet<TaskRef>,
+) {
+    let settled: HashSet<TaskRef> = sol
+        .routes
+        .iter()
+        .flat_map(|r| r.steps.iter().copied())
+        .filter(|t| !unsettled.contains(t))
+        .collect();
+    local_search_with_settled(problem, matrix, sol, max_passes, granular, settled);
+}
+
+fn local_search_with_settled(
+    problem: &Problem,
+    matrix: &Matrix,
+    sol: &mut Solution,
+    max_passes: usize,
+    granular: Option<&Granular>,
+    mut settled: HashSet<TaskRef>,
+) {
     'outer: for _ in 0..max_passes {
         let task_seq: Vec<TaskRef> = sol.routes.iter().flat_map(|r| r.steps.iter().copied()).collect();
 
