@@ -49,17 +49,18 @@ it**, which is where the speed and memory wins come from.
 
 **Streaming at fleet scale** · `bench_matrix`, Greater London car (default 500 MB budget)
 
-| Matrix | Budget | Time | Peak RAM | Throughput |
-|---|--:|--:|--:|--:|
-| 100k × 100k | 500 MB | 457 s | 472 MB | 21.9M cells/s |
-| 100k × 100k | 1 GB | 386 s | 968 MB | 25.9M cells/s |
-| 100k × 100k | 2 GB | 401 s | 1.7 GB | 25.0M cells/s |
-| 100k × 100k | 4 GB | 389 s | 1.6 GB | 25.7M cells/s |
-| 100k × 100k | 8 GB | 387 s | 1.6 GB | 25.8M cells/s |
-| 200k × 200k | 500 MB | 2,441 s (~41 min) | 469 MB | 16.4M cells/s |
-| **200k × 200k** | **1 GB** | **1,940 s (~32 min)** | **891 MB** | **20.6M cells/s** |
+| Matrix | Budget | Chunk | Time | Peak RAM | Throughput | Speedup† |
+|---|--:|--:|--:|--:|--:|--:|
+| 100k × 100k | 250 MB | 97 | 884 s (~15 min) | 310 MB | 11.3M cells/s | 0.52× |
+| 100k × 100k | 500 MB | 296 | 457 s | 472 MB | 21.9M cells/s | 1.00× |
+| 100k × 100k | 1 GB | 693 | 386 s | 968 MB | 25.9M cells/s | 1.18× |
+| 100k × 100k | 2 GB | 1489 | 401 s | 1.7 GB | 25.0M cells/s | 1.14× |
+| 100k × 100k | 4 GB | 1500 | 389 s | 1.6 GB | 25.7M cells/s | 1.17× |
+| 100k × 100k | 8 GB | 1500 | 387 s | 1.6 GB | 25.8M cells/s | 1.18× |
+| 200k × 200k | 500 MB | 150 | 2,441 s (~41 min) | 469 MB | 16.4M cells/s | 1.00× |
+| **200k × 200k** | **1 GB** | **352** | **1,940 s (~32 min)** | **891 MB** | **20.6M cells/s** | **1.26×** |
 
-<sub>Raw logs: [`benchmarks/london-scale/`](benchmarks/london-scale/). Honest caveat: OSRM is ~3× faster on a *single* point-to-point query (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized matrix — the case VRP actually requires. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
+<sub>†Speedup vs same N at 500 MB budget. 98 % finite cells; ~76 GB streamed to disk for 100k. Raw logs: [`benchmarks/london-scale/`](benchmarks/london-scale/). Honest caveat: OSRM is ~3× faster on a *single* point-to-point query (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized matrix — the case VRP actually requires. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
 
 **Optimisation — VRP solver** · brooom vs PyVRP / VROOM / OR-Tools, Solomon-style
 

@@ -12,3 +12,5 @@ RESULT n=200000 budget_mb=500 exit=0 peak_rss_mb=469,0 200000x200000 [chunked, c
 ---
 RESULT n=200000 budget_mb=1000 exit=0 peak_rss_mb=891,4 200000x200000 [chunked, chunk=352]: 1939.76 s (20621118 cells/s) — out 305176 MB, finite 97.9%, avg dur=1786s dist=24820m
 ---
+RESULT n=100000 budget_mb=250 exit=0 peak_rss_mb=310,1 100000x100000 [chunked, chunk=97]: 884.13 s (11310604 cells/s) — out 76294 MB, finite 98.0%, avg dur=1785s dist=24806m
+---

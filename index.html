@@ -436,21 +436,24 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       never materialises the full matrix — peak RAM stays under the budget cap.
     </p>
     <table>
-      <thead><tr><th>Matrix</th><th>Budget</th><th>Time</th><th>Peak RAM</th><th>Throughput</th></tr></thead>
+      <thead><tr><th>Matrix</th><th>Budget</th><th>Chunk</th><th>Time</th><th>Peak RAM</th><th>Throughput</th><th>Speedup<sup>†</sup></th></tr></thead>
       <tbody>
-        <tr><td>100k × 100k</td><td>500 MB</td><td>457 s</td><td>472 MB</td><td>21.9M cells/s</td></tr>
-        <tr><td>100k × 100k</td><td>1 GB</td><td>386 s</td><td>968 MB</td><td>25.9M cells/s</td></tr>
-        <tr><td>100k × 100k</td><td>2 GB</td><td>401 s</td><td>1.7 GB</td><td>25.0M cells/s</td></tr>
-        <tr><td>100k × 100k</td><td>4 GB</td><td>389 s</td><td>1.6 GB</td><td>25.7M cells/s</td></tr>
-        <tr><td>100k × 100k</td><td>8 GB</td><td>387 s</td><td>1.6 GB</td><td>25.8M cells/s</td></tr>
-        <tr><td>200k × 200k</td><td>500 MB</td><td>2,441 s (~41 min)</td><td>469 MB</td><td>16.4M cells/s</td></tr>
-        <tr><td><b>200k × 200k</b></td><td><b>1 GB</b></td><td><b>1,940 s (~32 min)</b></td><td><b>891 MB</b></td><td><b>20.6M cells/s</b></td></tr>
+        <tr><td>100k × 100k</td><td>250 MB</td><td>97</td><td>884 s (~15 min)</td><td>310 MB</td><td>11.3M cells/s</td><td>0.52×</td></tr>
+        <tr><td>100k × 100k</td><td>500 MB</td><td>296</td><td>457 s</td><td>472 MB</td><td>21.9M cells/s</td><td>1.00×</td></tr>
+        <tr><td>100k × 100k</td><td>1 GB</td><td>693</td><td>386 s</td><td>968 MB</td><td>25.9M cells/s</td><td>1.18×</td></tr>
+        <tr><td>100k × 100k</td><td>2 GB</td><td>1489</td><td>401 s</td><td>1.7 GB</td><td>25.0M cells/s</td><td>1.14×</td></tr>
+        <tr><td>100k × 100k</td><td>4 GB</td><td>1500</td><td>389 s</td><td>1.6 GB</td><td>25.7M cells/s</td><td>1.17×</td></tr>
+        <tr><td>100k × 100k</td><td>8 GB</td><td>1500</td><td>387 s</td><td>1.6 GB</td><td>25.8M cells/s</td><td>1.18×</td></tr>
+        <tr><td>200k × 200k</td><td>500 MB</td><td>150</td><td>2,441 s (~41 min)</td><td>469 MB</td><td>16.4M cells/s</td><td>1.00×</td></tr>
+        <tr><td><b>200k × 200k</b></td><td><b>1 GB</b></td><td><b>352</b></td><td><b>1,940 s (~32 min)</b></td><td><b>891 MB</b></td><td><b>20.6M cells/s</b></td><td><b>1.26×</b></td></tr>
       </tbody>
     </table>
     <p class="muted" style="font-size:.88rem">
-      Higher budget → larger chunks → faster up to a ceiling (100k: ~18&nbsp;% speedup
-      500&nbsp;MB → 1&nbsp;GB; 4–8&nbsp;GB plateau at chunk&nbsp;1500 ≈&nbsp;387&nbsp;s.
-      200k: ~26&nbsp;% speedup 500&nbsp;MB → 1&nbsp;GB). Raw logs:
+      <sup>†</sup>Speedup vs the same&nbsp;N at 500&nbsp;MB budget (457&nbsp;s for 100k,
+      2,441&nbsp;s for 200k). 98&nbsp;% finite cells on every run; ~76&nbsp;GB streamed
+      to disk for 100k (never held in RAM). Higher budget → larger chunks → faster up
+      to a ceiling (100k: 4–8&nbsp;GB plateau at chunk&nbsp;1500 ≈&nbsp;387&nbsp;s;
+      250&nbsp;MB halves RAM but costs ~1.9× wall-clock). Raw logs:
       <a href="https://github.com/punnerud/mpee/tree/main/benchmarks/london-scale">benchmarks/london-scale/</a>.
     </p>
 
