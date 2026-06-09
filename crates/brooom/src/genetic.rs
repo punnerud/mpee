@@ -512,6 +512,168 @@ pub fn order_crossover(pa: &[usize], pb: &[usize], rng: &mut ChaCha8Rng) -> Vec<
     child
 }
 
+// ── SREX crossover (Nagata 2010, the VRPTW crossover PyVRP uses) ────────────
+//
+// Order crossover + Split recombines *orderings* — it deliberately forgets the
+// parents' route partitions, which is the right global move for CVRP but
+// discards exactly the structure time windows shape. SREX instead exchanges
+// whole ROUTES: the child keeps parent A's unselected routes intact and
+// adopts parent B's most-overlapping routes intact, so two good partial
+// partitions recombine without being re-derived. Running both operators side
+// by side gives the population the CVRP-style reshuffle AND the VRPTW-style
+// structure exchange.
+
+/// Selective route exchange on two job-only solutions (the v1 HGS envelope).
+/// Returns `None` when the child cannot host every job within the fleet.
+fn srex_crossover(
+    pa: &Solution,
+    pb: &Solution,
+    problem: &Problem,
+    matrix: &Matrix,
+    rng: &mut ChaCha8Rng,
+) -> Option<Solution> {
+    let na = pa.routes.len();
+    let nb = pb.routes.len();
+    if na == 0 || nb == 0 {
+        return None;
+    }
+    let fleet = problem.vehicles.len();
+    let frac = rng.gen_range(0.3..=0.6);
+    let n_select = ((na as f64 * frac).round() as usize).clamp(1, na.min(nb));
+
+    // 1. Random A-routes to give up.
+    let mut a_idx: Vec<usize> = (0..na).collect();
+    for k in 0..n_select {
+        let j = rng.gen_range(k..na);
+        a_idx.swap(k, j);
+    }
+    let a_selected = &a_idx[..n_select];
+    let mut is_a_selected = vec![false; na];
+    for &i in a_selected {
+        is_a_selected[i] = true;
+    }
+
+    // 2. Job set of A's selected routes.
+    let mut in_va = vec![false; problem.jobs.len()];
+    for &i in a_selected {
+        for s in &pa.routes[i].steps {
+            if let TaskRef::Job(j) = s {
+                in_va[*j] = true;
+            }
+        }
+    }
+
+    // 3. B-routes with the highest overlap with V_A.
+    let mut overlap: Vec<(usize, usize)> = pb
+        .routes
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let ov = r
+                .steps
+                .iter()
+                .filter(|s| matches!(s, TaskRef::Job(j) if in_va[*j]))
+                .count();
+            (i, ov)
+        })
+        .collect();
+    overlap.sort_by(|a, b| b.1.cmp(&a.1));
+    let b_selected: Vec<usize> = overlap.into_iter().take(n_select).map(|(i, _)| i).collect();
+
+    // 4. Child = A's unselected routes + B's selected routes, deduped (first
+    // occurrence wins, so A's preserved structures keep their jobs).
+    let mut seen = vec![false; problem.jobs.len()];
+    let mut child_steps: Vec<Vec<TaskRef>> = Vec::with_capacity(na);
+    for (i, r) in pa.routes.iter().enumerate() {
+        if is_a_selected[i] {
+            continue;
+        }
+        let steps: Vec<TaskRef> = r
+            .steps
+            .iter()
+            .filter(|s| matches!(s, TaskRef::Job(j) if !std::mem::replace(&mut seen[*j], true)))
+            .copied()
+            .collect();
+        if !steps.is_empty() {
+            child_steps.push(steps);
+        }
+    }
+    for &i in &b_selected {
+        let steps: Vec<TaskRef> = pb.routes[i]
+            .steps
+            .iter()
+            .filter(|s| matches!(s, TaskRef::Job(j) if !std::mem::replace(&mut seen[*j], true)))
+            .copied()
+            .collect();
+        if !steps.is_empty() {
+            child_steps.push(steps);
+        }
+    }
+    if child_steps.len() > fleet {
+        return None;
+    }
+
+    // 5. Re-evaluate every child route on sequentially assigned vehicles
+    // (homogeneous fleet, gated by hgs_applicable). A deduped route can turn
+    // infeasible only via... it can't: removing stops keeps a feasible route
+    // feasible in this envelope (capacity shrinks, arrivals only get earlier).
+    // Still, the evaluator stays the authority — bail rather than trust that.
+    let mut sol = Solution::default();
+    for (vehicle_idx, steps) in child_steps.into_iter().enumerate() {
+        let veh = &problem.vehicles[vehicle_idx];
+        let metrics = evaluate_route(problem, matrix, veh, &steps).ok()?;
+        sol.routes.push(Route { vehicle_idx, steps, metrics });
+    }
+
+    // 6. Reinsert missing jobs (in A's selected but not B's selected),
+    // largest demand first, each at its cheapest feasible position; open a
+    // fresh route when nothing fits.
+    let mut missing: Vec<usize> = (0..problem.jobs.len()).filter(|&j| !seen[j]).collect();
+    missing.sort_by_key(|&j| -(problem.jobs[j].delivery.first().copied().unwrap_or(0)));
+    for j in missing {
+        let task = TaskRef::Job(j);
+        let mut best: Option<(usize, usize, f64)> = None; // (route, pos, delta)
+        for (ri, route) in sol.routes.iter().enumerate() {
+            let veh = &problem.vehicles[route.vehicle_idx];
+            let Some(pre) = crate::eval::precompute(problem, matrix, veh, route.vehicle_idx, &route.steps) else {
+                continue;
+            };
+            for pos in 1..=route.steps.len() + 1 {
+                if let Some(d) = crate::eval::try_insert_single(&pre, problem, matrix, veh, pos, task) {
+                    if best.map_or(true, |(_, _, bd)| d < bd) {
+                        best = Some((ri, pos - 1, d));
+                    }
+                }
+            }
+        }
+        match best {
+            Some((ri, pos, _)) => {
+                let veh = &problem.vehicles[sol.routes[ri].vehicle_idx];
+                let mut steps = sol.routes[ri].steps.clone();
+                steps.insert(pos, task);
+                // The O(1) probe is a pre-filter; the evaluator confirms.
+                let Ok(metrics) = evaluate_route(problem, matrix, veh, &steps) else {
+                    return None;
+                };
+                sol.routes[ri].steps = steps;
+                sol.routes[ri].metrics = metrics;
+            }
+            None => {
+                let vehicle_idx = sol.routes.len();
+                if vehicle_idx >= fleet {
+                    return None;
+                }
+                let veh = &problem.vehicles[vehicle_idx];
+                let steps = vec![task];
+                let metrics = evaluate_route(problem, matrix, veh, &steps).ok()?;
+                sol.routes.push(Route { vehicle_idx, steps, metrics });
+            }
+        }
+    }
+    sol.recompute_summary(problem);
+    Some(sol)
+}
+
 // ── Population HGS ──────────────────────────────────────────────────────────
 
 /// One population member: its educated solution plus the giant tour and edge
@@ -703,6 +865,14 @@ pub fn solve_genetic(
     let max_gens = if deadline.is_some() { usize::MAX } else { 2000 };
     let mut gens_since_improve = 0usize;
     let mut gen_count = 0usize;
+    // Share of offspring produced by SREX (whole-route exchange) instead of
+    // OX+Split (ordering recombination). Both operators feed the same
+    // education + culling. Override via BROOOM_SREX (0.0 disables).
+    let srex_p: f64 = std::env::var("BROOOM_SREX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|p: &f64| (0.0..=1.0).contains(p))
+        .unwrap_or(0.5);
     for gen in 0..max_gens {
         gen_count = gen;
         if let Some(d) = deadline {
@@ -710,14 +880,21 @@ pub fn solve_genetic(
                 break;
             }
         }
-        // Produce one offspring: OX(parent_a, parent_b) → Split → educate.
+        // Produce one offspring: crossover(parent_a, parent_b) → educate.
         let pa = tournament(&pop, &mut rng);
         let mut pb = tournament(&pop, &mut rng);
         if pb == pa {
             pb = (pb + 1) % pop.len();
         }
-        let child_tour = order_crossover(&pop[pa].tour, &pop[pb].tour, &mut rng);
-        let Some(mut child) = split(&child_tour, problem, matrix) else {
+        let child_opt = if rng.gen_bool(srex_p) {
+            // SREX keeps whole routes from both parents (no Split — the
+            // partition IS the inherited structure).
+            srex_crossover(&pop[pa].sol, &pop[pb].sol, problem, matrix, &mut rng)
+        } else {
+            let child_tour = order_crossover(&pop[pa].tour, &pop[pb].tour, &mut rng);
+            split(&child_tour, problem, matrix)
+        };
+        let Some(mut child) = child_opt else {
             continue;
         };
         local_search(problem, matrix, &mut child, max_passes, granular);
