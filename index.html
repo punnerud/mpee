@@ -197,23 +197,30 @@
   .pillrow{display:flex; flex-wrap:wrap; gap:8px; margin:.5rem 0}
   .pill{background:var(--card); border:1px solid var(--line); border-radius:999px; padding:4px 12px; font-size:.85rem}
 
-  /* Benchmark chart */
+  /* Benchmark charts */
+  .bench-charts{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:1rem 0 1.2rem}
+  @media (max-width:720px){.bench-charts{grid-template-columns:1fr}}
   .bench-chart{
-    margin:1rem 0 1.2rem; background:var(--card); border:1px solid var(--line);
+    background:var(--card); border:1px solid var(--line);
     border-radius:12px; padding:14px 10px 6px; overflow-x:auto;
   }
-  .bench-chart svg{display:block; width:100%; height:auto; min-width:520px}
-  .bench-chart figcaption{font-size:.88rem; color:var(--muted); margin:6px 4px 4px; text-align:center}
+  .bench-chart svg{display:block; width:100%; height:auto; min-width:280px}
+  .bench-chart figcaption{font-size:.82rem; color:var(--muted); margin:6px 4px 4px; text-align:center; line-height:1.4}
+  .bench-chart .chart-title{fill:var(--fg); font-size:12px; font-weight:700}
   .bench-chart .axis{stroke:var(--line); stroke-width:1}
   .bench-chart .grid{stroke:var(--line); stroke-width:1; opacity:.45}
-  .bench-chart .tick{fill:var(--muted); font-size:11px; font-family:inherit}
-  .bench-chart .ylabel,.bench-chart .xlabel{fill:var(--muted); font-size:11px; font-weight:600}
+  .bench-chart .tick{fill:var(--muted); font-size:10px; font-family:inherit}
+  .bench-chart .ylabel,.bench-chart .xlabel{fill:var(--muted); font-size:10px; font-weight:600}
   .bench-chart .line-100k{fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linejoin:round}
   .bench-chart .line-200k{fill:none; stroke:#6366f1; stroke-width:2.5; stroke-linejoin:round; stroke-dasharray:6 4}
+  .bench-chart .line-budget{fill:none; stroke:var(--muted); stroke-width:1.5; stroke-dasharray:4 3; opacity:.7}
   .bench-chart .dot{stroke:var(--bg); stroke-width:2}
   .bench-chart .dot-100k{fill:var(--accent)}
   .bench-chart .dot-200k{fill:#6366f1}
-  .bench-chart .legend text{fill:var(--fg); font-size:11px}
+  .bench-chart .dot-budget{fill:var(--muted); opacity:.55}
+  .bench-chart .point-label{fill:var(--fg); font-size:9px; font-weight:600}
+  .bench-chart .point-label.muted{fill:var(--muted); font-weight:500}
+  .bench-chart .legend text{fill:var(--fg); font-size:10px}
   .bench-chart .legend line{stroke-width:3; stroke-linecap:round}
   @media (prefers-color-scheme: dark){
     .bench-chart .line-200k{stroke:#818cf8}
@@ -472,59 +479,107 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       </tbody>
     </table>
 
-    <figure class="bench-chart" role="img"
-            aria-label="Line chart: wall-clock time vs memory budget for 100k and 200k matrices. 100k drops from 884 seconds at 250 MB to about 387 seconds at 1 GB and above. 200k is 2441 seconds at 500 MB and 1940 seconds at 1 GB.">
-      <svg viewBox="0 0 600 270" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <!-- grid -->
-        <line class="grid" x1="56" y1="208" x2="568" y2="208"/>
-        <line class="grid" x1="56" y1="172" x2="568" y2="172"/>
-        <line class="grid" x1="56" y1="137" x2="568" y2="137"/>
-        <line class="grid" x1="56" y1="101" x2="568" y2="101"/>
-        <line class="grid" x1="56" y1="66" x2="568" y2="66"/>
-        <line class="grid" x1="56" y1="30" x2="568" y2="30"/>
-        <!-- axes -->
-        <line class="axis" x1="56" y1="24" x2="56" y2="208"/>
-        <line class="axis" x1="56" y1="208" x2="568" y2="208"/>
-        <!-- y ticks -->
-        <text class="tick" x="50" y="212" text-anchor="end">0</text>
-        <text class="tick" x="50" y="176" text-anchor="end">500 s</text>
-        <text class="tick" x="50" y="141" text-anchor="end">1000 s</text>
-        <text class="tick" x="50" y="105" text-anchor="end">1500 s</text>
-        <text class="tick" x="50" y="70" text-anchor="end">2000 s</text>
-        <text class="tick" x="50" y="34" text-anchor="end">2500 s</text>
-        <!-- x ticks (log-spaced budget) -->
-        <text class="tick" x="86" y="224" text-anchor="middle">250</text>
-        <text class="tick" x="180" y="224" text-anchor="middle">500</text>
-        <text class="tick" x="273" y="224" text-anchor="middle">1 GB</text>
-        <text class="tick" x="367" y="224" text-anchor="middle">2 GB</text>
-        <text class="tick" x="460" y="224" text-anchor="middle">4 GB</text>
-        <text class="tick" x="554" y="224" text-anchor="middle">8 GB</text>
-        <text class="tick" x="312" y="242" text-anchor="middle" class="xlabel">Memory budget (MB, log scale)</text>
-        <text class="tick" transform="rotate(-90 16 116)" x="16" y="116" text-anchor="middle" class="ylabel">Wall-clock time</text>
-        <!-- default budget marker -->
-        <line x1="180" y1="24" x2="180" y2="208" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 4" opacity=".35"/>
-        <text class="tick" x="180" y="18" text-anchor="middle" fill="var(--accent)">500 MB default</text>
-        <!-- 100k × 100k -->
-        <path class="line-100k" d="M 86,161 L 180,192 L 273,197 L 367,196 L 460,197 L 554,197"/>
-        <circle class="dot dot-100k" cx="86" cy="161" r="4.5"/><circle class="dot dot-100k" cx="180" cy="192" r="4.5"/>
-        <circle class="dot dot-100k" cx="273" cy="197" r="4.5"/><circle class="dot dot-100k" cx="367" cy="196" r="4.5"/>
-        <circle class="dot dot-100k" cx="460" cy="197" r="4.5"/><circle class="dot dot-100k" cx="554" cy="197" r="4.5"/>
-        <!-- 200k × 200k -->
-        <path class="line-200k" d="M 180,51 L 273,87"/>
-        <circle class="dot dot-200k" cx="180" cy="51" r="4.5"/><circle class="dot dot-200k" cx="273" cy="87" r="4.5"/>
-        <!-- legend -->
-        <g class="legend" transform="translate(390,34)">
-          <line class="line-100k" x1="0" y1="0" x2="22" y2="0"/>
-          <text x="28" y="4">100k × 100k</text>
-          <line class="line-200k" x1="0" y1="16" x2="22" y2="16"/>
-          <text x="28" y="20">200k × 200k</text>
-        </g>
-      </svg>
-      <figcaption>
-        Time vs memory budget — steep drop from 250&nbsp;MB to 1&nbsp;GB, then a plateau
-        (chunk&nbsp;1500 cap). Dashed line = default 500&nbsp;MB.
-      </figcaption>
-    </figure>
+    <div class="bench-charts">
+      <figure class="bench-chart" role="img"
+              aria-label="Wall-clock time vs memory budget. 100k: 884 s at 250 MB, 457 s at 500 MB, 387 s plateau from 1 GB. 200k: 2441 s at 500 MB, 1940 s at 1 GB.">
+        <svg viewBox="0 0 600 280" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <text class="chart-title" x="300" y="16" text-anchor="middle">Wall-clock time</text>
+          <line class="grid" x1="56" y1="218" x2="568" y2="218"/>
+          <line class="grid" x1="56" y1="182" x2="568" y2="182"/>
+          <line class="grid" x1="56" y1="147" x2="568" y2="147"/>
+          <line class="grid" x1="56" y1="111" x2="568" y2="111"/>
+          <line class="grid" x1="56" y1="76" x2="568" y2="76"/>
+          <line class="grid" x1="56" y1="40" x2="568" y2="40"/>
+          <line class="axis" x1="56" y1="34" x2="56" y2="218"/>
+          <line class="axis" x1="56" y1="218" x2="568" y2="218"/>
+          <text class="tick" x="50" y="222" text-anchor="end">0</text>
+          <text class="tick" x="50" y="186" text-anchor="end">500 s</text>
+          <text class="tick" x="50" y="151" text-anchor="end">1000 s</text>
+          <text class="tick" x="50" y="115" text-anchor="end">1500 s</text>
+          <text class="tick" x="50" y="80" text-anchor="end">2000 s</text>
+          <text class="tick" x="50" y="44" text-anchor="end">2500 s</text>
+          <text class="tick" x="108" y="234" text-anchor="middle">250</text>
+          <text class="tick" x="184" y="234" text-anchor="middle">500</text>
+          <text class="tick" x="260" y="234" text-anchor="middle">1G</text>
+          <text class="tick" x="336" y="234" text-anchor="middle">2G</text>
+          <text class="tick" x="412" y="234" text-anchor="middle">4G</text>
+          <text class="tick" x="488" y="234" text-anchor="middle">8G</text>
+          <text class="tick" x="312" y="252" text-anchor="middle" class="xlabel">Memory budget (log scale)</text>
+          <line x1="184" y1="34" x2="184" y2="218" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 4" opacity=".35"/>
+          <!-- 100k time -->
+          <path class="line-100k" d="M 108,171 L 184,202 L 260,207 L 336,206 L 412,207 L 488,207"/>
+          <circle class="dot dot-100k" cx="108" cy="171" r="4"/><circle class="dot dot-100k" cx="184" cy="202" r="4"/>
+          <circle class="dot dot-100k" cx="260" cy="207" r="4"/><circle class="dot dot-100k" cx="336" cy="206" r="4"/>
+          <circle class="dot dot-100k" cx="412" cy="207" r="4"/><circle class="dot dot-100k" cx="488" cy="207" r="4"/>
+          <text class="point-label" x="108" y="162" text-anchor="middle">884 s</text>
+          <text class="point-label" x="184" y="193" text-anchor="middle">457 s</text>
+          <text class="point-label muted" x="260" y="198" text-anchor="middle">386 s</text>
+          <text class="point-label muted" x="488" y="198" text-anchor="middle">387 s</text>
+          <!-- 200k time -->
+          <path class="line-200k" d="M 184,61 L 260,97"/>
+          <circle class="dot dot-200k" cx="184" cy="61" r="4"/><circle class="dot dot-200k" cx="260" cy="97" r="4"/>
+          <text class="point-label" x="184" y="52" text-anchor="middle">2441 s</text>
+          <text class="point-label" x="260" y="88" text-anchor="middle">1940 s</text>
+          <g class="legend" transform="translate(368,42)">
+            <line class="line-100k" x1="0" y1="0" x2="18" y2="0"/><text x="24" y="4">100k</text>
+            <line class="line-200k" x1="0" y1="14" x2="18" y2="14"/><text x="24" y="18">200k</text>
+          </g>
+        </svg>
+        <figcaption>Steeper left = diminishing returns above 1&nbsp;GB (chunk cap 1500).</figcaption>
+      </figure>
+
+      <figure class="bench-chart" role="img"
+              aria-label="Measured peak RSS vs configured memory budget. Peaks track the budget at low settings and plateau below 1.7 GB even at 8 GB budget.">
+        <svg viewBox="0 0 600 280" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <text class="chart-title" x="300" y="16" text-anchor="middle">Peak RAM (measured)</text>
+          <line class="grid" x1="56" y1="218" x2="568" y2="218"/>
+          <line class="grid" x1="56" y1="182" x2="568" y2="182"/>
+          <line class="grid" x1="56" y1="147" x2="568" y2="147"/>
+          <line class="grid" x1="56" y1="111" x2="568" y2="111"/>
+          <line class="grid" x1="56" y1="76" x2="568" y2="76"/>
+          <line class="grid" x1="56" y1="40" x2="568" y2="40"/>
+          <line class="axis" x1="56" y1="34" x2="56" y2="218"/>
+          <line class="axis" x1="56" y1="218" x2="568" y2="218"/>
+          <text class="tick" x="50" y="222" text-anchor="end">0</text>
+          <text class="tick" x="50" y="186" text-anchor="end">500</text>
+          <text class="tick" x="50" y="151" text-anchor="end">1000</text>
+          <text class="tick" x="50" y="115" text-anchor="end">1500</text>
+          <text class="tick" x="50" y="80" text-anchor="end">2000 MB</text>
+          <text class="tick" x="108" y="234" text-anchor="middle">250</text>
+          <text class="tick" x="184" y="234" text-anchor="middle">500</text>
+          <text class="tick" x="260" y="234" text-anchor="middle">1G</text>
+          <text class="tick" x="336" y="234" text-anchor="middle">2G</text>
+          <text class="tick" x="412" y="234" text-anchor="middle">4G</text>
+          <text class="tick" x="488" y="234" text-anchor="middle">8G</text>
+          <text class="tick" x="312" y="252" text-anchor="middle" class="xlabel">Memory budget (log scale)</text>
+          <!-- budget cap reference (configured limit; &gt;2 GB clips at chart top) -->
+          <path class="line-budget" d="M 108,195 L 184,172 L 260,126 L 336,34 L 412,34 L 488,34"/>
+          <circle class="dot dot-budget" cx="108" cy="195" r="3"/><circle class="dot dot-budget" cx="184" cy="172" r="3"/>
+          <circle class="dot dot-budget" cx="260" cy="126" r="3"/><circle class="dot dot-budget" cx="336" cy="34" r="3"/>
+          <circle class="dot dot-budget" cx="412" cy="34" r="3"/><circle class="dot dot-budget" cx="488" cy="34" r="3"/>
+          <!-- 100k measured peak -->
+          <path class="line-100k" d="M 108,190 L 184,176 L 260,131 L 336,62 L 412,71 L 488,70"/>
+          <circle class="dot dot-100k" cx="108" cy="190" r="4"/><circle class="dot dot-100k" cx="184" cy="176" r="4"/>
+          <circle class="dot dot-100k" cx="260" cy="131" r="4"/><circle class="dot dot-100k" cx="336" cy="62" r="4"/>
+          <circle class="dot dot-100k" cx="412" cy="71" r="4"/><circle class="dot dot-100k" cx="488" cy="70" r="4"/>
+          <text class="point-label" x="108" y="181" text-anchor="middle">310</text>
+          <text class="point-label" x="184" y="167" text-anchor="middle">472</text>
+          <text class="point-label muted" x="260" y="122" text-anchor="middle">968</text>
+          <text class="point-label muted" x="336" y="53" text-anchor="middle">1693</text>
+          <!-- 200k measured peak -->
+          <path class="line-200k" d="M 184,175 L 260,136"/>
+          <circle class="dot dot-200k" cx="184" cy="175" r="4"/><circle class="dot dot-200k" cx="260" cy="136" r="4"/>
+          <text class="point-label" x="184" y="166" text-anchor="middle">469</text>
+          <text class="point-label" x="260" y="127" text-anchor="middle">891</text>
+          <g class="legend" transform="translate(330,42)">
+            <line class="line-budget" x1="0" y1="0" x2="18" y2="0"/><text x="24" y="4">budget cap</text>
+            <line class="line-100k" x1="0" y1="14" x2="18" y2="14"/><text x="24" y="18">100k peak</text>
+            <line class="line-200k" x1="0" y1="28" x2="18" y2="28"/><text x="24" y="32">200k peak</text>
+          </g>
+        </svg>
+        <figcaption>Measured RSS tracks the cap at low budgets; never approaches the ~76&nbsp;GB matrix size.</figcaption>
+      </figure>
+    </div>
 
     <p class="muted" style="font-size:.88rem">
       <sup>†</sup>Speedup vs the same&nbsp;N at 500&nbsp;MB budget (457&nbsp;s for 100k,
