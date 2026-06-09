@@ -67,6 +67,60 @@ fn split_recovers_pyvrp_r205_ordering() {
     assert!(split_sol.unassigned.is_empty(), "no unassigned after Split");
 }
 
+/// The incremental Split engine must produce the SAME partition cost as the
+/// reference (full-evaluator) engine on every ordering it sees. Random tours +
+/// greedy tours across the Solomon families exercise waiting, tight windows,
+/// capacity limits and infeasible orderings.
+#[test]
+fn fast_split_matches_reference() {
+    use brooom::genetic::split_reference;
+    use brooom::insertion::greedy_insertion_seeded;
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+
+    for inst in ["r101", "c101", "rc101", "r201", "c201", "rc201", "r205", "r211", "rc208"] {
+        let (problem, matrix) = load(inst);
+        if !hgs_applicable(&problem) {
+            continue;
+        }
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0xBEEF);
+        let mut tours: Vec<Vec<usize>> = Vec::new();
+        // Greedy-derived orderings (realistic) …
+        for seed in 0..3u64 {
+            let s = greedy_insertion_seeded(&problem, &matrix, seed);
+            tours.push(solution_to_giant_tour(&s, &problem));
+        }
+        // … and pure-random permutations (adversarial: mostly infeasible segments).
+        for _ in 0..5 {
+            let mut t: Vec<usize> = (0..problem.jobs.len()).collect();
+            t.shuffle(&mut rng);
+            tours.push(t);
+        }
+        for (ti, tour) in tours.iter().enumerate() {
+            let fast = split(tour, &problem, &matrix);
+            let slow = split_reference(tour, &problem, &matrix);
+            match (&fast, &slow) {
+                (Some(f), Some(s)) => {
+                    assert_eq!(
+                        f.summary.cost.to_bits(),
+                        s.summary.cost.to_bits(),
+                        "{inst} tour {ti}: fast {} vs reference {}",
+                        f.summary.cost,
+                        s.summary.cost
+                    );
+                    assert_eq!(f.routes.len(), s.routes.len(), "{inst} tour {ti}: route count");
+                }
+                (None, None) => {}
+                _ => panic!(
+                    "{inst} tour {ti}: feasibility verdict differs (fast={:?} reference={:?})",
+                    fast.is_some(),
+                    slow.is_some()
+                ),
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn hgs_quality_vs_pyvrp() {

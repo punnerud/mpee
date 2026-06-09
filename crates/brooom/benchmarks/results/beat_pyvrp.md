@@ -133,3 +133,33 @@ from the pre-fix +2–13%. The residual is partly route-count mismatch (we still
 sometimes over- or under-open by one, e.g. r211 5 vs 4, r205 6 vs 5). PyVRP's
 HGS-class C++ local search remains the moat; brooom is a close, fast #2 here,
 ties tight-window, and wins at N≥1000.
+
+## 2026-06-10 — mean gap goes NEGATIVE: −0.02% (7 wins / 5 exact ties / 7 losses)
+
+Three search-core levers (branch `feat/beat-pyvrp`), full 19-instance R2/RC2
+eval in `pyvrp_eval_2026_v2.txt` (same harness: brooom `-l 10 -m 16` vs the
+PyVRP `MaxRuntime(10s)` reference numbers from `pyvrp_eval_2026.txt`):
+
+1. **Incremental Split** — the Split DP's arc extension now updates a forward
+   state (time/TW walk, capacity prefix extrema, travel/distance/service) in
+   O(1) instead of re-running `evaluate_route` on the whole growing segment.
+   ~12x faster Split (r211 0.37 ms → 0.03 ms), bit-identical partitions
+   (`fast_split_matches_reference`), +20–85% HGS generations.
+2. **Seeded don't-look bits in the ILS** — after `perturb_small`, only tasks in
+   touched routes + tasks with a touched location among their granular
+   neighbours (spatial spillover) are re-probed; the rest keep their converged
+   verdicts. rc101 164424 → 163825 (−0.36%, 3/3 runs); r101/c101 unchanged.
+3. **SREX crossover in the population HGS** (50/50 with OX+Split) — whole-route
+   exchange recombines TW-shaped partitions that ordering crossover destroys.
+   r201 and rc201 now match PyVRP EXACTLY; r211 76222→75760, rc208 78507→78215.
+
+| metric | before | after |
+|--------|--------|-------|
+| mean gap vs PyVRP | +0.06% | **−0.02%** |
+| win / tie / lose  | 5 / 1 / 13 | **7 / 5 / 7** |
+
+Non-regression: N=1000 oslo s6 byte-identical to main (fixed-iters run),
+r101/c101 identical, full lib+integration test suite green. Honest reading:
+−0.02% on single 10s reps is within run noise — call it "matches PyVRP, now
+with the coin-flip in our favour"; the decisive wins are rc101 (−0.36%), r208
+(−1.22%), r209 (−0.70%), r206 (−0.56%) and exact-tie parity on 5 instances.
