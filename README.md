@@ -54,7 +54,10 @@ it**, which is where the speed and memory wins come from.
 | 100k × 100k | 500 MB | 457 s | 472 MB | 21.9M cells/s |
 | 100k × 100k | 1 GB | 386 s | 968 MB | 25.9M cells/s |
 | 100k × 100k | 2 GB | 401 s | 1.7 GB | 25.0M cells/s |
-| **200k × 200k** | **500 MB** | **2,441 s (~41 min)** | **469 MB** | **16.4M cells/s** |
+| 100k × 100k | 4 GB | 389 s | 1.6 GB | 25.7M cells/s |
+| 100k × 100k | 8 GB | 387 s | 1.6 GB | 25.8M cells/s |
+| 200k × 200k | 500 MB | 2,441 s (~41 min) | 469 MB | 16.4M cells/s |
+| **200k × 200k** | **1 GB** | **1,940 s (~32 min)** | **891 MB** | **20.6M cells/s** |
 
 <sub>Raw logs: [`benchmarks/london-scale/`](benchmarks/london-scale/). Honest caveat: OSRM is ~3× faster on a *single* point-to-point query (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized matrix — the case VRP actually requires. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
 
