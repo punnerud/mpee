@@ -506,10 +506,18 @@ fn handle_table(
     let srcs: Vec<(f32, f32)> = src_idx.iter().map(|&i| coords[i]).collect();
     let dsts: Vec<(f32, f32)> = dst_idx.iter().map(|&i| coords[i]).collect();
 
+    let budget_mb = dijeng::budget::resolve_matrix_budget_mb(
+        dijeng::budget::DEFAULT_MATRIX_BUDGET_MB,
+    );
     let t = Instant::now();
     let (durations, distances_opt, snap_src, snap_dst) = if want_distance {
-        let (du, di, ss, sd) = svc.matrix_with_distance(&srcs, &dsts);
+        let (du, di, ss, sd) =
+            svc.matrix_with_distance_budgeted_full(&srcs, &dsts, budget_mb);
         (du, Some(di), ss, sd)
+    } else if budget_mb > 0 {
+        let (du, _di, ss, sd) =
+            svc.matrix_with_distance_budgeted_full(&srcs, &dsts, budget_mb);
+        (du, None, ss, sd)
     } else {
         let (du, ss, sd) = svc.matrix(&srcs, &dsts);
         (du, None, ss, sd)

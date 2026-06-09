@@ -131,7 +131,7 @@ impl Engine {
     #[pyo3(signature = (
         region, n_jobs, n_vehicles, capacity, seed, ch, pp,
         time_limit_s=45.0, multi_start=1, radius_km=0.0,
-        max_travel_time_s=0i64, max_distance_m=0i64,
+        max_travel_time_s=0i64, max_distance_m=0i64, matrix_budget_mb=500,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn start_solve(
@@ -148,6 +148,7 @@ impl Engine {
         radius_km: f64,
         max_travel_time_s: i64,
         max_distance_m: i64,
+        matrix_budget_mb: u64,
     ) -> PyResult<()> {
         // Reset state to "solving".
         {
@@ -184,7 +185,7 @@ impl Engine {
                 let args = SolverArgs {
                     region, n_jobs, n_vehicles, capacity, seed,
                     ch, pp, time_limit_s, multi_start, radius_km,
-                    max_travel_time_s, max_distance_m,
+                    max_travel_time_s, max_distance_m, matrix_budget_mb,
                 };
                 if let Err(e) = solve_in_process(&args, &solver_state) {
                     let msg = format!("{:#}", e);
@@ -641,9 +642,18 @@ impl Router {
 
     /// Full duration+distance table among `points` (list of (lat, lon)).
     /// Returns {"n", "durations_s": flat n×n, "distances_m": flat n×n}.
-    fn table<'py>(&self, py: Python<'py>, points: Vec<(f32, f32)>) -> PyResult<Bound<'py, PyDict>> {
+    #[pyo3(signature = (points, matrix_budget_mb = 500))]
+    fn table<'py>(
+        &self,
+        py: Python<'py>,
+        points: Vec<(f32, f32)>,
+        matrix_budget_mb: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
-        let (durs, dists, _, _) = self.routing.matrix_with_distance(&points, &points);
+        let budget = dijeng::budget::resolve_matrix_budget_mb(matrix_budget_mb);
+        let (durs, dists, _, _) =
+            self.routing
+                .matrix_with_distance_budgeted_full(&points, &points, budget);
         let d = PyDict::new_bound(py);
         d.set_item("n", points.len())?;
         d.set_item("durations_s", durs)?;
@@ -669,7 +679,7 @@ impl Router {
     #[pyo3(signature = (
         stops, vehicles = 1, capacity = 1_000_000i64, depot = None,
         time_limit_s = 5.0, use_gpu = false, objective = None, dimensions = None,
-        soft_tw = None,
+        soft_tw = None, matrix_budget_mb = 500,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn optimize<'py>(
@@ -677,7 +687,7 @@ impl Router {
         stops: Vec<(f32, f32)>, vehicles: usize, capacity: i64,
         depot: Option<(f32, f32)>, time_limit_s: f64, use_gpu: bool,
         objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
-        soft_tw: Option<bool>,
+        soft_tw: Option<bool>, matrix_budget_mb: u64,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         if stops.is_empty() { return Err(PyRuntimeError::new_err("no stops given")); }
@@ -709,13 +719,22 @@ impl Router {
 
         // Build the matrix + snapped coords off the GIL.
         let n = coords.len();
+        let budget = dijeng::budget::resolve_matrix_budget_mb(matrix_budget_mb);
         let (durs_f, dists_f, snapped, sol_routes, unassigned, solve_s) =
             py.allow_threads(|| {
-                let (durs_f, dists_f, snapped, _) = self.routing.matrix_with_distance(&coords, &coords);
+                let (durs_f, dists_f, snapped, _) =
+                    self.routing
+                        .matrix_with_distance_budgeted_full(&coords, &coords, budget);
                 let to_i = |v: &[f32]| -> Vec<i32> {
-                    v.iter().map(|&d| if d.is_finite() { d.round().max(0.0) as i32 } else { i32::MAX / 2 }).collect()
+                    v.iter()
+                        .map(|&d| if d.is_finite() { d.round().max(0.0) as i32 } else { i32::MAX / 2 })
+                        .collect()
                 };
-                let matrix = brooom::Matrix { n, durations: to_i(&durs_f), distances: Some(to_i(&dists_f)) };
+                let matrix = brooom::Matrix {
+                    n,
+                    durations: to_i(&durs_f),
+                    distances: Some(to_i(&dists_f)),
+                };
 
                 let mut problem = brooom::Problem::default();
                 for v in 0..vehicles {
@@ -869,7 +888,7 @@ impl Router {
     /// are snapped + turned into a routing matrix here. Returns a dict with
     /// one entry per used vehicle (ordered job_ids + coords + leg metrics),
     /// plus any unassigned job ids.
-    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None, soft_tw = None, balance_spread = None, group_cardinality = None, propagate = true))]
+    #[pyo3(signature = (problem_json, time_limit_s = 5.0, use_gpu = false, constraints = None, max_vehicles = None, fairness_weight = 0.0, fairness_metric = "duration", objective = None, dimensions = None, soft_tw = None, balance_spread = None, group_cardinality = None, propagate = true, matrix_budget_mb = 500))]
     #[allow(clippy::too_many_arguments)]
     fn solve<'py>(
         &self, py: Python<'py>, problem_json: &str, time_limit_s: f64, use_gpu: bool,
@@ -878,7 +897,7 @@ impl Router {
         objective: Option<Py<PyAny>>, dimensions: Option<Vec<Py<PyAny>>>,
         soft_tw: Option<bool>,
         balance_spread: Option<i64>, group_cardinality: Option<(u32, u32)>,
-        propagate: bool,
+        propagate: bool, matrix_budget_mb: u64,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.require_routing()?;
         let mut problem: brooom::Problem = serde_json::from_str(problem_json)
@@ -945,17 +964,23 @@ impl Router {
 
         // Snap every vehicle start/end + job coord, build the matrix, and
         // rewrite the problem's Locations to matrix indices (off the GIL).
+        let budget = dijeng::budget::resolve_matrix_budget_mb(matrix_budget_mb);
         let (sol, ji, vs, ve, snapped, n, dur_i, dist_i, solve_s) =
             py.allow_threads(|| -> Result<_, String> {
                 let (coords, vs, ve, ji) = collect_coords(&problem).map_err(|e| e.to_string())?;
                 let n = coords.len();
-                let (durs_f, dists_f, snapped, _) = self.routing.matrix_with_distance(&coords, &coords);
-                let to_i = |v: &[f32]| -> Vec<i32> {
-                    v.iter().map(|&d| if d.is_finite() { d.round().max(0.0) as i32 } else { i32::MAX / 2 }).collect()
+                let (dur_i, dist_i, snapped, _) = self.routing.matrix_with_distance_budgeted_mapped(
+                    &coords,
+                    &coords,
+                    budget,
+                    SENTINEL_I32,
+                    |v| narrow_pos_i32(&v),
+                );
+                let matrix = brooom::Matrix {
+                    n,
+                    durations: dur_i.clone(),
+                    distances: Some(dist_i.clone()),
                 };
-                let dur_i = to_i(&durs_f);
-                let dist_i = to_i(&dists_f);
-                let matrix = brooom::Matrix { n, durations: dur_i.clone(), distances: Some(dist_i.clone()) };
                 rebind_to_indices(&mut problem, &vs, &ve, &ji);
                 let cfg = brooom::solver::SolverConfig {
                     multi_start: 4,
@@ -1156,6 +1181,7 @@ struct SolverArgs {
     radius_km: f64,
     max_travel_time_s: i64,
     max_distance_m: i64,
+    matrix_budget_mb: u64,
 }
 
 fn region_bbox(region: &str) -> anyhow::Result<(f64, f64, f64, f64)> {
@@ -1251,9 +1277,24 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
     set_phase(state, "snap", &format!("{} coords ready", n_points), 0.15);
 
     let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
-    set_phase(state, "matrix", &format!("building {n_points}×{n_points} routing matrix"), 0.20);
+    let matrix_budget_mb =
+        dijeng::budget::resolve_matrix_budget_mb(args.matrix_budget_mb);
+    set_phase(
+        state,
+        "matrix",
+        &format!(
+            "building {n_points}×{n_points} routing matrix (budget={matrix_budget_mb} MB)"
+        ),
+        0.20,
+    );
     let t = std::time::Instant::now();
-    let (durs_f32, dists_f32, _, _) = svc.matrix_with_distance(&coords, &coords);
+    let (durations, distances, _, _) = svc.matrix_with_distance_budgeted_mapped(
+        &coords,
+        &coords,
+        matrix_budget_mb,
+        SENTINEL_I32,
+        |v| narrow_pos_i32(&v),
+    );
     let mmm_secs = t.elapsed().as_secs_f64();
     set_phase(
         state, "matrix",
@@ -1262,10 +1303,11 @@ fn solve_in_process(args: &SolverArgs, state: &Arc<RwLock<AppState>>) -> anyhow:
         0.30,
     );
 
-    let durations: Vec<i32> = durs_f32.iter().map(narrow_pos_i32).collect();
-    let distances: Vec<i32> = dists_f32.iter().map(narrow_pos_i32).collect();
-    drop(durs_f32); drop(dists_f32);
-    let matrix = brooom::Matrix { n: n_points, durations, distances: Some(distances) };
+    let matrix = brooom::Matrix {
+        n: n_points,
+        durations,
+        distances: Some(distances),
+    };
 
     set_phase(state, "filter", "dropping jobs unreachable from depot", 0.32);
     let depot_idx = vehicle_starts.iter().copied().find_map(|x| x);

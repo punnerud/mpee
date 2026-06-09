@@ -36,6 +36,9 @@ struct Args {
     #[arg(long)] pp: PathBuf,
     #[arg(long, default_value_t = 20.0)] time_limit_s: f64,
     #[arg(long, default_value_t = 2)] multi_start: usize,
+    /// Peak RAM budget (MB) for routing-matrix compute. Env: `MPEE_MATRIX_BUDGET_MB`.
+    #[arg(long, default_value_t = dijeng::budget::DEFAULT_MATRIX_BUDGET_MB)]
+    matrix_budget_mb: u64,
     #[arg(long, default_value_t = 8032)] port: u16,
     #[arg(long, default_value = "0.0.0.0")] host: String,
 }
@@ -325,9 +328,24 @@ fn solve_in_process(args: &Args, state: &Arc<RwLock<AppState>>) -> Result<()> {
     set_phase(state, "snap", &format!("{} coords ready, building snap index", n_points), 0.15);
 
     let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
-    set_phase(state, "matrix", &format!("building {n_points}×{n_points} routing matrix"), 0.20);
+    let matrix_budget_mb =
+        dijeng::budget::resolve_matrix_budget_mb(args.matrix_budget_mb);
+    set_phase(
+        state,
+        "matrix",
+        &format!(
+            "building {n_points}×{n_points} routing matrix (budget={matrix_budget_mb} MB)"
+        ),
+        0.20,
+    );
     let t = std::time::Instant::now();
-    let (durs_f32, dists_f32, _, _) = svc.matrix_with_distance(&coords, &coords);
+    let (durations, distances, _, _) = svc.matrix_with_distance_budgeted_mapped(
+        &coords,
+        &coords,
+        matrix_budget_mb,
+        SENTINEL_I32,
+        |v| narrow_pos_i32(&v),
+    );
     let mmm_secs = t.elapsed().as_secs_f64();
     set_phase(
         state, "matrix",
@@ -339,10 +357,11 @@ fn solve_in_process(args: &Args, state: &Arc<RwLock<AppState>>) -> Result<()> {
         0.30,
     );
 
-    let durations: Vec<i32> = durs_f32.iter().map(narrow_pos_i32).collect();
-    let distances: Vec<i32> = dists_f32.iter().map(narrow_pos_i32).collect();
-    drop(durs_f32); drop(dists_f32);
-    let matrix = brooom::Matrix { n: n_points, durations, distances: Some(distances) };
+    let matrix = brooom::Matrix {
+        n: n_points,
+        durations,
+        distances: Some(distances),
+    };
 
     set_phase(state, "filter", "dropping jobs unreachable from depot", 0.32);
     let depot_idx = vehicle_starts.iter().copied().find_map(|x| x);

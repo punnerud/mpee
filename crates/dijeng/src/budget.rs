@@ -217,6 +217,17 @@ pub fn plan_for_budget_with_n_src(
     best.map(|(p, _)| p).unwrap_or(fallback)
 }
 
+/// Default peak-RAM cap for the matrix compute engine (MB).
+pub const DEFAULT_MATRIX_BUDGET_MB: u64 = 500;
+
+/// CLI/default budget, overridable by env `MPEE_MATRIX_BUDGET_MB`.
+pub fn resolve_matrix_budget_mb(default_mb: u64) -> u64 {
+    std::env::var("MPEE_MATRIX_BUDGET_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default_mb)
+}
+
 /// Helper: format a byte count as a human-readable string ("123 MB").
 pub fn fmt_bytes(b: u64) -> String {
     let mb = b as f64 / 1024.0 / 1024.0;

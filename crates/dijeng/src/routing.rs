@@ -378,6 +378,145 @@ impl RoutingService {
         (durations, distances, snapped_src_coords, snapped_dst_coords)
     }
 
+    /// Chunked many-to-many matrix with a hard RAM budget for the compute
+    /// engine. Streams each src-batch via `on_chunk(s_start, s_end, dur, dist)`
+    /// without materialising the full `n_src × n_dst` f32 buffers up front.
+    ///
+    /// `budget_mb = 0` falls back to one-shot [`matrix_with_dist`] (legacy
+    /// in-memory path). Otherwise [`crate::budget::plan_for_budget_with_n_src`]
+    /// picks `(n_threads, chunk_size)` and runs inside a sized rayon pool.
+    #[cfg(feature = "native")]
+    pub fn matrix_with_distance_budgeted<F>(
+        &self,
+        srcs: &[(f32, f32)],
+        dsts: &[(f32, f32)],
+        budget_mb: u64,
+        mut on_chunk: F,
+    ) -> (Vec<(f32, f32)>, Vec<(f32, f32)>)
+    where
+        F: FnMut(usize, usize, &[f32], &[f32]) + Send,
+    {
+        use crate::budget::{plan_for_budget_with_n_src, MatrixBudget};
+
+        let ch = self.ch.as_ref().expect(CH_REQUIRED);
+        let snap_srcs: Vec<u32> = srcs.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
+        let snap_dsts: Vec<u32> = dsts.iter().map(|&(la, lo)| self.nearest_node(la, lo)).collect();
+        let int_srcs: Vec<u32> = snap_srcs
+            .iter()
+            .map(|&csr| ch.perm[csr as usize])
+            .collect();
+        let int_dsts: Vec<u32> = snap_dsts
+            .iter()
+            .map(|&csr| ch.perm[csr as usize])
+            .collect();
+        let n_src = int_srcs.len();
+        let n_dst = int_dsts.len();
+        let snapped_src_coords: Vec<(f32, f32)> = snap_srcs
+            .iter()
+            .map(|&csr| self.coords[csr as usize])
+            .collect();
+        let snapped_dst_coords: Vec<(f32, f32)> = snap_dsts
+            .iter()
+            .map(|&csr| self.coords[csr as usize])
+            .collect();
+
+        if budget_mb == 0 {
+            let (dur, dist) = ch::matrix_with_dist(ch, &int_srcs, &int_dsts);
+            on_chunk(0, n_src, &dur, &dist);
+            return (snapped_src_coords, snapped_dst_coords);
+        }
+
+        let budget = MatrixBudget {
+            max_bytes: budget_mb * 1024 * 1024,
+            graph_n: ch.graph_fwd.n as u32,
+            bytes_per_output_cell: 8,
+        };
+        let plan = plan_for_budget_with_n_src(&budget, n_dst as u32, n_src as u32);
+        let chunk = plan.chunk_size;
+        let threads = plan.n_threads;
+
+        let mut run_chunked = || {
+            ch::matrix_with_dist_chunked(ch, &int_srcs, &int_dsts, chunk, &mut on_chunk);
+        };
+        if threads != rayon::current_num_threads() {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("build rayon pool for matrix budget");
+            pool.install(run_chunked);
+        } else {
+            run_chunked();
+        }
+
+        (snapped_src_coords, snapped_dst_coords)
+    }
+
+    /// Materialise a full duration+distance matrix using the budget-capped
+    /// chunked engine. Peak *compute* RAM stays near the planner estimate;
+    /// the returned `Vec<f32>` buffers are still `n_src × n_dst`.
+    #[cfg(feature = "native")]
+    pub fn matrix_with_distance_budgeted_full(
+        &self,
+        srcs: &[(f32, f32)],
+        dsts: &[(f32, f32)],
+        budget_mb: u64,
+    ) -> (Vec<f32>, Vec<f32>, Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        let n_src = srcs.len();
+        let n_dst = dsts.len();
+        let n_cells = n_src * n_dst;
+        let mut durations = vec![f32::INFINITY; n_cells];
+        let mut distances = vec![f32::INFINITY; n_cells];
+        let (snapped_src, snapped_dst) =
+            self.matrix_with_distance_budgeted(srcs, dsts, budget_mb, |s_start, s_end, dur, dist| {
+                for s_local in 0..(s_end - s_start) {
+                    let s_global = s_start + s_local;
+                    let row_off = s_local * n_dst;
+                    let base = s_global * n_dst;
+                    for j in 0..n_dst {
+                        let idx = base + j;
+                        durations[idx] = dur[row_off + j];
+                        distances[idx] = dist[row_off + j];
+                    }
+                }
+            });
+        (durations, distances, snapped_src, snapped_dst)
+    }
+
+    /// Like [`Self::matrix_with_distance_budgeted_full`] but maps each cell
+    /// through `map` into a caller-chosen type (e.g. `i32` for brooom).
+    #[cfg(feature = "native")]
+    pub fn matrix_with_distance_budgeted_mapped<T>(
+        &self,
+        srcs: &[(f32, f32)],
+        dsts: &[(f32, f32)],
+        budget_mb: u64,
+        init: T,
+        map: impl Fn(f32) -> T + Copy + Send + Sync,
+    ) -> (Vec<T>, Vec<T>, Vec<(f32, f32)>, Vec<(f32, f32)>)
+    where
+        T: Copy + Send + Sync,
+    {
+        let n_src = srcs.len();
+        let n_dst = dsts.len();
+        let n_cells = n_src * n_dst;
+        let mut durations = vec![init; n_cells];
+        let mut distances = vec![init; n_cells];
+        let (snapped_src, snapped_dst) =
+            self.matrix_with_distance_budgeted(srcs, dsts, budget_mb, |s_start, s_end, dur, dist| {
+                for s_local in 0..(s_end - s_start) {
+                    let s_global = s_start + s_local;
+                    let row_off = s_local * n_dst;
+                    let base = s_global * n_dst;
+                    for j in 0..n_dst {
+                        let idx = base + j;
+                        durations[idx] = map(dur[row_off + j]);
+                        distances[idx] = map(dist[row_off + j]);
+                    }
+                }
+            });
+        (durations, distances, snapped_src, snapped_dst)
+    }
+
     /// Serial (single-threaded) `matrix_with_distance` for the wasm build,
     /// which has no rayon and no bucket-MMM. Snaps each input, then runs one
     /// CH path query per (src, dst) cell, summing haversine over the unpacked

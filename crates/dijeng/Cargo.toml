@@ -119,3 +119,13 @@ required-features = ["native"]
 name = "serve"
 path = "src/bin/serve.rs"
 required-features = ["native"]
+
+[[bin]]
+name = "bench_matrix"
+path = "src/bin/bench_matrix.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "bench_knn"
+path = "src/bin/bench_knn.rs"
+required-features = ["native"]

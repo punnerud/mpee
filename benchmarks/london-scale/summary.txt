@@ -1,0 +1,7 @@
+RESULT n=100000 budget_mb=500 exit=0 peak_rss_mb=472,0 100000x100000 [chunked, chunk=296]: 456.5 s (21905842 cells/s) — out 76294 MB, finite 98.0%, avg dur=1785s dist=24806m
+---
+RESULT n=200000 exit=0 peak_rss_mb=469,0 (finalized after handoff) 200000x200000 [chunked, chunk=150]: 2440.95 s (16387066 cells/s) — out 305176 MB, finite 97.9%, avg dur=1786s dist=24820m
+---RESULT n=100000 budget_mb=1000 exit=0 peak_rss_mb=968,4 run_elapsed_s=387 elapsed_total_s=387 100000x100000 [chunked, chunk=693]: 386.31 s (25885731 cells/s) — out 76294 MB, finite 98.0%, avg dur=1785s dist=24806m
+---
+RESULT n=100000 budget_mb=2000 exit=0 peak_rss_mb=1692,5 run_elapsed_s=401 elapsed_total_s=788 100000x100000 [chunked, chunk=1489]: 400.62 s (24961560 cells/s) — out 76294 MB, finite 98.0%, avg dur=1785s dist=24806m
+---

@@ -1,0 +1,6 @@
+=== bench_matrix 200000×200000 budget=500MB 2026-06-09T11:58:39+02:00 ===
+[bench_matrix] dataset=london profile=car
+Graph n=1163421, m_aug=3914396, threads=11
+Candidate vertices (deg>=1): 1163187
+  [budget] cap=500 MB → plan: threads=11 chunk=150 (est peak 360.0 MB: thread=97.6 MB, chunk=228.9 MB, bucket=3.4 MB, overhead=30.0 MB)
+200000x200000 [chunked, chunk=150]: 2440.95 s (16387066 cells/s) — out 305176 MB, finite 97.9%, avg dur=1786s dist=24820m

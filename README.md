@@ -47,7 +47,16 @@ it**, which is where the speed and memory wins come from.
 | 10k × 10k | 4.3 s | streamed | impractical — no chunked many-to-many |
 | **50k × 50k** | **94 s** | **≤ 500 MB** | **OOM** — the matrix alone is ~10 GB |
 
-<sub>Honest caveat: OSRM is ~3× faster on a *single* point-to-point query (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized matrix — the case VRP actually requires. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
+**Streaming at fleet scale** · `bench_matrix`, Greater London car (default 500 MB budget)
+
+| Matrix | Budget | Time | Peak RAM | Throughput |
+|---|--:|--:|--:|--:|
+| 100k × 100k | 500 MB | 457 s | 472 MB | 21.9M cells/s |
+| 100k × 100k | 1 GB | 386 s | 968 MB | 25.9M cells/s |
+| 100k × 100k | 2 GB | 401 s | 1.7 GB | 25.0M cells/s |
+| **200k × 200k** | **500 MB** | **2,441 s (~41 min)** | **469 MB** | **16.4M cells/s** |
+
+<sub>Raw logs: [`benchmarks/london-scale/`](benchmarks/london-scale/). Honest caveat: OSRM is ~3× faster on a *single* point-to-point query (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized matrix — the case VRP actually requires. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
 
 **Optimisation — VRP solver** · brooom vs PyVRP / VROOM / OR-Tools, Solomon-style
 
@@ -825,6 +834,13 @@ Both runs ship a 99 %+ assignment rate. The 1 % dropped are random
 points that snapped to road fragments isolated from the depot (parks,
 gated roads, pedestrian-only paths). Real address inputs do not have
 this issue.
+
+---
+
+## Contact
+
+**Morten Punnerud-Engelstad** — [morten@punnerud.net](mailto:morten@punnerud.net)  
+Docs: [punnerud.github.io/mpee/#contact](https://punnerud.github.io/mpee/#contact)
 
 ---
 

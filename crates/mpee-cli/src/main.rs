@@ -6,14 +6,12 @@
 //!   build     — preprocess an OSM PBF → CSR + PP + CH caches (delegates
 //!               to the standalone bench_pp / bench_ch binaries)
 //!   solve     — load CH cache, snap customer coords, build the N×N
-//!               routing matrix via dijeng's bucket-MMM, hand it
-//!               directly into brooom — no IPC, no disk
+//!               routing matrix via dijeng's chunked bucket-MMM (500 MB
+//!               RAM cap by default), hand it directly into brooom
 //!   pipeline  — gen + solve in one shot
 //!
-//! The integration is in-process: the matrix that dijeng produces is
-//! a `Vec<f32>` that lives in this process; it is converted once to the
-//! `Vec<i32>` brooom wants and handed in by `&Matrix`. No serialisation
-//! after that.
+//! The integration is in-process: dijeng streams matrix rows in bounded-RAM
+//! chunks straight into the `Vec<i32>` brooom wants. No IPC, no disk.
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -118,6 +116,12 @@ enum Cmd {
         /// Parallel multi-start count. Default 8; smaller = faster.
         #[arg(long, default_value_t = 8)]
         multi_start: usize,
+
+        /// Peak RAM budget (MB) for the routing-matrix engine. Default 500.
+        /// Override with env `MPEE_MATRIX_BUDGET_MB`. Use 0 for legacy
+        /// in-memory `matrix_with_dist` (not recommended above ~30k).
+        #[arg(long, default_value_t = 500)]
+        matrix_budget_mb: u64,
 
         /// Output JSON path (omit for stdout).
         #[arg(short = 'o', long)]
@@ -224,6 +228,9 @@ enum Cmd {
         time_limit_s: Option<f64>,
         #[arg(long, default_value_t = 8)]
         multi_start: usize,
+        /// Peak RAM budget (MB) for the routing-matrix engine (see `solve`).
+        #[arg(long, default_value_t = 500)]
+        matrix_budget_mb: u64,
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
@@ -241,9 +248,26 @@ fn main() -> Result<()> {
         }
         Cmd::Download { region, out_dir } => cmd_download(&region, &out_dir),
         Cmd::Build { pbf, profile, quiet, force, keep_csr } => cmd_build(&pbf, &profile, !quiet, force, keep_csr),
-        Cmd::Solve { problem, cache, ch, pp, time_limit_s, multi_start, output } => {
+        Cmd::Solve {
+            problem,
+            cache,
+            ch,
+            pp,
+            time_limit_s,
+            multi_start,
+            matrix_budget_mb,
+            output,
+        } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
-            cmd_solve(&problem, &ch, &pp, time_limit_s, multi_start, output.as_deref())
+            cmd_solve(
+                &problem,
+                &ch,
+                &pp,
+                time_limit_s,
+                multi_start,
+                dijeng::budget::resolve_matrix_budget_mb(matrix_budget_mb),
+                output.as_deref(),
+            )
         }
         Cmd::Route { from, to, cache, ch, pp } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
@@ -266,13 +290,31 @@ fn main() -> Result<()> {
             cmd_crossing(&a, &b, near, radius_km, &pp)
         }
         Cmd::Pipeline {
-            region, n_jobs, n_vehicles, seed, capacity, cache, ch, pp,
-            time_limit_s, multi_start, output,
+            region,
+            n_jobs,
+            n_vehicles,
+            seed,
+            capacity,
+            cache,
+            ch,
+            pp,
+            time_limit_s,
+            multi_start,
+            matrix_budget_mb,
+            output,
         } => {
             let (ch, pp) = resolve_cache(cache.as_deref(), ch.as_deref(), pp.as_deref())?;
             let tmp = std::env::temp_dir().join(format!("mpee-pipeline-{}.json", seed));
             cmd_gen(&region, None, 0.0, n_jobs, n_vehicles, capacity, seed, &tmp)?;
-            cmd_solve(&tmp, &ch, &pp, time_limit_s, multi_start, output.as_deref())
+            cmd_solve(
+                &tmp,
+                &ch,
+                &pp,
+                time_limit_s,
+                multi_start,
+                dijeng::budget::resolve_matrix_budget_mb(matrix_budget_mb),
+                output.as_deref(),
+            )
         }
     }
 }
@@ -700,6 +742,7 @@ fn cmd_solve(
     pp_path: &Path,
     time_limit_s: Option<f64>,
     multi_start: usize,
+    matrix_budget_mb: u64,
     output: Option<&Path>,
 ) -> Result<()> {
     let t_total = std::time::Instant::now();
@@ -737,15 +780,45 @@ fn cmd_solve(
     let n_points = coords_latlon.len();
     eprintln!("[3/5] {} coords to snap", n_points);
 
-    // 4. Build RoutingService and the routing matrix in one shot.
-    //    `matrix_with_distance` runs dijeng's bucket-MMM: forward sweep
-    //    per src, backward sweep per dst, all in parallel, dual-channel
-    //    (dur + dist) at no extra Dijeng cost.
-    eprintln!("[4/5] dijeng::matrix_with_distance ({n_points}×{n_points})");
+    // 4. Build the routing matrix with a bounded-RAM chunked engine.
+    //    Rows stream into brooom's i32 layout; peak compute RAM is capped by
+    //    `matrix_budget_mb` (default 500). The final Matrix is still O(N²)
+    //    for the solver, but the bucket-MMM working set stays small.
+    if matrix_budget_mb > 0 {
+        use dijeng::budget::{fmt_bytes, plan_for_budget_with_n_src, MatrixBudget};
+        let budget = MatrixBudget {
+            max_bytes: matrix_budget_mb * 1024 * 1024,
+            graph_n: ch.graph_fwd.n as u32,
+            bytes_per_output_cell: 8,
+        };
+        let plan = plan_for_budget_with_n_src(&budget, n_points as u32, n_points as u32);
+        eprintln!(
+            "[4/5] dijeng::matrix_with_distance_chunked ({n_points}×{n_points}, \
+             budget={matrix_budget_mb} MB → threads={} chunk={} est_peak={})",
+            plan.n_threads,
+            plan.chunk_size,
+            fmt_bytes(plan.estimated_peak_bytes),
+        );
+        if plan.estimated_peak_bytes > budget.max_bytes {
+            eprintln!(
+                "      WARN: planner could not fit {matrix_budget_mb} MB cap; \
+                 running smallest viable config"
+            );
+        }
+    } else {
+        eprintln!(
+            "[4/5] dijeng::matrix_with_distance in-memory ({n_points}×{n_points}, no budget cap)"
+        );
+    }
     let svc = dijeng::routing::RoutingService::new(ch, pp.coords);
     let t = std::time::Instant::now();
-    let (durs_f32, dists_f32, snap_src, _snap_dst) =
-        svc.matrix_with_distance(&coords_latlon, &coords_latlon);
+    let (durations, distances, snap_src, _snap_dst) = svc.matrix_with_distance_budgeted_mapped(
+        &coords_latlon,
+        &coords_latlon,
+        matrix_budget_mb,
+        SENTINEL_I32,
+        |v| narrow_pos_i32(&v),
+    );
     let mmm_secs = t.elapsed().as_secs_f64();
 
     // Snap feedback: how far did each input point move to reach the road
@@ -765,7 +838,7 @@ fn cmd_solve(
             String::new()
         }
     );
-    let cells = (n_points as u64).pow(2);
+     let cells = (n_points as u64).pow(2);
     let mcells_s = cells as f64 / mmm_secs / 1e6;
     // Throughput is only meaningful for big matrices; for tiny ones it rounds
     // to 0.0, so just report the cell count there.
@@ -781,17 +854,13 @@ fn cmd_solve(
     //    that the solver routes around them when a finite alternative exists,
     //    small enough that summing a handful of them doesn't blow up route
     //    cost on the final summary.
-    let n_inf = durs_f32.iter().filter(|d| !d.is_finite()).count();
+    let n_inf = durations.iter().filter(|&&d| d == SENTINEL_I32).count();
     if n_inf > 0 {
         eprintln!(
             "      WARN: {} / {} matrix cells unreachable after snap (placed at 7-day sentinel)",
-            n_inf, durs_f32.len(),
+            n_inf, durations.len(),
         );
     }
-    let durations: Vec<i32> = durs_f32.iter().map(narrow_pos_i32).collect();
-    let distances: Vec<i32> = dists_f32.iter().map(narrow_pos_i32).collect();
-    drop(durs_f32);
-    drop(dists_f32);
     let matrix = brooom::Matrix {
         n: n_points,
         durations,
