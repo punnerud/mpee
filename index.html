@@ -196,6 +196,29 @@
   footer{padding:36px 0 60px; color:var(--muted); font-size:.92rem}
   .pillrow{display:flex; flex-wrap:wrap; gap:8px; margin:.5rem 0}
   .pill{background:var(--card); border:1px solid var(--line); border-radius:999px; padding:4px 12px; font-size:.85rem}
+
+  /* Benchmark chart */
+  .bench-chart{
+    margin:1rem 0 1.2rem; background:var(--card); border:1px solid var(--line);
+    border-radius:12px; padding:14px 10px 6px; overflow-x:auto;
+  }
+  .bench-chart svg{display:block; width:100%; height:auto; min-width:520px}
+  .bench-chart figcaption{font-size:.88rem; color:var(--muted); margin:6px 4px 4px; text-align:center}
+  .bench-chart .axis{stroke:var(--line); stroke-width:1}
+  .bench-chart .grid{stroke:var(--line); stroke-width:1; opacity:.45}
+  .bench-chart .tick{fill:var(--muted); font-size:11px; font-family:inherit}
+  .bench-chart .ylabel,.bench-chart .xlabel{fill:var(--muted); font-size:11px; font-weight:600}
+  .bench-chart .line-100k{fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linejoin:round}
+  .bench-chart .line-200k{fill:none; stroke:#6366f1; stroke-width:2.5; stroke-linejoin:round; stroke-dasharray:6 4}
+  .bench-chart .dot{stroke:var(--bg); stroke-width:2}
+  .bench-chart .dot-100k{fill:var(--accent)}
+  .bench-chart .dot-200k{fill:#6366f1}
+  .bench-chart .legend text{fill:var(--fg); font-size:11px}
+  .bench-chart .legend line{stroke-width:3; stroke-linecap:round}
+  @media (prefers-color-scheme: dark){
+    .bench-chart .line-200k{stroke:#818cf8}
+    .bench-chart .dot-200k{fill:#818cf8}
+  }
 </style>
 </head>
 <body>
@@ -448,6 +471,61 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
         <tr><td><b>200k × 200k</b></td><td><b>1 GB</b></td><td><b>352</b></td><td><b>1,940 s (~32 min)</b></td><td><b>891 MB</b></td><td><b>20.6M cells/s</b></td><td><b>1.26×</b></td></tr>
       </tbody>
     </table>
+
+    <figure class="bench-chart" role="img"
+            aria-label="Line chart: wall-clock time vs memory budget for 100k and 200k matrices. 100k drops from 884 seconds at 250 MB to about 387 seconds at 1 GB and above. 200k is 2441 seconds at 500 MB and 1940 seconds at 1 GB.">
+      <svg viewBox="0 0 600 270" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <!-- grid -->
+        <line class="grid" x1="56" y1="208" x2="568" y2="208"/>
+        <line class="grid" x1="56" y1="172" x2="568" y2="172"/>
+        <line class="grid" x1="56" y1="137" x2="568" y2="137"/>
+        <line class="grid" x1="56" y1="101" x2="568" y2="101"/>
+        <line class="grid" x1="56" y1="66" x2="568" y2="66"/>
+        <line class="grid" x1="56" y1="30" x2="568" y2="30"/>
+        <!-- axes -->
+        <line class="axis" x1="56" y1="24" x2="56" y2="208"/>
+        <line class="axis" x1="56" y1="208" x2="568" y2="208"/>
+        <!-- y ticks -->
+        <text class="tick" x="50" y="212" text-anchor="end">0</text>
+        <text class="tick" x="50" y="176" text-anchor="end">500 s</text>
+        <text class="tick" x="50" y="141" text-anchor="end">1000 s</text>
+        <text class="tick" x="50" y="105" text-anchor="end">1500 s</text>
+        <text class="tick" x="50" y="70" text-anchor="end">2000 s</text>
+        <text class="tick" x="50" y="34" text-anchor="end">2500 s</text>
+        <!-- x ticks (log-spaced budget) -->
+        <text class="tick" x="86" y="224" text-anchor="middle">250</text>
+        <text class="tick" x="180" y="224" text-anchor="middle">500</text>
+        <text class="tick" x="273" y="224" text-anchor="middle">1 GB</text>
+        <text class="tick" x="367" y="224" text-anchor="middle">2 GB</text>
+        <text class="tick" x="460" y="224" text-anchor="middle">4 GB</text>
+        <text class="tick" x="554" y="224" text-anchor="middle">8 GB</text>
+        <text class="tick" x="312" y="242" text-anchor="middle" class="xlabel">Memory budget (MB, log scale)</text>
+        <text class="tick" transform="rotate(-90 16 116)" x="16" y="116" text-anchor="middle" class="ylabel">Wall-clock time</text>
+        <!-- default budget marker -->
+        <line x1="180" y1="24" x2="180" y2="208" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 4" opacity=".35"/>
+        <text class="tick" x="180" y="18" text-anchor="middle" fill="var(--accent)">500 MB default</text>
+        <!-- 100k × 100k -->
+        <path class="line-100k" d="M 86,161 L 180,192 L 273,197 L 367,196 L 460,197 L 554,197"/>
+        <circle class="dot dot-100k" cx="86" cy="161" r="4.5"/><circle class="dot dot-100k" cx="180" cy="192" r="4.5"/>
+        <circle class="dot dot-100k" cx="273" cy="197" r="4.5"/><circle class="dot dot-100k" cx="367" cy="196" r="4.5"/>
+        <circle class="dot dot-100k" cx="460" cy="197" r="4.5"/><circle class="dot dot-100k" cx="554" cy="197" r="4.5"/>
+        <!-- 200k × 200k -->
+        <path class="line-200k" d="M 180,51 L 273,87"/>
+        <circle class="dot dot-200k" cx="180" cy="51" r="4.5"/><circle class="dot dot-200k" cx="273" cy="87" r="4.5"/>
+        <!-- legend -->
+        <g class="legend" transform="translate(390,34)">
+          <line class="line-100k" x1="0" y1="0" x2="22" y2="0"/>
+          <text x="28" y="4">100k × 100k</text>
+          <line class="line-200k" x1="0" y1="16" x2="22" y2="16"/>
+          <text x="28" y="20">200k × 200k</text>
+        </g>
+      </svg>
+      <figcaption>
+        Time vs memory budget — steep drop from 250&nbsp;MB to 1&nbsp;GB, then a plateau
+        (chunk&nbsp;1500 cap). Dashed line = default 500&nbsp;MB.
+      </figcaption>
+    </figure>
+
     <p class="muted" style="font-size:.88rem">
       <sup>†</sup>Speedup vs the same&nbsp;N at 500&nbsp;MB budget (457&nbsp;s for 100k,
       2,441&nbsp;s for 200k). 98&nbsp;% finite cells on every run; ~76&nbsp;GB streamed
