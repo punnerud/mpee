@@ -240,6 +240,16 @@ fn handle(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
         });
     }
 
+    if let Some(rest) = path_only.strip_prefix("/isochrone/v1/") {
+        let query = match path.find('?') {
+            Some(i) => path[i + 1..].to_string(),
+            None => String::new(),
+        };
+        return dispatch_with_profile(&mut stream, state, rest, move |stream, svc, rest| {
+            handle_isochrone(stream, svc, rest, &query)
+        });
+    }
+
     write_response(
         &mut stream,
         404,
@@ -437,6 +447,99 @@ fn handle_nearest(
         e = elapsed_us,
     );
     write_response(stream, 200, "OK", "application/json", &body)
+}
+
+/// Isochrones: `GET /isochrone/v1/{profile}/{lon},{lat}?contours=300,600,900`
+/// (seconds; `&metric=distance` switches to metres, `&cell=0.0015` sets the
+/// polygon resolution in degrees). GeoJSON FeatureCollection out, one
+/// MultiPolygon Feature per contour, Valhalla-style.
+fn handle_isochrone(
+    stream: &mut TcpStream,
+    svc: &RoutingService,
+    coords_part: &str,
+    query: &str,
+) -> std::io::Result<()> {
+    let coords_part = coords_part.split('?').next().unwrap_or(coords_part);
+    let mut it = coords_part.split(',');
+    let (Some(lon_s), Some(lat_s)) = (it.next(), it.next()) else {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidUrl","message":"expected lon,lat"}"#,
+        );
+    };
+    let (Ok(lon), Ok(lat)) = (lon_s.parse::<f32>(), lat_s.parse::<f32>()) else {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidUrl","message":"unparseable coordinate"}"#,
+        );
+    };
+    let mut contours: Vec<f32> = query_param(query, "contours")
+        .map(|v| v.split(',').filter_map(|s| s.parse().ok()).collect())
+        .unwrap_or_else(|| vec![300.0, 600.0, 900.0]);
+    contours.retain(|c| *c > 0.0 && *c <= 14_400.0);
+    contours.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    contours.dedup();
+    if contours.is_empty() || contours.len() > 8 {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidOptions","message":"contours: 1-8 positive values (seconds, <=14400)"}"#,
+        );
+    }
+    let cell: f32 = query_param(query, "cell")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.0015)
+        .clamp(0.0003, 0.02);
+    let metric_dist = query_param(query, "metric") == Some("distance");
+
+    let t = Instant::now();
+    let bands = svc.isochrone(lat, lon, &contours, cell, metric_dist);
+    let elapsed_us = t.elapsed().as_micros();
+    match bands {
+        Some(bands) => {
+            let features: Vec<String> = bands
+                .iter()
+                .map(|b| {
+                    let polys: Vec<String> = b
+                        .rings
+                        .iter()
+                        .map(|ring| {
+                            let pts: Vec<String> = ring
+                                .iter()
+                                .map(|&(la, lo)| format!("[{lo},{la}]"))
+                                .collect();
+                            format!("[[{}]]", pts.join(","))
+                        })
+                        .collect();
+                    format!(
+                        r#"{{"type":"Feature","properties":{{"contour":{}}},"geometry":{{"type":"MultiPolygon","coordinates":[{}]}}}}"#,
+                        b.limit,
+                        polys.join(",")
+                    )
+                })
+                .collect();
+            let body = format!(
+                r#"{{"type":"FeatureCollection","features":[{}],"elapsed_us":{elapsed_us}}}"#,
+                features.join(",")
+            );
+            write_response(stream, 200, "OK", "application/json", &body)
+        }
+        None => write_response(
+            stream,
+            200,
+            "OK",
+            "application/json",
+            r#"{"code":"NoIsochrone","message":"no routing graph mounted"}"#,
+        ),
+    }
 }
 
 /// Extract a `key=value` pair from a raw query string.
