@@ -135,7 +135,7 @@ fn hgs_quality_vs_pyvrp() {
         brooom::solution::eval_cache_invalidate();
         let t0 = Instant::now();
         let deadline = Some(t0 + Duration::from_millis(9000));
-        let sol = solve_genetic(&problem, &matrix, Some(&granular), 30, 42, deadline, &[])
+        let sol = solve_genetic(&problem, &matrix, Some(&granular), 30, 42, deadline, &[], None)
             .expect("hgs solves");
         let routes = sol.routes.iter().filter(|r| !r.steps.is_empty()).count();
         let c = sol.summary.cost;

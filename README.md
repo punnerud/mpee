@@ -66,7 +66,7 @@ it**, which is where the speed and memory wins come from.
 
 | Scale | Result |
 |---|---|
-| N = 100–200 | **matches PyVRP** (HGS-class SOTA): same-harness 10 s on the 19 Solomon R2/RC2 wide-window instances, **mean Δ +0.06 %** (range −1.3 … +0.9 %), and brooom **beats** PyVRP on r202/r206/r208/r209/rc204; ties tight-window C1/R1 (±0.0–0.25 %). Was +2–13 % — closed by an O(1)-cost-delta local search (6–11× faster cold LS) + a population HGS (giant-tour crossover + Split). Beats OR-Tools (which can fail feasibility) |
+| N = 100–200 | **edges ahead of PyVRP** (HGS-class SOTA): same-harness 10 s on the 19 Solomon R2/RC2 wide-window instances, **mean Δ −0.14 %** — at-or-below PyVRP on **15/19** (7 wins incl. r208 −1.4 %, 8 exact ties, worst loss +0.29 %); also beats it on tight-window rc101 (−0.36 %). Was +2–13 % — closed by an O(1)-cost-delta local search (4–22× faster cold LS), incremental Split, SREX + OX population HGS, and perturbation-local ILS re-convergence. Beats OR-Tools (which can fail feasibility) |
 | N = 1,000 | beats the next-best solver (PyVRP) on **17 / 20** seeds, p ≈ 10⁻⁷ |
 | N = 50,000 | the **only** tested solver that converges on a laptop |
 | Inner loop | the *entire* local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as **one GPU megakernel** — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration |
@@ -75,8 +75,8 @@ it**, which is where the speed and memory wins come from.
 
 > **Self-reported — independent validation welcome.** All numbers above are
 > measured on one machine (Apple M3 Pro) and have not been independently verified.
-> On raw solution quality we now **match PyVRP** (HGS-class SOTA) on small-N
-> R2/RC2 (mean +0.06 %, beating it on several) and beat the field at N≥1000; our
+> On raw solution quality we now **edge ahead of PyVRP** (HGS-class SOTA) on small-N
+> R2/RC2 (mean −0.14 %, at-or-below on 15/19) and beat the field at N≥1000; our
 > added edge is the integrated single-engine stack, memory/scale, and speed. Every
 > benchmark is built to re-run on the same instances/budget through every solver —
 > see [`crates/brooom/benchmarks`](crates/brooom/benchmarks) (seeded real-map
@@ -105,11 +105,12 @@ it**, which is where the speed and memory wins come from.
 > roads), bigger-than-RAM streaming, compressed random-access, matrix validation,
 > a SOTA solver, and an offline router in one engine.
 
-- **Matches state-of-the-art quality.** On small-N CVRPTW (Solomon R2/RC2),
-  same-harness 10 s, MPEE now **ties PyVRP** (HGS-class, the SOTA open reference)
-  at **mean +0.06 %** and beats it on several instances. Of the open solvers we
-  benchmarked, MPEE is the one that reaches PyVRP — VROOM and OR-Tools trail it
-  (OR-Tools sometimes can't even find a feasible plan in budget).
+- **State-of-the-art quality.** On small-N CVRPTW (Solomon R2/RC2),
+  same-harness 10 s, MPEE now **edges ahead of PyVRP** (HGS-class, the SOTA open
+  reference) at **mean −0.14 %**, at-or-below it on 15/19 instances (7 wins,
+  8 exact ties). Of the open solvers we benchmarked, MPEE is the only one that
+  reaches PyVRP — VROOM and OR-Tools trail it (OR-Tools sometimes can't even
+  find a feasible plan in budget).
 - **Wins on end-to-end time and scale.** One process does routing *and*
   optimization, streaming the matrix instead of materialising ~10 GB — so the
   *total* wall-clock (matrix + solve) beats the OSRM+VROOM split, and it keeps
@@ -806,9 +807,10 @@ See the [Constraints](#constraints) matrix above.
   correctness verified against full Dijeng. See
   [crates/dijeng/README.md](crates/dijeng/README.md).
 - **brooom**: VRP solver. Beats PyVRP / Vroom / OR-Tools at **large N**
-  (Solomon R1-1000, p ≈ 3·10⁻⁸); **matches PyVRP at small N** (mean +0.06 % on
-  R2/RC2, beats it on several; ties tight-window) via O(1) local search +
-  population HGS. Vroom-compatible I/O. See
+  (Solomon R1-1000, p ≈ 3·10⁻⁸); **edges ahead of PyVRP at small N** (mean
+  −0.14 % on R2/RC2, at-or-below on 15/19; beats it on tight-window rc101) via
+  O(1) local search + SREX/OX population HGS with incremental Split.
+  Vroom-compatible I/O. See
   [crates/brooom/README.md](crates/brooom/README.md).
 
 - **mpee-cli**: end-to-end VRP pipeline. The `download` / `build` /

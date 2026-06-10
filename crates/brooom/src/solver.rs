@@ -575,9 +575,15 @@ fn solve_scalar_with_extra_global(
     } else {
         false
     };
-    // HGS education passes: small (cold LS is the GA's budget — the default 50
-    // would allow only a handful of generations). 4 passes is the sweet spot.
-    let hgs_passes = config.max_local_search_passes.min(4);
+    // HGS education passes: bounded (cold LS is the GA's budget — the default
+    // 50 would allow only a handful of generations). 4 was the sweet spot when
+    // education was slow; with incremental Split + the full fast-LS operator
+    // set, 8 measures better (rc208 78504→78007 consistent, r205 slightly
+    // better, none worse). Override via BROOOM_HGS_PASSES.
+    let hgs_passes = std::env::var("BROOOM_HGS_PASSES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| config.max_local_search_passes.min(8));
     let total_variants = lahc_variants;
     // Budget split: when HGS is on, the ILS multi-start gets the first fraction
     // of the wall clock (all cores), then the HGS phase gets the rest (all
