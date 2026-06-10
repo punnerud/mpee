@@ -107,6 +107,22 @@ pub struct RouteResponse {
     pub source_snapped: (f32, f32),
     /// Snapped destination location.
     pub destination_snapped: (f32, f32),
+    /// The route's road nodes (CSR ids), parallel to `geometry`. Feed to
+    /// [`RoutingService::annotate_path`] for per-segment annotations.
+    pub path_csr: Vec<u32>,
+}
+
+/// Per-segment route annotations (OSRM `annotations=true` parity). All four
+/// vectors have one entry per consecutive geometry pair.
+pub struct RouteAnnotations {
+    /// Travel seconds per segment (the original edge's weight).
+    pub durations: Vec<f32>,
+    /// Haversine metres per segment.
+    pub distances: Vec<f32>,
+    /// Implied speed (m/s) per segment.
+    pub speeds: Vec<f32>,
+    /// Street name at the segment start ("" when no names sidecar).
+    pub names: Vec<String>,
 }
 
 /// Result of the trip service: the optimised visiting order over the input
@@ -773,13 +789,12 @@ impl RoutingService {
         let dst_int = ch.perm[dst_csr as usize];
         // CH weight is duration (seconds). Path is in CH-internal IDs.
         let (duration_s, path_internal) = ch::query_with_path(ch, src_int, dst_int)?;
-        let geometry: Vec<(f32, f32)> = path_internal
+        let path_csr: Vec<u32> = path_internal
             .iter()
-            .map(|&iid| {
-                let csr = self.inv_perm[iid as usize] as usize;
-                self.coords[csr]
-            })
+            .map(|&iid| self.inv_perm[iid as usize])
             .collect();
+        let geometry: Vec<(f32, f32)> =
+            path_csr.iter().map(|&csr| self.coords[csr as usize]).collect();
         // Sum haversine over consecutive points to get the actual road distance.
         let mut distance_m = 0.0_f32;
         for w in geometry.windows(2) {
@@ -795,7 +810,61 @@ impl RoutingService {
             geometry,
             source_snapped,
             destination_snapped,
+            path_csr,
         })
+    }
+
+    /// Per-segment annotations for an already-computed route geometry-in-CSR
+    /// form (OSRM `annotations=true` parity): for each consecutive node pair,
+    /// the original edge's duration (s), the haversine distance (m), the
+    /// implied speed (m/s) and the street name at the segment start. Segments
+    /// whose edge is missing (shouldn't happen on an unpacked path) get the
+    /// haversine at nominal speed.
+    pub fn annotate_path(&self, path_csr: &[u32]) -> RouteAnnotations {
+        let ch = self.ch.as_ref();
+        let n_seg = path_csr.len().saturating_sub(1);
+        let mut durations = Vec::with_capacity(n_seg);
+        let mut distances = Vec::with_capacity(n_seg);
+        let mut speeds = Vec::with_capacity(n_seg);
+        let mut names: Vec<String> = Vec::with_capacity(n_seg);
+        for w in path_csr.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let (la, lo) = self.coords[a as usize];
+            let (lb, lob) = self.coords[b as usize];
+            let dist = haversine_m(la, lo, lb, lob);
+            // Original-edge duration: scan a's UPWARD+DOWNWARD original arcs in
+            // the CH graph for the minimum-weight edge a→b. Unpacked paths
+            // step along original edges, so this lookup virtually always hits.
+            let dur = ch
+                .and_then(|h| {
+                    let ai = h.perm[a as usize] as usize;
+                    let bi = h.perm[b as usize];
+                    let s = h.graph_fwd.head[ai] as usize;
+                    let e = h.graph_fwd.head[ai + 1] as usize;
+                    let mut best: Option<f32> = None;
+                    for k in s..e {
+                        if h.graph_fwd.edge_to[k] == bi && h.via_fwd[k] == u32::MAX {
+                            let w = h.graph_fwd.edge_w[k];
+                            if best.map_or(true, |b| w < b) {
+                                best = Some(w);
+                            }
+                        }
+                    }
+                    best
+                })
+                .unwrap_or(dist / 13.9);
+            durations.push(dur);
+            distances.push(dist);
+            speeds.push(if dur > 0.0 { dist / dur } else { 0.0 });
+            names.push(
+                self.names
+                    .as_ref()
+                    .and_then(|n| n.name_of(a))
+                    .unwrap_or("")
+                    .to_string(),
+            );
+        }
+        RouteAnnotations { durations, distances, speeds, names }
     }
 
     /// Best route plus up to `alts` alternatives (plateau/via-node method:
@@ -831,10 +900,12 @@ impl RoutingService {
             routes
                 .into_iter()
                 .map(|(duration_s, path_internal)| {
-                    let geometry: Vec<(f32, f32)> = path_internal
+                    let path_csr: Vec<u32> = path_internal
                         .iter()
-                        .map(|&iid| self.coords[self.inv_perm[iid as usize] as usize])
+                        .map(|&iid| self.inv_perm[iid as usize])
                         .collect();
+                    let geometry: Vec<(f32, f32)> =
+                        path_csr.iter().map(|&csr| self.coords[csr as usize]).collect();
                     let mut distance_m = 0.0_f32;
                     for w in geometry.windows(2) {
                         distance_m += haversine_m(w[0].0, w[0].1, w[1].0, w[1].1);
@@ -845,6 +916,7 @@ impl RoutingService {
                         geometry,
                         source_snapped,
                         destination_snapped,
+                        path_csr,
                     }
                 })
                 .collect(),
