@@ -34,6 +34,26 @@ fn main() -> std::io::Result<()> {
     let h = cache_ch::load_mmap(ch_path).expect("ch cache missing");
     let g = &pp.graph;
 
+    if std::env::args().nth(2).as_deref() == Some("pair") {
+        let a: u32 = std::env::args().nth(3).and_then(|s| s.parse().ok()).expect("csr id A");
+        let b: u32 = std::env::args().nth(4).and_then(|s| s.parse().ok()).expect("csr id B");
+        for (label, v) in [("A", a), ("B", b)] {
+            let degf = g.head[v as usize + 1] - g.head[v as usize];
+            let degb = pp.reverse.head[v as usize + 1] - pp.reverse.head[v as usize];
+            let internal = h.perm[v as usize] as usize;
+            let chf = h.graph_fwd.head[internal + 1] - h.graph_fwd.head[internal];
+            let chb = h.graph_bwd.head[internal + 1] - h.graph_bwd.head[internal];
+            println!("{label}={v}: base deg_out={degf} deg_in={degb}  ch deg_f={chf} deg_b={chb}");
+        }
+        let dij = bidir_dijeng(g, &pp.reverse, a, b);
+        let mut scratch = PathScratch::new(h.graph_fwd.n);
+        let q = ch::query_dist_into(&h, h.perm[a as usize], h.perm[b as usize], &mut scratch);
+        println!("dijkstra A→B: {dij:?}   ch A→B: {q:?}");
+        let dij_r = bidir_dijeng(g, &pp.reverse, b, a);
+        println!("dijkstra B→A: {dij_r:?}");
+        return Ok(());
+    }
+
     if std::env::args().nth(2).as_deref() == Some("matrix") {
         let n_pts: usize = std::env::args()
             .nth(3)

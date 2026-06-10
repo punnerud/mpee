@@ -48,4 +48,5 @@ pub mod synth;
 #[cfg(feature = "native")]
 pub mod varint;
 #[cfg(feature = "native")]
+pub mod trip;
 pub mod wordladder;
