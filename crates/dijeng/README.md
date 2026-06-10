@@ -162,6 +162,36 @@ min-distance to the rows already chosen. This streams the
 geometrically diverse rows first, so the solver gets a global skeleton
 early.
 
+## Routing profiles — builtin and custom
+
+Builtins: `car`, `motorcycle`, `bicycle`, `foot`. Anywhere a profile name is
+accepted you can instead pass a **`.profile` file** — the OSRM-Lua /
+Valhalla-costing equivalent, without a scripting runtime in the engine:
+
+```text
+# delivery_van.profile  (example in docs/profiles/)
+name = delivery_van
+base = car                  # inherit accepts/speeds from a builtin
+block motorway              # never use a class
+speed residential = 25      # km/h override per class
+allow track = 15            # additionally usable class
+penalty service = 1.5       # time multiplier per class
+respect_maxspeed = true     # cap at the OSM maxspeed tag
+speed_factor = 0.92         # global realism multiplier
+```
+
+```bash
+mpee build map.osm.pbf delivery_van.profile   # caches: <map>.delivery_van.{pp,ch}
+```
+
+Measured effect (London, Heathrow → centre): car 28.7 min via the M4;
+`delivery_van` (motorway blocked) 33.8 min on surface streets. The fully
+programmable path is `CustomProfile::speed_fn` — a closure
+`f(highway, maxspeed) -> Option<speed_kmh>` evaluated per way at build time,
+which embedders (Python/PySpell, any Rust caller) plug their own costing
+into; the declarative file handles everything else. Typos in a profile file
+are hard errors, never silently-default profiles.
+
 ## Build & run
 
 ```bash

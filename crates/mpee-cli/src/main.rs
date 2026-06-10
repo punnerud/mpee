@@ -525,8 +525,10 @@ fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool, keep_csr: b
     // `cargo run` subprocess, no recompilation, and works as a distributed
     // binary (cargo/source not required). Same pipeline as Python's
     // Router.build, so the outputs (and their names) are identical.
-    let prof = dijeng::osm_profile::Profile::from_name(profile)
-        .ok_or_else(|| anyhow::anyhow!("unknown profile {profile:?} — use car/bicycle/foot"))?;
+    // Builtin name (car/bicycle/foot/…) or a path to a custom `.profile` file
+    // (per-class speeds, allow/block, penalties — the Lua-profile equivalent).
+    let prof = dijeng::osm_profile::ProfileSpec::from_arg(profile)
+        .map_err(|e| anyhow::anyhow!(e))?;
     eprintln!(
         "building cache from {} (profile={profile}) — seconds for a city, minutes for a country…",
         pbf.display()

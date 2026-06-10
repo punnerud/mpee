@@ -9,7 +9,7 @@
 use crate::addresses::AddrRec;
 use crate::cache;
 use crate::graph::CsrGraph;
-use crate::osm_profile::{Profile, kmh_to_mps, parse_maxspeed};
+use crate::osm_profile::{kmh_to_mps, parse_maxspeed, ProfileSpec};
 use osmpbf::{BlobDecode, BlobReader, Element, ElementReader};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -200,12 +200,13 @@ fn resolve_addresses(
 pub fn load_with_cache<P: AsRef<Path>>(
     pbf_path: P,
     cache_path: P,
-    profile: Profile,
+    profile: impl Into<ProfileSpec>,
 ) -> std::io::Result<(
     CsrGraph,
     crate::buffer::Buffer<(f32, f32)>,
     crate::buffer::Buffer<f32>,
 )> {
+    let profile: ProfileSpec = profile.into();
     let pbf = pbf_path.as_ref();
     let cache_p = cache_path.as_ref();
 
@@ -241,7 +242,7 @@ pub fn load_with_cache<P: AsRef<Path>>(
 
     // The .csr cache stores routing data only; street names are reconstructed
     // by `build::build_cache`, which calls `load_osm_routing_par` directly.
-    let parse = load_osm_routing_par(pbf, profile)?;
+    let parse = load_osm_routing_par(pbf, profile.clone())?;
     let (g, coords, edge_dist) = (parse.graph, parse.coords, parse.edge_dist);
     let t = std::time::Instant::now();
     if let Err(e) = cache::save(cache_p, &g, &coords, &edge_dist) {
@@ -266,8 +267,10 @@ pub fn load_with_cache<P: AsRef<Path>>(
 /// Reduce merges them. Afterwards CSR is built (sequentially — it doesn't dominate).
 pub fn load_osm_routing_par<P: AsRef<Path>>(
     path: P,
-    profile: Profile,
+    profile: impl Into<ProfileSpec>,
 ) -> std::io::Result<OsmParse> {
+    let profile: ProfileSpec = profile.into();
+    let profile = &profile;
     let path = path.as_ref();
     println!("[osm] opening {} (parallel)", path.display());
 
@@ -397,8 +400,10 @@ pub fn load_osm_routing_par<P: AsRef<Path>>(
 /// Single-pass parse: collect all node coordinates + drivable ways.
 pub fn load_osm_routing<P: AsRef<Path>>(
     path: P,
-    profile: Profile,
+    profile: impl Into<ProfileSpec>,
 ) -> std::io::Result<OsmParse> {
+    let profile: ProfileSpec = profile.into();
+    let profile = &profile;
     let path = path.as_ref();
     println!("[osm] opening {}", path.display());
 
