@@ -40,3 +40,4 @@ venv/
 venv/
 .bench-venv/
 *.so
+crates/brooom/target

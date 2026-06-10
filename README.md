@@ -44,29 +44,35 @@ it**, which is where the speed and memory wins come from.
 
 | Matrix | MPEE — time | MPEE — peak RAM | OSRM |
 |---|--:|--:|---|
-| 10k × 10k | 1.39 s | streamed | impractical — no chunked many-to-many |
-| **50k × 50k** | **29.5 s** | **≤ 500 MB** | **OOM** — the matrix alone is ~10 GB |
+| 10k × 10k | 1.44 s | streamed | impractical — no chunked many-to-many |
+| **50k × 50k** | **26.8 s** | **≤ 500 MB** | **OOM** — the matrix alone is ~10 GB |
 
 **Streaming at fleet scale** · `bench_matrix`, Greater London car (default 500 MB budget)
 
 | Matrix | Budget | Chunk | Time | Peak RAM | Throughput | Speedup† |
 |---|--:|--:|--:|--:|--:|--:|
-| 100k × 100k | 250 MB | 97 | 884 s (~15 min) | 310 MB | 11.3M cells/s | 0.52× |
-| 100k × 100k | 500 MB | 296 | 457 s | 472 MB | 21.9M cells/s | 1.00× |
-| 100k × 100k | 1 GB | 693 | 386 s | 968 MB | 25.9M cells/s | 1.18× |
-| 100k × 100k | 2 GB | 1489 | 401 s | 1.7 GB | 25.0M cells/s | 1.14× |
-| 100k × 100k | 4 GB | 1500 | 389 s | 1.6 GB | 25.7M cells/s | 1.17× |
-| 100k × 100k | 8 GB | 1500 | 387 s | 1.6 GB | 25.8M cells/s | 1.18× |
-| 200k × 200k | 500 MB | 150 | 2,441 s (~41 min) | 469 MB | 16.4M cells/s | 1.00× |
-| **200k × 200k** | **1 GB** | **352** | **1,940 s (~32 min)** | **891 MB** | **20.6M cells/s** | **1.26×** |
+| 100k × 100k | 250 MB | 97 | 286 s (~5 min) | 295 MB | 34.9M cells/s | 0.45× |
+| 100k × 100k | 500 MB | 296 | 128 s | 456 MB | 77.9M cells/s | 1.00× |
+| 100k × 100k | 1 GB | 694 | 88 s | 810 MB | 113.7M cells/s | 1.46× |
+| 100k × 100k | 2 GB | 1489 | 74 s | 1.5 GB | 135.2M cells/s | 1.73× |
+| 100k × 100k | 4 GB | 1500 | 75 s | 1.4 GB | 132.9M cells/s | 1.71× |
+| 100k × 100k | 8 GB | 1500 | 89 s | 1.4 GB | 112.3M cells/s | 1.44× |
+| 200k × 200k | 500 MB | 150 | 773 s (~13 min) | 531 MB | 51.7M cells/s | 1.00× |
+| **200k × 200k** | **1 GB** | **352** | **500 s (~8 min)** | **766 MB** | **80.1M cells/s** | **1.55×** |
 
-<sub>†Speedup vs same N at 500 MB budget. 98 % finite cells; ~76 GB streamed to disk for 100k. Raw logs: [`benchmarks/london-scale/`](benchmarks/london-scale/). Single point-to-point queries: MPEE ≈20 µs vs OSRM ≈30 µs internal (stall-on-demand + edge-difference CH closed what used to be a 3× OSRM lead), and the CH preprocesses in 4 s vs OSRM's ~37 s. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
+<sub>†Speedup vs same N at 500 MB budget. 98 % finite cells. Re-measured 2026-06-10
+on a CH rebuilt with stall-on-demand + edge-difference ordering (m_aug 3.91M →
+3.50M) — the whole table got **3–5× faster** than the previously published runs
+(100k @ 1 GB: 386 s → 88 s; 200k @ 1 GB: 32 min → 8 min). Raw logs:
+[`benchmarks/london-scale/`](benchmarks/london-scale/). Single point-to-point
+queries: MPEE ≈20 µs vs OSRM ≈30 µs internal, and the CH preprocesses in 4 s vs
+OSRM's ~37 s. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
 
 **Optimisation — VRP solver** · brooom vs PyVRP / VROOM / OR-Tools, Solomon-style
 
 | Scale | Result |
 |---|---|
-| N = 100–200 | **edges ahead of PyVRP** (HGS-class SOTA): same-harness 10 s on the 19 Solomon R2/RC2 wide-window instances, **mean Δ −0.14 %** — at-or-below PyVRP on **15/19** (7 wins incl. r208 −1.4 %, 8 exact ties, worst loss +0.29 %); also beats it on tight-window rc101 (−0.36 %). Was +2–13 % — closed by an O(1)-cost-delta local search (4–22× faster cold LS), incremental Split, SREX + OX population HGS, and perturbation-local ILS re-convergence. Beats OR-Tools (which can fail feasibility) |
+| N = 100–200 | **edges ahead of PyVRP** (HGS-class SOTA): same-harness 10 s on the 19 Solomon R2/RC2 wide-window instances, re-measured 2026-06-10: **mean pairwise Δ −0.19 %** — at-or-below PyVRP on **16/19** (9 wins incl. r208 −1.4 % and rc203 −1.1 %, 7 exact ties, worst loss +0.64 %); also beats it on tight-window rc101 (−0.36 %). Was +2–13 % — closed by an O(1)-cost-delta local search (4–22× faster cold LS), incremental Split, SREX + OX population HGS, and perturbation-local ILS re-convergence. Beats OR-Tools (which can fail feasibility) |
 | N = 1,000 | beats the next-best solver (PyVRP) on **17 / 20** seeds, p ≈ 10⁻⁷ |
 | N = 50,000 | the **only** tested solver that converges on a laptop |
 | Inner loop | the *entire* local search (2-opt, relocate, swap-star, Or-opt, ILS-kick, regret-3) as **one GPU megakernel** — Metal on Mac, Vulkan/DX12 elsewhere; sub-ms per iteration |
@@ -597,8 +603,9 @@ models** per matrix (1 header byte, always an exact roundtrip):
 
 - **cluster** — k-medoids regions, off-diagonal blocks as a rank-1 base + exact
   residual. Wins on block-structured road nets.
-- **bridge** — farthest-point landmarks, `base(i,j) = minₗ d(i,l)+d(l,j)` +
-  exact residual. Wins on smooth metrics.
+- **bridge** — pivot-mined landmarks (greedy facility location that converges
+  on the actual gateway points), `base(i,j) = minₗ d(i,l)+d(l,j)` + exact
+  residual. Wins on smooth metrics.
 
 Measured (exact roundtrip, vs raw int32; plain `gzip` ≈ 2×):
 
@@ -613,14 +620,24 @@ More geographic separation ⇒ better ratio (the 960² road matrix hits **9.79×
 compress is sub-second to ~1 s for ~1 M cells and **decompression is essentially
 free (~10 ms)**, so you can decompress on the fly.
 
-It also **streams** (`compress_stream` + the `MTZS` container: peak memory
-`L×n + 1 row`, fed by any `RowSource` — e.g. dijeng's per-row CH queries, so a
-matrix larger than RAM is compressed without ever materialising n²),
-**random-accesses** the compressed blob in RAM (`MtzReader`, LRU row cache —
-better than swapping a raw matrix), and **validates** every row as it passes
-(negative / unreachable / non-zero-diagonal cells, plus a *free* triangle-
-inequality check — in the bridge model a positive residual *is* a violation —
-that auto-gates the metric-only shortcuts). CLI:
+It also **streams** (`compress_stream` + the `MTZT` container: peak memory
+`L×n` rows + the `n×L` gateway index, fed by any `RowSource` — e.g. dijeng's
+per-row CH queries, so a matrix larger than RAM is compressed without ever
+materialising n²) and **validates** every row as it passes (negative /
+unreachable / non-zero-diagonal cells, plus a *free* triangle-inequality check
+— in the bridge model a positive residual *is* a violation — that auto-gates
+the metric-only shortcuts).
+
+The streamed container doubles as an **in-memory query index**
+([design + measurements](docs/matcodec-gateway-index.md)): the per-point
+gateway distances and a per-(row, region) max-residual byte stay resident
+(2 ints + 1 byte per point×landmark), so `MtzReader` answers index-exact cells
+in **O(L) with zero decompression**, gives every cell O(L) lower/upper bounds
+(`cell_bounds`, ~50–250 ns — built for solver pruning), and tolerance-bounded
+values (`cell_within`). Measured on a real London 2000² CH matrix: exact random
+`cell()` 48.9 µs → 14 µs, `cell_within(5 s)` 6.6 µs, and the blob got 31 %
+smaller; on gateway-structured data exact lookups are **39× faster** with 88 %
+of blocks answered straight from the index. CLI:
 
 ```bash
 matcodec compress   matrix.json out.mtz [--stream] [--landmarks L]

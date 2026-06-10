@@ -14,3 +14,19 @@ RESULT n=200000 budget_mb=1000 exit=0 peak_rss_mb=891,4 200000x200000 [chunked, 
 ---
 RESULT n=100000 budget_mb=250 exit=0 peak_rss_mb=310,1 100000x100000 [chunked, chunk=97]: 884.13 s (11310604 cells/s) — out 76294 MB, finite 98.0%, avg dur=1785s dist=24806m
 ---
+RESULT n=100000 budget_mb=250 exit=0 peak_rss_mb=295,0 100000x100000 [chunked, chunk=97]: 286.18 s (34943227 cells/s) — out 76294 MB, finite 97.9%, avg dur=1785s dist=24842m
+---
+RESULT n=100000 budget_mb=500 exit=0 peak_rss_mb=456,0 100000x100000 [chunked, chunk=296]: 128.31 s (77937140 cells/s) — out 76294 MB, finite 97.9%, avg dur=1785s dist=24842m
+---
+RESULT n=100000 budget_mb=1000 exit=0 peak_rss_mb=810,0 100000x100000 [chunked, chunk=694]: 87.95 s (113697573 cells/s) — out 76294 MB, finite 97.9%, avg dur=1785s dist=24842m
+---
+RESULT n=100000 budget_mb=2000 exit=0 peak_rss_mb=1477,0 100000x100000 [chunked, chunk=1489]: 73.98 s (135171838 cells/s) — out 76294 MB, finite 97.9%, avg dur=1785s dist=24842m
+---
+RESULT n=100000 budget_mb=4000 exit=0 peak_rss_mb=1380,0 100000x100000 [chunked, chunk=1500]: 75.22 s (132942679 cells/s) — out 76294 MB, finite 97.9%, avg dur=1785s dist=24842m
+---
+RESULT n=100000 budget_mb=8000 exit=0 peak_rss_mb=1380,0 100000x100000 [chunked, chunk=1500]: 89.02 s (112338048 cells/s) — out 76294 MB, finite 97.9%, avg dur=1785s dist=24842m
+---
+RESULT n=200000 budget_mb=500 exit=0 peak_rss_mb=531,0 200000x200000 [chunked, chunk=150]: 773.28 s (51727667 cells/s) — out 305176 MB, finite 97.9%, avg dur=1784s dist=24827m
+---
+RESULT n=200000 budget_mb=1000 exit=0 peak_rss_mb=766,0 200000x200000 [chunked, chunk=352]: 499.52 s (80076255 cells/s) — out 305176 MB, finite 97.9%, avg dur=1784s dist=24827m
+---

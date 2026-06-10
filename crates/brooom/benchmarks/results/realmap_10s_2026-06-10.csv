@@ -1,0 +1,11 @@
+instance,solver,cost,time_s,routes,unassigned,error
+london_s1_n100_haversine,brooom,30131.059589999993,10.05,18,0,
+london_s1_n100_haversine,pyvrp,30282,10.01,19,0,
+london_s1_n200_haversine,brooom,40779.120610000005,10.15,21,0,
+london_s1_n200_haversine,pyvrp,40481,10.04,21,0,
+oslo_s1_n100_haversine,brooom,18149.059589999997,10.14,18,0,
+oslo_s1_n100_haversine,pyvrp,18189,10.01,18,0,
+oslo_s1_n200_haversine,brooom,24362.120610000005,10.18,22,0,
+oslo_s1_n200_haversine,pyvrp,24107,10.04,22,0,
+oslo_s10_n1000_haversine,brooom,27819.317671000004,34.93,24,0,
+oslo_s10_n1000_haversine,pyvrp,46880,10.93,25,0,
