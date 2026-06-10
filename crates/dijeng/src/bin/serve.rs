@@ -142,11 +142,22 @@ fn build_state(dataset: &str) -> std::io::Result<ServerState> {
                 continue;
             }
         };
-        let svc = RoutingService::new(ch, pp.coords);
+        let mut svc = RoutingService::new(ch, pp.coords);
+        // Street-name sidecar (when built): reverse-geocoding for /nearest and
+        // the per-segment `names` annotation on /route.
+        let names_path = pp_path.replace(".pp", ".names");
+        let mut has_names = false;
+        if std::path::Path::new(&names_path).exists() {
+            if let Ok(nt) = dijeng::names::NameTable::load_mmap(&names_path, svc.node_count()) {
+                svc.set_names(nt);
+                has_names = true;
+            }
+        }
         println!(
-            "[serve] mounted profile '{name}' ({:.0} ms, n={})",
+            "[serve] mounted profile '{name}' ({:.0} ms, n={}{})",
             t.elapsed().as_secs_f64() * 1000.0,
-            svc.node_count()
+            svc.node_count(),
+            if has_names { ", names" } else { "" }
         );
         profiles.insert(*name, Arc::new(svc));
     }
@@ -388,13 +399,16 @@ fn handle_route(
         None => 0,
     };
 
+    // OSRM-style `annotations=true`: per-segment duration/distance/speed/name.
+    let annotations = query_param(query, "annotations") == Some("true");
+
     let t = Instant::now();
     if alts > 0 {
         let routes = svc.route_alternatives(src_lat, src_lon, dst_lat, dst_lon, alts, 0.25, 0.6);
         let elapsed_us = t.elapsed().as_micros();
         return match routes {
             Some(rs) if !rs.is_empty() => {
-                let body = render_routes(&rs, elapsed_us);
+                let body = render_routes(svc, &rs, annotations, elapsed_us);
                 write_response(stream, 200, "OK", "application/json", &body)
             }
             _ => {
@@ -410,6 +424,10 @@ fn handle_route(
     let elapsed_us = t.elapsed().as_micros();
 
     match route {
+        Some(r) if annotations => {
+            let body = render_routes(svc, std::slice::from_ref(&r), true, elapsed_us);
+            write_response(stream, 200, "OK", "application/json", &body)
+        }
         Some(r) => {
             let body = render_ok(&r, elapsed_us);
             write_response(stream, 200, "OK", "application/json", &body)
@@ -1229,16 +1247,44 @@ fn render_table(
 }
 
 /// OSRM-compatible multi-route body (best first, like `alternatives=true`).
-fn render_routes(rs: &[RouteResponse], elapsed_us: u128) -> String {
+/// With `annotations`, each leg carries per-segment duration/distance/speed
+/// arrays and the street names along the route (OSRM `annotations=true`).
+fn render_routes(
+    svc: &RoutingService,
+    rs: &[RouteResponse],
+    annotations: bool,
+    elapsed_us: u128,
+) -> String {
     let routes: Vec<String> = rs
         .iter()
         .map(|r| {
             let geom = polyline::encode(&r.geometry, 5);
+            let ann = if annotations {
+                let a = svc.annotate_path(&r.path_csr);
+                let fmt_f =
+                    |v: &[f32]| v.iter().map(|x| format!("{x:.1}")).collect::<Vec<_>>().join(",");
+                let names = a
+                    .names
+                    .iter()
+                    .map(|n| format!("{:?}", n))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#","annotation":{{"duration":[{}],"distance":[{}],"speed":[{}],"names":[{}]}}"#,
+                    fmt_f(&a.durations),
+                    fmt_f(&a.distances),
+                    fmt_f(&a.speeds),
+                    names,
+                )
+            } else {
+                String::new()
+            };
             format!(
-                r#"{{"distance":{dist:.1},"duration":{dur:.1},"weight":{dur:.1},"weight_name":"duration","geometry":{geom:?},"legs":[{{"distance":{dist:.1},"duration":{dur:.1},"summary":"","steps":[],"weight":{dur:.1}}}]}}"#,
+                r#"{{"distance":{dist:.1},"duration":{dur:.1},"weight":{dur:.1},"weight_name":"duration","geometry":{geom:?},"legs":[{{"distance":{dist:.1},"duration":{dur:.1},"summary":"","steps":[],"weight":{dur:.1}{ann}}}]}}"#,
                 dist = r.distance_m,
                 dur = r.duration_s,
                 geom = geom,
+                ann = ann,
             )
         })
         .collect();
