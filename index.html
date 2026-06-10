@@ -591,8 +591,11 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     </p>
 
     <p class="muted" style="font-size:.88rem">
-      Honest caveat: OSRM is ~3× faster on a <em>single</em> point-to-point query
-      (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized
+      Single point-to-point queries: MPEE ≈20 µs vs OSRM ≈30 µs internal —
+      stall-on-demand + edge-difference ordering closed what used to be a 3×
+      OSRM lead (the old "honest caveat" here), and CH preprocessing dropped
+      from minutes to 4 s (OSRM: ~37 s). Distances verified exact against full
+      Dijkstra. MPEE still wins decisively the moment you need a fleet-sized
       matrix — the case VRP actually requires.
     </p>
 
