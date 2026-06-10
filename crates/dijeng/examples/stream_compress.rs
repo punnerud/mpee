@@ -120,8 +120,44 @@ fn main() {
         let nn = src.ch.graph_fwd.n;
         let mut top: Vec<u32> = (0..nn as u32).collect();
         top.sort_by_key(|&v| std::cmp::Reverse(src.ch.rank[v as usize]));
-        top.truncate(c);
-        eprintln!("graph-hub candidates: top {c} CH-rank junctions");
+        // Physical junctions are node *clusters* (roundabout rings, interchange
+        // ramps, dual-carriageway crossings), so the raw rank top wastes
+        // candidate slots on near-duplicates. Dedup by graph time: walk in
+        // rank order, keep a node only if it is ≥ eps seconds from every kept
+        // node (--hub-dedup-s, default 30; 0 disables).
+        let dedup_s: f32 = args
+            .iter()
+            .position(|a| a == "--hub-dedup-s")
+            .and_then(|p| args.get(p + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30.0);
+        if dedup_s > 0.0 {
+            let pool: Vec<u32> = top.iter().copied().take((c * 6).min(nn)).collect();
+            let dm = ch::matrix(&src.ch, &pool, &pool);
+            let m = pool.len();
+            let mut kept: Vec<usize> = Vec::with_capacity(c);
+            for cand in 0..m {
+                if kept.len() >= c {
+                    break;
+                }
+                let dup = kept.iter().any(|&k| {
+                    let a = dm[k * m + cand].min(dm[cand * m + k]);
+                    a.is_finite() && a < dedup_s
+                });
+                if !dup {
+                    kept.push(cand);
+                }
+            }
+            eprintln!(
+                "graph-hub candidates: {} distinct junctions (>= {dedup_s}s apart) from top {} ranked nodes",
+                kept.len(),
+                pool.len()
+            );
+            top = kept.into_iter().map(|k| pool[k]).collect();
+        } else {
+            top.truncate(c);
+            eprintln!("graph-hub candidates: top {c} CH-rank junctions");
+        }
         let rows = to_i32(&ch::matrix(&src.ch, &top, &src.ids));
         let cols = to_i32(&ch::matrix(&src.ch, &src.ids, &top));
         let hub_hub = to_i32(&ch::matrix(&src.ch, &top, &top));
