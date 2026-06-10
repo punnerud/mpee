@@ -363,6 +363,182 @@ fn flat_stats(d: &[i32], n: usize, l: usize) -> (f64, [f64; 4], usize) {
     )
 }
 
+// ------------------------------------------------- path-aware hub selection
+/// Path-aware 2-level index: same resident layout as the naive pyramid
+/// (per point: k out-hubs with distances, k in-hubs with distances; dense
+/// H×H hub matrix), but hubs are chosen by **best-via mining**: sample pairs
+/// (i,j), find the hub a* minimising d(i,a)+d(a,j), and credit a* to both
+/// out(i) and in(j). Each point keeps its k most-credited hubs (nearest hubs
+/// fill any empty slots).
+fn hubpath_stats(
+    d: &[i32],
+    n: usize,
+    h_count: usize,
+    k: usize,
+    samples_per_point: usize,
+) -> (f64, [f64; 4], usize, f64) {
+    let hubs = matcodec::pick_landmarks(d, n, h_count);
+    let h = hubs.len();
+    let mut dhh = vec![0i32; h * h];
+    for (a, &ha) in hubs.iter().enumerate() {
+        for (bb, &hb) in hubs.iter().enumerate() {
+            dhh[a * h + bb] = d[ha * n + hb];
+        }
+    }
+    // best-via mining over sampled pairs
+    let mut cnt_out = vec![0u32; n * h];
+    let mut cnt_in = vec![0u32; n * h];
+    let mut s: u64 = 0xFEED_F00D;
+    let mut next = move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (s >> 33) as usize
+    };
+    for i in 0..n {
+        for _ in 0..samples_per_point {
+            let j = next() % n;
+            if j == i {
+                continue;
+            }
+            let mut best = i64::MAX;
+            let mut ba = 0usize;
+            for (a, &ha) in hubs.iter().enumerate() {
+                let v = d[i * n + ha] as i64 + d[ha * n + j] as i64;
+                if v < best {
+                    best = v;
+                    ba = a;
+                }
+            }
+            cnt_out[i * h + ba] += 1;
+            cnt_in[j * h + ba] += 1;
+        }
+    }
+    // per-point top-k by credit, nearest fills the rest
+    let top_k = |cnt: &[u32], dist: &dyn Fn(usize, usize) -> i32, i: usize| -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..h).collect();
+        idx.sort_by_key(|&a| (std::cmp::Reverse(cnt[i * h + a]), dist(i, a)));
+        idx.truncate(k);
+        idx
+    };
+    let d_out = |i: usize, a: usize| d[i * n + hubs[a]];
+    let d_in = |j: usize, a: usize| d[hubs[a] * n + j];
+    let mut out_h = vec![0u8; n * k];
+    let mut out_d = vec![0i32; n * k];
+    let mut in_h = vec![0u8; n * k];
+    let mut in_d = vec![0i32; n * k];
+    for i in 0..n {
+        for (q, a) in top_k(&cnt_out, &d_out, i).into_iter().enumerate() {
+            out_h[i * k + q] = a as u8;
+            out_d[i * k + q] = d_out(i, a);
+        }
+        for (q, a) in top_k(&cnt_in, &d_in, i).into_iter().enumerate() {
+            in_h[i * k + q] = a as u8;
+            in_d[i * k + q] = d_in(i, a);
+        }
+    }
+    // evaluate 3-hop base over all cells; also track pure 2-hop label
+    // coverage (shared hub in out(i) ∩ in(j) achieving the same base)
+    let mut exact = 0usize;
+    let mut within = [0usize; 4];
+    let tols = [2i64, 5, 15, 60];
+    let mut two_hop_hit = 0usize;
+    for i in 0..n {
+        for j in 0..n {
+            let mut base = i64::MAX;
+            for q in 0..k {
+                let a = out_h[i * k + q] as usize;
+                let da = out_d[i * k + q] as i64;
+                for r in 0..k {
+                    let bb = in_h[j * k + r] as usize;
+                    let v = da + dhh[a * h + bb] as i64 + in_d[j * k + r] as i64;
+                    if v < base {
+                        base = v;
+                    }
+                }
+            }
+            // 2-hop: same hub on both sides
+            let mut base2 = i64::MAX;
+            for q in 0..k {
+                let a = out_h[i * k + q];
+                for r in 0..k {
+                    if in_h[j * k + r] == a {
+                        let v = out_d[i * k + q] as i64 + in_d[j * k + r] as i64;
+                        if v < base2 {
+                            base2 = v;
+                        }
+                    }
+                }
+            }
+            if base2 <= base {
+                two_hop_hit += 1;
+            }
+            let resid = (d[i * n + j] as i64 - base).abs();
+            if resid == 0 {
+                exact += 1;
+            }
+            for (t, &tol) in tols.iter().enumerate() {
+                if resid <= tol {
+                    within[t] += 1;
+                }
+            }
+        }
+    }
+    let total = (n * n) as f64;
+    let bytes = n * 2 * k * 5 + h * h * 4;
+    (
+        exact as f64 / total,
+        [
+            within[0] as f64 / total,
+            within[1] as f64 / total,
+            within[2] as f64 / total,
+            within[3] as f64 / total,
+        ],
+        bytes,
+        two_hop_hit as f64 / total,
+    )
+}
+
+fn hubpath_experiment(d: &[i32], n: usize) {
+    println!("== hubpath lab  n={n}  (sti-bevisst hub-utvalg vs naiv/flat) ==");
+    for (label, ex, w, bytes) in [
+        ("flat  L=32            ", flat_stats(d, n, 32)),
+        ("flat  L=64            ", flat_stats(d, n, 64)),
+        ("naiv  H=64  k=4       ", pyramid_stats(d, n, 64, 4)),
+        ("naiv  H=128 k=8       ", pyramid_stats(d, n, 128, 8)),
+    ]
+    .map(|(s, (a, b, c))| (s, a, b, c))
+    {
+        println!(
+            "  {label} resident {:>6.0} KB   exact {:>5.1}%   tol {:>5.1}/{:>5.1}/{:>5.1}/{:>5.1}%",
+            bytes as f64 / 1e3,
+            100.0 * ex,
+            100.0 * w[0],
+            100.0 * w[1],
+            100.0 * w[2],
+            100.0 * w[3]
+        );
+    }
+    for (h, k, sp) in [
+        (64, 4, 128),
+        (64, 8, 128),
+        (128, 4, 128),
+        (128, 8, 128),
+        (128, 8, 512),
+        (128, 16, 512),
+    ] {
+        let (ex, w, bytes, two) = hubpath_stats(d, n, h, k, sp);
+        println!(
+            "  sti   H={h:<4}k={k} S={sp:<4} resident {:>6.0} KB   exact {:>5.1}%   tol {:>5.1}/{:>5.1}/{:>5.1}/{:>5.1}%   (2-hop dekker {:>4.1}%)",
+            bytes as f64 / 1e3,
+            100.0 * ex,
+            100.0 * w[0],
+            100.0 * w[1],
+            100.0 * w[2],
+            100.0 * w[3],
+            100.0 * two
+        );
+    }
+}
+
 fn pyramid_experiment(d: &[i32], n: usize) {
     println!("== pyramid lab  n={n}  (andel celler eksakt / innen 2/5/15/60) ==");
     for (label, ex, w, bytes) in [
@@ -395,6 +571,7 @@ fn main() {
     match mode.as_str() {
         "varint" => varint_experiment(&d, n),
         "pyramid" => pyramid_experiment(&d, n),
-        other => eprintln!("unknown mode {other} — use varint|pyramid"),
+        "hubpath" => hubpath_experiment(&d, n),
+        other => eprintln!("unknown mode {other} — use varint|pyramid|hubpath"),
     }
 }
