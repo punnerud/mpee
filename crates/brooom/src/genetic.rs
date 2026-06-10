@@ -1196,14 +1196,18 @@ pub fn solve_genetic(
         let Some(mut child) = child_opt else {
             continue;
         };
-        if used_srex {
+        {
+            // Route-identity seeding for both crossovers: any child route that
+            // matches a parent route verbatim was LS-converged there. SREX
+            // children inherit most routes; OX+Split children occasionally
+            // preserve whole parent routes too — when none match, the
+            // unsettled set is everything and this is a plain full education.
             let uns = srex_unsettled(&child, &pop[pa].sol, &pop[pb].sol);
             crate::local_search::local_search_seeded(
                 problem, matrix, &mut child, edu_passes, granular, &uns,
             );
-        } else {
-            local_search(problem, matrix, &mut child, edu_passes, granular);
         }
+        let _ = used_srex;
         if !child.unassigned.is_empty() {
             continue;
         }
