@@ -20,7 +20,8 @@
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
 
@@ -31,23 +32,62 @@ use dijeng::polyline;
 use dijeng::routing::{RouteResponse, RoutingService};
 
 /// Server state: which profiles are mounted, plus their RoutingServices.
+/// Live-layer state for one mounted profile (design: docs/live-layer-design.md,
+/// stage L0). Per-edge delay FACTORS are kept relative to the BASE weights in
+/// the `.pp` cache, so repeated reports never compound: at report time the
+/// observation (measured against the CURRENT hierarchy) is converted to a
+/// vs-base factor through the `applied` snapshot of what the current
+/// hierarchy was built with.
+struct LiveState {
+    pp_path: String,
+    names_path: Option<String>,
+    /// (from_csr, to_csr) → EWMA delay factor vs base + last update (epoch ms).
+    delays: Mutex<HashMap<(u32, u32), (f32, u64)>>,
+    /// Factors the CURRENT hierarchy was built with (empty = all 1.0).
+    applied: Mutex<HashMap<(u32, u32), f32>>,
+    dirty: AtomicBool,
+    rebuilding: AtomicBool,
+    last_rebuild_ms: AtomicU64,
+}
+
+/// Delay factors decay back toward 1.0 (the base weight) as observations age
+/// — an edge unseen for a while reverts to free-flow. Half-life in ms.
+const LIVE_DECAY_HALFLIFE_MS: f64 = 600_000.0; // 10 min
+
+fn decayed_factor(factor: f32, updated_ms: u64, now_ms: u64) -> f32 {
+    let age = now_ms.saturating_sub(updated_ms) as f64;
+    let w = 0.5f64.powf(age / LIVE_DECAY_HALFLIFE_MS) as f32;
+    1.0 + (factor - 1.0) * w
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 struct ServerState {
-    profiles: HashMap<&'static str, Arc<RoutingService>>,
+    profiles: HashMap<&'static str, RwLock<Arc<RoutingService>>>,
     /// Aliases `Profile::from_name` recognises (driving→car, bike→bicycle, …).
     /// Resolved at request time so the URL `/route/v1/driving/...` works
     /// against the `car` profile.
     aliases: HashMap<&'static str, &'static str>,
+    /// Live-layer state per profile (same keys as `profiles`).
+    live: HashMap<&'static str, Arc<LiveState>>,
 }
 
 impl ServerState {
-    fn lookup(&self, profile_name: &str) -> Option<&Arc<RoutingService>> {
-        if let Some(s) = self.profiles.get(profile_name) {
-            return Some(s);
+    fn canonical(&self, profile_name: &str) -> Option<&'static str> {
+        if let Some((k, _)) = self.profiles.get_key_value(profile_name) {
+            return Some(*k);
         }
-        if let Some(canonical) = self.aliases.get(profile_name) {
-            return self.profiles.get(canonical);
-        }
-        None
+        self.aliases.get(profile_name).copied()
+    }
+
+    fn lookup(&self, profile_name: &str) -> Option<Arc<RoutingService>> {
+        let name = self.canonical(profile_name)?;
+        Some(self.profiles.get(name)?.read().unwrap().clone())
     }
 
     fn list_names(&self) -> Vec<&'static str> {
@@ -76,10 +116,47 @@ fn main() -> std::io::Result<()> {
     }
     let state = Arc::new(state);
 
+    // Live-layer rebuild loop (L0): every DIJENG_LIVE_REBUILD_SECS (default
+    // 60) any profile with fresh delay reports gets its hierarchy rebuilt
+    // with the decayed factors and atomically swapped in. Requests in flight
+    // keep their Arc to the old service; new requests see live truth.
+    let rebuild_secs: u64 = std::env::var("DIJENG_LIVE_REBUILD_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60)
+        .max(5);
+    {
+        let state = Arc::clone(&state);
+        thread::spawn(move || loop {
+            thread::sleep(std::time::Duration::from_secs(rebuild_secs));
+            for (name, ls) in &state.live {
+                if !ls.dirty.swap(false, Ordering::SeqCst) {
+                    continue;
+                }
+                ls.rebuilding.store(true, Ordering::SeqCst);
+                match live_rebuild(ls) {
+                    Ok((svc, snapshot)) => {
+                        *ls.applied.lock().unwrap() = snapshot;
+                        if let Some(slot) = state.profiles.get(name) {
+                            *slot.write().unwrap() = Arc::new(svc);
+                        }
+                        ls.last_rebuild_ms.store(epoch_ms(), Ordering::SeqCst);
+                        println!("[live] profile '{name}' swapped");
+                    }
+                    Err(e) => {
+                        eprintln!("[live] rebuild '{name}' failed: {e}");
+                        ls.dirty.store(true, Ordering::SeqCst); // retry next tick
+                    }
+                }
+                ls.rebuilding.store(false, Ordering::SeqCst);
+            }
+        });
+    }
+
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)?;
     println!(
-        "[serve] listening on http://{addr}  profiles=[{}]",
+        "[serve] listening on http://{addr}  profiles=[{}]  live-rebuild={rebuild_secs}s",
         state.list_names().join(", ")
     );
 
@@ -101,6 +178,68 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Construct a RoutingService from a CH + coords, attaching the names sidecar
+/// when present. Shared by the initial mount and live-layer rebuilds.
+fn make_service(
+    ch: dijeng::ch::ContractionHierarchy,
+    coords: dijeng::buffer::Buffer<(f32, f32)>,
+    names_path: Option<&str>,
+) -> RoutingService {
+    let mut svc = RoutingService::new(ch, coords);
+    if let Some(np) = names_path {
+        if let Ok(nt) = dijeng::names::NameTable::load_mmap(np, svc.node_count()) {
+            svc.set_names(nt);
+        }
+    }
+    svc
+}
+
+/// Live-layer rebuild: reload the BASE `.pp`, apply the decayed delay factors
+/// to a copy of the base edge weights, rebuild the hierarchy (~seconds with
+/// the edge-difference ordering) and return the fresh service plus the factor
+/// snapshot it was built with.
+fn live_rebuild(
+    ls: &LiveState,
+) -> std::io::Result<(RoutingService, HashMap<(u32, u32), f32>)> {
+    let now = epoch_ms();
+    let snapshot: HashMap<(u32, u32), f32> = {
+        let delays = ls.delays.lock().unwrap();
+        delays
+            .iter()
+            .map(|(&k, &(f, upd))| (k, decayed_factor(f, upd, now)))
+            .filter(|&(_, f)| (f - 1.0).abs() > 0.01)
+            .collect()
+    };
+    let pp = cache_pp::load_mmap(&ls.pp_path)?;
+    let g = pp.graph;
+    let mut w: Vec<f32> = g.edge_w.to_vec();
+    let mut applied_edges = 0usize;
+    for (&(u, v), &f) in &snapshot {
+        let s = g.head[u as usize] as usize;
+        let e = g.head[u as usize + 1] as usize;
+        for k in s..e {
+            if g.edge_to[k] == v {
+                w[k] *= f;
+                applied_edges += 1;
+            }
+        }
+    }
+    let graph = dijeng::graph::CsrGraph {
+        n: g.n,
+        head: g.head,
+        edge_to: g.edge_to,
+        edge_w: w.into(),
+    };
+    let t = Instant::now();
+    let ch = dijeng::ch::build_with_dist(&graph, &pp.edge_dist[..]);
+    println!(
+        "[live] rebuilt hierarchy: {} delayed edges applied, {:.1} s",
+        applied_edges,
+        t.elapsed().as_secs_f64()
+    );
+    Ok((make_service(ch, pp.coords, ls.names_path.as_deref()), snapshot))
+}
+
 fn build_state(dataset: &str) -> std::io::Result<ServerState> {
     let base = match dataset {
         "london" => "data/greater-london.osm.pbf",
@@ -108,7 +247,8 @@ fn build_state(dataset: &str) -> std::io::Result<ServerState> {
         other => other,
     };
 
-    let mut profiles: HashMap<&'static str, Arc<RoutingService>> = HashMap::new();
+    let mut profiles: HashMap<&'static str, RwLock<Arc<RoutingService>>> = HashMap::new();
+    let mut live: HashMap<&'static str, Arc<LiveState>> = HashMap::new();
     let candidates: &[(Profile, &'static str)] = &[
         (Profile::Car, "car"),
         (Profile::Motorcycle, "motorcycle"),
@@ -142,24 +282,29 @@ fn build_state(dataset: &str) -> std::io::Result<ServerState> {
                 continue;
             }
         };
-        let mut svc = RoutingService::new(ch, pp.coords);
-        // Street-name sidecar (when built): reverse-geocoding for /nearest and
-        // the per-segment `names` annotation on /route.
         let names_path = pp_path.replace(".pp", ".names");
-        let mut has_names = false;
-        if std::path::Path::new(&names_path).exists() {
-            if let Ok(nt) = dijeng::names::NameTable::load_mmap(&names_path, svc.node_count()) {
-                svc.set_names(nt);
-                has_names = true;
-            }
-        }
+        let names_opt =
+            std::path::Path::new(&names_path).exists().then(|| names_path.clone());
+        let svc = make_service(ch, pp.coords, names_opt.as_deref());
         println!(
             "[serve] mounted profile '{name}' ({:.0} ms, n={}{})",
             t.elapsed().as_secs_f64() * 1000.0,
             svc.node_count(),
-            if has_names { ", names" } else { "" }
+            if names_opt.is_some() { ", names" } else { "" }
         );
-        profiles.insert(*name, Arc::new(svc));
+        profiles.insert(*name, RwLock::new(Arc::new(svc)));
+        live.insert(
+            *name,
+            Arc::new(LiveState {
+                pp_path: pp_path.clone(),
+                names_path: names_opt,
+                delays: Mutex::new(HashMap::new()),
+                applied: Mutex::new(HashMap::new()),
+                dirty: AtomicBool::new(false),
+                rebuilding: AtomicBool::new(false),
+                last_rebuild_ms: AtomicU64::new(0),
+            }),
+        );
     }
 
     let aliases: HashMap<&'static str, &'static str> = [
@@ -174,7 +319,7 @@ fn build_state(dataset: &str) -> std::io::Result<ServerState> {
     .into_iter()
     .collect();
 
-    Ok(ServerState { profiles, aliases })
+    Ok(ServerState { profiles, aliases, live })
 }
 
 fn handle(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
@@ -253,6 +398,14 @@ fn handle(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
         return dispatch_with_profile(&mut stream, state, rest, move |stream, svc, rest| {
             handle_trip(stream, svc, rest, &query)
         });
+    }
+
+    if let Some(rest) = path_only.strip_prefix("/live/v1/report/") {
+        return handle_live_report(&mut stream, state, rest);
+    }
+
+    if let Some(rest) = path_only.strip_prefix("/live/v1/status/") {
+        return handle_live_status(&mut stream, state, rest);
     }
 
     if let Some(rest) = path_only.strip_prefix("/match/v1/") {
@@ -503,6 +656,154 @@ fn handle_nearest(
         r#"{{"code":"Ok","waypoints":[{}],"elapsed_us":{e}}}"#,
         waypoints.join(","),
         e = elapsed_us,
+    );
+    write_response(stream, 200, "OK", "application/json", &body)
+}
+
+/// Live-layer L0 ingest:
+/// `GET /live/v1/report/{profile}/{lon,lat,t;lon,lat,t;...}` — a timestamped
+/// GPS trace (t = unix seconds). The trace is map-matched; each consecutive
+/// stretch's observed time vs the CURRENT hierarchy's expectation becomes a
+/// delay factor, attributed to the stretch's edges and folded (EWMA) into the
+/// per-edge vs-BASE factors via the `applied` snapshot — so repeated reports
+/// converge instead of compounding. The rebuild thread picks the result up.
+fn handle_live_report(
+    stream: &mut TcpStream,
+    state: &ServerState,
+    rest: &str,
+) -> std::io::Result<()> {
+    let mut parts = rest.splitn(2, '/');
+    let profile_name = parts.next().unwrap_or("");
+    let trace_part = parts.next().unwrap_or("").split('?').next().unwrap_or("");
+    let (Some(name), Some(svc)) = (state.canonical(profile_name), state.lookup(profile_name))
+    else {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidProfile","message":"unknown profile"}"#,
+        );
+    };
+    let ls = state.live.get(name).expect("live state exists for mounted profile");
+
+    // Parse lon,lat,t triplets.
+    let mut points: Vec<(f32, f32)> = Vec::new();
+    let mut times: Vec<f64> = Vec::new();
+    for wp in trace_part.split(';') {
+        let mut it = wp.split(',');
+        let (Some(lon), Some(lat), Some(t)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(lon), Ok(lat), Ok(t)) =
+            (lon.parse::<f32>(), lat.parse::<f32>(), t.parse::<f64>())
+        else {
+            continue;
+        };
+        points.push((lat, lon));
+        times.push(t);
+    }
+    if points.len() < 2 {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidUrl","message":"report needs >=2 lon,lat,t triplets"}"#,
+        );
+    }
+
+    let t0 = Instant::now();
+    let Some(matched) = svc.match_trace(&points, 8, 15.0) else {
+        return write_response(
+            stream,
+            200,
+            "OK",
+            "application/json",
+            r#"{"code":"NoMatch","message":"no routing graph mounted"}"#,
+        );
+    };
+
+    let now = epoch_ms();
+    let mut edges_updated = 0usize;
+    let mut stretches = 0usize;
+    {
+        let applied = ls.applied.lock().unwrap();
+        let mut delays = ls.delays.lock().unwrap();
+        for i in 0..matched.points.len().saturating_sub(1) {
+            let a = &matched.points[i];
+            let b = &matched.points[i + 1];
+            if !b.connected || a.node == b.node {
+                continue;
+            }
+            let dt_obs = (times[i + 1] - times[i]) as f32;
+            if !(dt_obs > 0.5) {
+                continue;
+            }
+            let Some((dt_cur, path)) = svc.route_nodes(a.node, b.node) else {
+                continue;
+            };
+            if !(dt_cur > 0.5) || path.len() < 2 {
+                continue;
+            }
+            // Sanity: a stretch implying >5x slowdown or >3x speedup vs the
+            // current belief is more likely a matching/GPS artefact.
+            let raw_vs_current = (dt_obs / dt_cur).clamp(0.33, 5.0);
+            stretches += 1;
+            for e in path.windows(2) {
+                let key = (e[0], e[1]);
+                let f_applied = applied.get(&key).copied().unwrap_or(1.0);
+                let f_obs_vs_base = (raw_vs_current * f_applied).clamp(0.33, 8.0);
+                let entry = delays.entry(key).or_insert((1.0, now));
+                let decayed = decayed_factor(entry.0, entry.1, now);
+                *entry = (0.5 * decayed + 0.5 * f_obs_vs_base, now);
+                edges_updated += 1;
+            }
+        }
+    }
+    if edges_updated > 0 {
+        ls.dirty.store(true, Ordering::SeqCst);
+    }
+    let body = format!(
+        r#"{{"code":"Ok","stretches":{stretches},"edges_updated":{edges_updated},"confidence":{:.3},"elapsed_us":{}}}"#,
+        matched.confidence,
+        t0.elapsed().as_micros(),
+    );
+    write_response(stream, 200, "OK", "application/json", &body)
+}
+
+/// `GET /live/v1/status/{profile}` — delay-store and rebuild status.
+fn handle_live_status(
+    stream: &mut TcpStream,
+    state: &ServerState,
+    rest: &str,
+) -> std::io::Result<()> {
+    let profile_name = rest.split('/').next().unwrap_or("").split('?').next().unwrap_or("");
+    let Some(name) = state.canonical(profile_name) else {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidProfile","message":"unknown profile"}"#,
+        );
+    };
+    let ls = state.live.get(name).expect("live state exists for mounted profile");
+    let now = epoch_ms();
+    let (n_edges, max_f) = {
+        let delays = ls.delays.lock().unwrap();
+        let max_f = delays
+            .values()
+            .map(|&(f, upd)| decayed_factor(f, upd, now))
+            .fold(1.0f32, f32::max);
+        (delays.len(), max_f)
+    };
+    let body = format!(
+        r#"{{"code":"Ok","profile":"{name}","edges_with_delay":{n_edges},"max_factor":{max_f:.2},"applied_edges":{},"dirty":{},"rebuilding":{},"last_rebuild_epoch_ms":{}}}"#,
+        ls.applied.lock().unwrap().len(),
+        ls.dirty.load(Ordering::SeqCst),
+        ls.rebuilding.load(Ordering::SeqCst),
+        ls.last_rebuild_ms.load(Ordering::SeqCst),
     );
     write_response(stream, 200, "OK", "application/json", &body)
 }

@@ -1,6 +1,7 @@
 # Live layer — design
 
-**Status: design (no code yet).** This is the plan for giving MPEE live
+**Status: L0 shipped** (`/live/v1/report` + `/live/v1/status` + delay store +
+rebuild-and-swap thread in `serve`, see below); L1–L3 remain design. This is the plan for giving MPEE live
 travel times without a traffic-data subscription: the fleet itself, plus a
 handful of cheap external probes, becomes the sensor network. It builds
 directly on two things that already exist: the matrix broker's temporal
@@ -126,9 +127,18 @@ last_update)`. Properties:
 
 ## Staged implementation
 
-1. **L0 — plumbing**: delay store + `/live/v1/report` (manual/fleet ping
-   ingest via map matching) + periodic rebuild-and-swap. No inference; raw
-   per-edge observations only. *Everything needed already exists as parts.*
+1. **L0 — plumbing** ✅ *shipped*: delay store keyed `(from_node, to_node)`
+   with EWMA factors **vs the base weights** (an `applied` snapshot converts
+   observations measured against the current hierarchy, so repeated reports
+   converge instead of compounding) and 10-min-half-life decay;
+   `GET /live/v1/report/{profile}/{lon,lat,t;...}` map-matches a timestamped
+   trace and attributes each stretch's observed/expected factor to its edges;
+   `GET /live/v1/status/{profile}`; a background thread
+   (`DIJENG_LIVE_REBUILD_SECS`, default 60) rebuilds the hierarchy with the
+   decayed factors and atomically swaps the service (requests in flight keep
+   their Arc). Verified on London: a 3× slow trace → 151 delayed edges →
+   4.3 s rebuild → the same query now routes partly around the slow stretch
+   (107 s → 121 s).
 2. **L1 — inference**: time buckets, priors from Stage E1, regularised
    least-squares solve per bucket (the matrices are small: only edges with
    any observation enter).
