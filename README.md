@@ -45,7 +45,7 @@ it**, which is where the speed and memory wins come from.
 | Matrix | MPEE — time | MPEE — peak RAM | OSRM |
 |---|--:|--:|---|
 | 10k × 10k | 1.44 s | streamed | impractical — no chunked many-to-many |
-| **50k × 50k** | **26.8 s** | **≤ 500 MB** | **OOM** — the matrix alone is ~10 GB |
+| **50k × 50k** | **27 s** | **453 MB measured (500 MB budget)** | **OOM** — the matrix alone is ~10 GB |
 
 **Streaming at fleet scale** · `bench_matrix`, Greater London car (default 500 MB budget)
 
