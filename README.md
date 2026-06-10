@@ -13,7 +13,7 @@ Download one area once, then route, optimize, and geocode it **fully offline**.
 ⚡ A 50,000-customer fleet needs a 50,000 × 50,000 distance matrix — **~10 GB**
 to hold in memory, which is exactly what OSRM + VROOM do. MPEE **never
 materialises it**: it streams that matrix through a **~500 MB** budget
-(**≈20× less**) yet still solves the whole fleet — in **94 s** where OSRM runs
+(**≈20× less**) yet still solves the whole fleet — in **29.5 s** where OSRM runs
 out of RAM, on **CPU + GPU**.
 
 > **More than a solver — a platform for optimization.** MPEE is programmable and
@@ -44,8 +44,8 @@ it**, which is where the speed and memory wins come from.
 
 | Matrix | MPEE — time | MPEE — peak RAM | OSRM |
 |---|--:|--:|---|
-| 10k × 10k | 4.3 s | streamed | impractical — no chunked many-to-many |
-| **50k × 50k** | **94 s** | **≤ 500 MB** | **OOM** — the matrix alone is ~10 GB |
+| 10k × 10k | 1.39 s | streamed | impractical — no chunked many-to-many |
+| **50k × 50k** | **29.5 s** | **≤ 500 MB** | **OOM** — the matrix alone is ~10 GB |
 
 **Streaming at fleet scale** · `bench_matrix`, Greater London car (default 500 MB budget)
 
