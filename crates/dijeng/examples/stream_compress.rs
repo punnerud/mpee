@@ -3,11 +3,12 @@
 //!
 //! Each matrix row is produced on demand as one CH one-to-many query
 //! (`ch::matrix` with a single source → all targets); `matcodec` pulls rows
-//! through the [`matcodec::RowSource`] trait and writes the streamed `MTZS`
-//! container. Peak memory is the L resident landmark rows + one working row —
-//! independent of n. This is the "rest of the world" path: a matrix far larger
-//! than RAM can be compressed by computing it block/row at a time from the
-//! contraction hierarchy.
+//! through the [`matcodec::RowSource`] trait and writes the streamed `MTZT`
+//! container (resident gateway index + residual-only frames). Peak memory is
+//! the L resident landmark rows + the n×L gateway index + one working row —
+//! independent of n². This is the "rest of the world" path: a matrix far
+//! larger than RAM can be compressed by computing it block/row at a time from
+//! the contraction hierarchy.
 //!
 //!   cargo run -p dijeng --example stream_compress -- graph.ch nodes.txt out.mtz [--landmarks L]
 //!
