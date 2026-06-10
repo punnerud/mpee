@@ -987,6 +987,223 @@ fn try_two_opt_star(
     granular: Option<&Granular>,
     best: &mut Option<Move>,
 ) {
+    if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) {
+        try_two_opt_star_fast(problem, matrix, sol, r1, i, granular.unwrap(), best);
+        return;
+    }
+    try_two_opt_star_slow(problem, matrix, sol, r1, i, granular, best);
+}
+
+/// Fast 2-opt*: the tail swap changes exactly four boundary arcs — everything
+/// else (tail internals, the tails' return-to-depot legs, service totals,
+/// fixed costs) moves between the two routes unchanged. Exact only when both
+/// vehicles share start AND end depots (otherwise the tail's depot leg does
+/// not cancel); pairs with differing depots fall back to full evaluation
+/// inline. Candidates are ranked by the O(1) delta, then confirmed lazily
+/// best-first by the authoritative evaluator (TW/capacity feasibility of a
+/// tail swap is what usually kills it).
+fn try_two_opt_star_fast(
+    problem: &Problem,
+    matrix: &Matrix,
+    sol: &Solution,
+    r1: usize,
+    i: usize,
+    granular: &Granular,
+    best: &mut Option<Move>,
+) {
+    let n_routes = sol.routes.len();
+    let route1 = &sol.routes[r1];
+    let veh1 = &problem.vehicles[route1.vehicle_idx];
+    let n1 = route1.steps.len();
+    let c = cost_coef(veh1); // homogeneous (fast_cost_eligible)
+    let Some(a_i) = step_loc(problem, route1.steps[i]) else {
+        return;
+    };
+    nmark_set(granular, a_i, matrix.n);
+    let next1 = if i + 1 < n1 {
+        step_loc(problem, route1.steps[i + 1])
+    } else {
+        depot_end(veh1)
+    };
+
+    struct Cand {
+        delta: f64,
+        r2: usize,
+        j: usize,
+    }
+    let mut cands: Vec<Cand> = Vec::new();
+
+    for r2 in 0..n_routes {
+        if r2 == r1 {
+            continue;
+        }
+        let route2 = &sol.routes[r2];
+        let veh2 = &problem.vehicles[route2.vehicle_idx];
+        // Same-depot gate: tails carry their depot legs with them, which only
+        // cancels when both vehicles use the same depots. Otherwise evaluate
+        // this pair the slow way (rare: multi-depot heterogeneous fleets).
+        if depot_start(veh1) != depot_start(veh2) || depot_end(veh1) != depot_end(veh2) {
+            two_opt_star_pair_slow(problem, matrix, sol, r1, i, r2, true, best);
+            continue;
+        }
+        let n2 = route2.steps.len();
+
+        for j in 0..n2 {
+            // Granular parity with the slow path: only cut points whose r2[j]
+            // is a top-K neighbour of the anchor (j == n2 has no r2[j] and is
+            // skipped there too).
+            let Some(b_j) = step_loc(problem, route2.steps[j]) else {
+                continue;
+            };
+            if !nmark_has(b_j) {
+                continue;
+            }
+            let prev2 = if j > 0 {
+                step_loc(problem, route2.steps[j - 1])
+            } else {
+                depot_start(veh2)
+            };
+            // Δ = new boundary arcs − old boundary arcs.
+            let old = match next1 {
+                Some(n) => arc_cost(matrix, c, a_i, n),
+                None => 0.0,
+            } + match prev2 {
+                Some(p) => arc_cost(matrix, c, p, b_j),
+                None => 0.0,
+            };
+            let new = arc_cost(matrix, c, a_i, b_j)
+                + match (prev2, next1) {
+                    (Some(p), Some(n)) => arc_cost(matrix, c, p, n),
+                    _ => 0.0,
+                };
+            let delta = new - old;
+            if delta < -1e-9 {
+                cands.push(Cand { delta, r2, j });
+            }
+        }
+    }
+
+    if cands.is_empty() {
+        return;
+    }
+    cands.sort_by(|a, b| a.delta.partial_cmp(&b.delta).unwrap());
+
+    for cand in &cands {
+        if best.as_ref().map_or(false, |b| cand.delta >= b.delta - 1e-12) {
+            break;
+        }
+        let route2 = &sol.routes[cand.r2];
+        let veh2 = &problem.vehicles[route2.vehicle_idx];
+        let n2 = route2.steps.len();
+        let j = cand.j;
+        let r1_tail: &[TaskRef] = &route1.steps[i + 1..];
+        let r2_tail: &[TaskRef] = &route2.steps[j..];
+        if !r1_tail.iter().all(|t| veh2.has_skills(t.skills(problem))) {
+            continue;
+        }
+        if !r2_tail.iter().all(|t| veh1.has_skills(t.skills(problem))) {
+            continue;
+        }
+        let mut cand1: Vec<TaskRef> = Vec::with_capacity(i + 1 + (n2 - j));
+        cand1.extend_from_slice(&route1.steps[..=i]);
+        cand1.extend_from_slice(r2_tail);
+        let mut cand2: Vec<TaskRef> = Vec::with_capacity(j + (n1 - i - 1));
+        cand2.extend_from_slice(&route2.steps[..j]);
+        cand2.extend_from_slice(r1_tail);
+        let m1 = match evaluate_route(problem, matrix, veh1, &cand1) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let m2 = match evaluate_route(problem, matrix, veh2, &cand2) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
+        let mut touched: Vec<TaskRef> = Vec::new();
+        touched.push(route1.steps[i]);
+        if j < n2 {
+            touched.push(route2.steps[j]);
+        }
+        consider(best, Move {
+            delta,
+            route_updates: vec![(r1, Some((cand1, m1))), (cand.r2, Some((cand2, m2)))],
+            touched,
+        });
+        break; // first feasible = best feasible (sorted by exact cost)
+    }
+}
+
+/// Slow-path 2-opt* for a single (r1, r2) pair — used by the fast path as a
+/// fallback when the pair's depots differ. `use_nmark` says the caller already
+/// stamped the anchor's neighbours into the thread-local buffer.
+fn two_opt_star_pair_slow(
+    problem: &Problem,
+    matrix: &Matrix,
+    sol: &Solution,
+    r1: usize,
+    i: usize,
+    r2: usize,
+    use_nmark: bool,
+    best: &mut Option<Move>,
+) {
+    let route1 = &sol.routes[r1];
+    let veh1 = &problem.vehicles[route1.vehicle_idx];
+    let n1 = route1.steps.len();
+    let route2 = &sol.routes[r2];
+    let veh2 = &problem.vehicles[route2.vehicle_idx];
+    let n2 = route2.steps.len();
+    for j in 0..=n2 {
+        if use_nmark {
+            let r2_j_loc = if j < n2 { step_loc(problem, route2.steps[j]) } else { None };
+            if !r2_j_loc.map_or(false, nmark_has) {
+                continue;
+            }
+        }
+        let r1_tail: &[TaskRef] = &route1.steps[i + 1..];
+        let r2_tail: &[TaskRef] = &route2.steps[j..];
+        if !r1_tail.iter().all(|t| veh2.has_skills(t.skills(problem))) {
+            continue;
+        }
+        if !r2_tail.iter().all(|t| veh1.has_skills(t.skills(problem))) {
+            continue;
+        }
+        let mut cand1: Vec<TaskRef> = Vec::with_capacity(i + 1 + (n2 - j));
+        cand1.extend_from_slice(&route1.steps[..=i]);
+        cand1.extend_from_slice(r2_tail);
+        let mut cand2: Vec<TaskRef> = Vec::with_capacity(j + (n1 - i - 1));
+        cand2.extend_from_slice(&route2.steps[..j]);
+        cand2.extend_from_slice(r1_tail);
+        let m1 = match evaluate_route(problem, matrix, veh1, &cand1) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let m2 = match evaluate_route(problem, matrix, veh2, &cand2) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
+        let mut touched: Vec<TaskRef> = Vec::new();
+        touched.push(route1.steps[i]);
+        if j < n2 {
+            touched.push(route2.steps[j]);
+        }
+        consider(best, Move {
+            delta,
+            route_updates: vec![(r1, Some((cand1, m1))), (r2, Some((cand2, m2)))],
+            touched,
+        });
+    }
+}
+
+fn try_two_opt_star_slow(
+    problem: &Problem,
+    matrix: &Matrix,
+    sol: &Solution,
+    r1: usize,
+    i: usize,
+    granular: Option<&Granular>,
+    best: &mut Option<Move>,
+) {
     let n_routes = sol.routes.len();
     let route1 = &sol.routes[r1];
     let veh1 = &problem.vehicles[route1.vehicle_idx];
@@ -1222,6 +1439,185 @@ fn best_insertion(
 /// exchange; longer segments locked us into worse local optima in earlier
 /// experiments. Length 2 untangles two-edge crossings between routes.)
 fn try_cross_exchange_with(
+    problem: &Problem,
+    matrix: &Matrix,
+    sol: &Solution,
+    r1: usize,
+    i: usize,
+    granular: Option<&Granular>,
+    best: &mut Option<Move>,
+) {
+    if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) {
+        try_cross_exchange_fast(problem, matrix, sol, r1, i, granular.unwrap(), best);
+        return;
+    }
+    try_cross_exchange_slow(problem, matrix, sol, r1, i, granular, best);
+}
+
+/// Fast cross-exchange: swapping the two length-2 segments changes exactly six
+/// arcs (the boundary arcs around each gap plus each segment's internal arc,
+/// now charged on the other route) and trades the segments' service tie-break
+/// terms. Both routes keep their prefix/suffix and depot legs, so unlike
+/// 2-opt* no same-depot gate is needed — homogeneous cost coefficients (the
+/// `fast_cost_eligible` gate) suffice. Rank by exact delta, confirm lazily.
+fn try_cross_exchange_fast(
+    problem: &Problem,
+    matrix: &Matrix,
+    sol: &Solution,
+    r1: usize,
+    i: usize,
+    granular: &Granular,
+    best: &mut Option<Move>,
+) {
+    let n_routes = sol.routes.len();
+    let route1 = &sol.routes[r1];
+    let n1 = route1.steps.len();
+    if i + 2 > n1 {
+        return;
+    }
+    let veh1 = &problem.vehicles[route1.vehicle_idx];
+    let c = cost_coef(veh1); // homogeneous
+    let (Some(s1a), Some(s1b)) = (
+        step_loc(problem, route1.steps[i]),
+        step_loc(problem, route1.steps[i + 1]),
+    ) else {
+        return;
+    };
+    nmark_set(granular, s1a, matrix.n);
+    let prev1 = if i > 0 { step_loc(problem, route1.steps[i - 1]) } else { depot_start(veh1) };
+    let nxt1 = if i + 2 < n1 { step_loc(problem, route1.steps[i + 2]) } else { depot_end(veh1) };
+    let seg1_service: f64 = route1.steps[i..i + 2]
+        .iter()
+        .map(|t| t.description(problem).service as f64 * 1e-6)
+        .sum();
+    // Arcs r1 loses around its gap (boundary + internal).
+    let r1_old = match prev1 {
+        Some(p) => arc_cost(matrix, c, p, s1a),
+        None => 0.0,
+    } + arc_cost(matrix, c, s1a, s1b)
+        + match nxt1 {
+            Some(n) => arc_cost(matrix, c, s1b, n),
+            None => 0.0,
+        };
+
+    struct Cand {
+        delta: f64,
+        r2: usize,
+        j: usize,
+    }
+    let mut cands: Vec<Cand> = Vec::new();
+
+    for r2 in 0..n_routes {
+        if r2 == r1 {
+            continue;
+        }
+        let route2 = &sol.routes[r2];
+        let veh2 = &problem.vehicles[route2.vehicle_idx];
+        let n2 = route2.steps.len();
+        if 2 > n2 {
+            continue;
+        }
+        for j in 0..=n2 - 2 {
+            let (Some(s2a), Some(s2b)) = (
+                step_loc(problem, route2.steps[j]),
+                step_loc(problem, route2.steps[j + 1]),
+            ) else {
+                continue;
+            };
+            // Granular parity: at least one of seg2's locations near the anchor.
+            if !nmark_has(s2a) && !nmark_has(s2b) {
+                continue;
+            }
+            let prev2 = if j > 0 { step_loc(problem, route2.steps[j - 1]) } else { depot_start(veh2) };
+            let nxt2 = if j + 2 < n2 { step_loc(problem, route2.steps[j + 2]) } else { depot_end(veh2) };
+            let seg2_service: f64 = route2.steps[j..j + 2]
+                .iter()
+                .map(|t| t.description(problem).service as f64 * 1e-6)
+                .sum();
+            let r2_old = match prev2 {
+                Some(p) => arc_cost(matrix, c, p, s2a),
+                None => 0.0,
+            } + arc_cost(matrix, c, s2a, s2b)
+                + match nxt2 {
+                    Some(n) => arc_cost(matrix, c, s2b, n),
+                    None => 0.0,
+                };
+            // seg2 spliced into r1's gap, seg1 into r2's gap.
+            let r1_new = match prev1 {
+                Some(p) => arc_cost(matrix, c, p, s2a),
+                None => 0.0,
+            } + arc_cost(matrix, c, s2a, s2b)
+                + match nxt1 {
+                    Some(n) => arc_cost(matrix, c, s2b, n),
+                    None => 0.0,
+                };
+            let r2_new = match prev2 {
+                Some(p) => arc_cost(matrix, c, p, s1a),
+                None => 0.0,
+            } + arc_cost(matrix, c, s1a, s1b)
+                + match nxt2 {
+                    Some(n) => arc_cost(matrix, c, s1b, n),
+                    None => 0.0,
+                };
+            // Service tie-break swaps with the segments; everything else cancels.
+            let delta = (r1_new - r1_old + seg2_service - seg1_service)
+                + (r2_new - r2_old + seg1_service - seg2_service);
+            if delta < -1e-9 {
+                cands.push(Cand { delta, r2, j });
+            }
+        }
+    }
+
+    if cands.is_empty() {
+        return;
+    }
+    cands.sort_by(|a, b| a.delta.partial_cmp(&b.delta).unwrap());
+
+    let seg1: Vec<TaskRef> = route1.steps[i..i + 2].to_vec();
+    for cand in &cands {
+        if best.as_ref().map_or(false, |b| cand.delta >= b.delta - 1e-12) {
+            break;
+        }
+        let route2 = &sol.routes[cand.r2];
+        let veh2 = &problem.vehicles[route2.vehicle_idx];
+        let n2 = route2.steps.len();
+        let j = cand.j;
+        let seg2: &[TaskRef] = &route2.steps[j..j + 2];
+        if !seg1.iter().all(|t| veh2.has_skills(t.skills(problem))) {
+            continue;
+        }
+        if !seg2.iter().all(|t| veh1.has_skills(t.skills(problem))) {
+            continue;
+        }
+        let mut cand1: Vec<TaskRef> = Vec::with_capacity(n1);
+        cand1.extend_from_slice(&route1.steps[..i]);
+        cand1.extend_from_slice(seg2);
+        cand1.extend_from_slice(&route1.steps[i + 2..]);
+        let mut cand2: Vec<TaskRef> = Vec::with_capacity(n2);
+        cand2.extend_from_slice(&route2.steps[..j]);
+        cand2.extend_from_slice(&seg1);
+        cand2.extend_from_slice(&route2.steps[j + 2..]);
+        let m1 = match evaluate_route(problem, matrix, veh1, &cand1) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let m2 = match evaluate_route(problem, matrix, veh2, &cand2) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
+        let mut touched = seg1.clone();
+        touched.extend_from_slice(seg2);
+        consider(best, Move {
+            delta,
+            route_updates: vec![(r1, Some((cand1, m1))), (cand.r2, Some((cand2, m2)))],
+            touched,
+        });
+        break;
+    }
+}
+
+fn try_cross_exchange_slow(
     problem: &Problem,
     matrix: &Matrix,
     sol: &Solution,
