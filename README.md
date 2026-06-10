@@ -620,24 +620,25 @@ More geographic separation ⇒ better ratio (the 960² road matrix hits **9.79×
 compress is sub-second to ~1 s for ~1 M cells and **decompression is essentially
 free (~10 ms)**, so you can decompress on the fly.
 
-It also **streams** (`compress_stream` + the `MTZT` container: peak memory
-`L×n` rows + the `n×L` gateway index, fed by any `RowSource` — e.g. dijeng's
-per-row CH queries, so a matrix larger than RAM is compressed without ever
-materialising n²) and **validates** every row as it passes (negative /
-unreachable / non-zero-diagonal cells, plus a *free* triangle-inequality check
-— in the bridge model a positive residual *is* a violation — that auto-gates
-the metric-only shortcuts).
+It also **streams** (`compress_stream_hub` + the `MTZU` container, fed by any
+`RowSource` — e.g. dijeng's per-row CH queries, so a matrix larger than RAM is
+compressed without ever materialising n²) and **validates** every row as it
+passes (negative / unreachable / non-zero-diagonal cells, plus a *free*
+triangle-inequality check — a positive residual *is* a violation — that
+auto-gates the metric-only shortcuts).
 
 The streamed container doubles as an **in-memory query index**
-([design + measurements](docs/matcodec-gateway-index.md)): the per-point
-gateway distances and a per-(row, region) max-residual byte stay resident
-(2 ints + 1 byte per point×landmark), so `MtzReader` answers index-exact cells
-in **O(L) with zero decompression**, gives every cell O(L) lower/upper bounds
-(`cell_bounds`, ~50–250 ns — built for solver pruning), and tolerance-bounded
-values (`cell_within`). Measured on a real London 2000² CH matrix: exact random
-`cell()` 48.9 µs → 14 µs, `cell_within(5 s)` 6.6 µs, and the blob got 31 %
-smaller; on gateway-structured data exact lookups are **39× faster** with 88 %
-of blocks answered straight from the index. CLI:
+([design + measurements](docs/matcodec-gateway-index.md)): each point keeps
+**directional path labels** — the k hubs that actually lie on its shortest
+paths (mined from sampled pairs; the road-hierarchy "few motorway exits per
+point" idea) — plus a dense hub matrix and per-(row, region) max-residual
+bytes, with varint-coded residual frames. `MtzReader` answers index-exact
+cells with **zero decompression**, gives every cell ~180 ns lower/upper bounds
+(`cell_bounds`, built for solver pruning) and tolerance-bounded values
+(`cell_within`). Measured on real London CH matrices: a streamed 10k² matrix
+compresses to **52.9 MB (7.6×; was 121.8 MB)**, random-accesses from a **3 MB**
+resident index (open: 10 ms), exact `cell()` 50 µs, `cell_within(5 s)` 31 µs,
+and 43 % of blocks answer within 5 s straight from the index. CLI:
 
 ```bash
 matcodec compress   matrix.json out.mtz [--stream] [--landmarks L]
