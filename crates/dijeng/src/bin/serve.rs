@@ -240,6 +240,16 @@ fn handle(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
         });
     }
 
+    if let Some(rest) = path_only.strip_prefix("/match/v1/") {
+        let query = match path.find('?') {
+            Some(i) => path[i + 1..].to_string(),
+            None => String::new(),
+        };
+        return dispatch_with_profile(&mut stream, state, rest, move |stream, svc, rest| {
+            handle_match(stream, svc, rest, &query)
+        });
+    }
+
     if let Some(rest) = path_only.strip_prefix("/isochrone/v1/") {
         let query = match path.find('?') {
             Some(i) => path[i + 1..].to_string(),
@@ -447,6 +457,87 @@ fn handle_nearest(
         e = elapsed_us,
     );
     write_response(stream, 200, "OK", "application/json", &body)
+}
+
+/// Map matching: `GET /match/v1/{profile}/{lon,lat;lon,lat;...}?sigma=15&k=8`.
+/// OSRM-shaped: returns one matched waypoint per input ping (snapped location,
+/// node, snap distance, segment continuity) plus an overall confidence.
+fn handle_match(
+    stream: &mut TcpStream,
+    svc: &RoutingService,
+    coords_part: &str,
+    query: &str,
+) -> std::io::Result<()> {
+    let coords_part = coords_part.split('?').next().unwrap_or(coords_part);
+    let trace: Vec<(f32, f32)> = coords_part
+        .split(';')
+        .filter_map(|wp| {
+            let mut it = wp.split(',');
+            let lon = it.next()?.parse::<f32>().ok()?;
+            let lat = it.next()?.parse::<f32>().ok()?;
+            Some((lat, lon))
+        })
+        .collect();
+    if trace.len() < 2 {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidUrl","message":"match requires at least 2 trace points"}"#,
+        );
+    }
+    if trace.len() > 5000 {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidUrl","message":"match caps at 5000 trace points"}"#,
+        );
+    }
+    let sigma: f32 = query_param(query, "sigma")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(15.0)
+        .clamp(1.0, 200.0);
+    let k: usize = query_param(query, "k")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
+        .clamp(2, 32);
+    let t = Instant::now();
+    let res = svc.match_trace(&trace, k, sigma);
+    let elapsed_us = t.elapsed().as_micros();
+    match res {
+        Some(m) => {
+            let pts: Vec<String> = m
+                .points
+                .iter()
+                .map(|p| {
+                    format!(
+                        r#"{{"location":[{lon},{lat}],"node":{node},"distance":{d:.1},"connected":{conn}}}"#,
+                        lon = p.lon,
+                        lat = p.lat,
+                        node = p.node,
+                        d = p.snap_distance_m,
+                        conn = p.connected,
+                    )
+                })
+                .collect();
+            let body = format!(
+                r#"{{"code":"Ok","confidence":{:.3},"tracepoints":[{}],"elapsed_us":{elapsed_us}}}"#,
+                m.confidence,
+                pts.join(","),
+            );
+            write_response(stream, 200, "OK", "application/json", &body)
+        }
+        None => write_response(
+            stream,
+            200,
+            "OK",
+            "application/json",
+            r#"{"code":"NoMatch","message":"no routing graph mounted"}"#,
+        ),
+    }
 }
 
 /// Isochrones: `GET /isochrone/v1/{profile}/{lon},{lat}?contours=300,600,900`

@@ -49,5 +49,6 @@ pub mod synth;
 pub mod varint;
 #[cfg(feature = "native")]
 pub mod isochrone;
+pub mod matching;
 pub mod trip;
 pub mod wordladder;
