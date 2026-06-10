@@ -549,6 +549,28 @@ no IPC, no file hand-off on the hot path.
 
 ---
 
+## Vision: built for today's fleets, rigged for transfer-at-speed
+
+MPEE solves today's delivery and field-service routing — but the engine is
+deliberately built for a future of autonomous cars, buses, trains and boats
+with **seamless transitions**: ride from A to Å with a car's door-to-door
+convenience at a bus's cost-efficiency, enabled by **transferring between
+vehicles at speed**. A hundred individual cars can never economically compete
+with one trunk vehicle covering 95 % of the distance without a single stop —
+pods handle only the last mile, docking without anyone stopping. On the
+water the same logic is even stronger: a hydrofoil's expensive moment is
+coming down off its foils, so the big foil should *never* stop — feeder
+boats dock with it while both are foiling (up and down the Oslofjord, along
+coastlines), and interface with pods/buses at dedicated quays. Every one of
+those moving rendezvous is a routing constraint two orders of magnitude
+tighter than a delivery slot, replanned continuously at fleet scale — which
+is exactly why a single-process engine with fleet-sized matrices in seconds,
+SOTA solve quality per second, and a live-updatable hierarchy matters.
+**Route optimization is the load-bearing piece that enables this.**
+Full write-up: [docs/future-vision.md](docs/future-vision.md).
+
+---
+
 ## Background
 
 Both dijeng and brooom were recently optimised to compute distances

@@ -1111,6 +1111,32 @@ router.solve(problem_json, constraints=["sum(1 for j in route if j.fragile) &lt;
     </p>
   </section>
 
+  <section id="vision">
+    <h2>Vision: rigged for transfer-at-speed</h2>
+    <p>
+      MPEE solves today's fleet routing — and is deliberately built for a
+      future of autonomous cars, buses, trains and boats with
+      <strong>seamless transitions</strong>: ride A&nbsp;to&nbsp;Å with a
+      car's door-to-door convenience at a bus's cost-efficiency, enabled by
+      <strong>transferring between vehicles at speed</strong>. A hundred
+      individual cars can never economically compete with one trunk vehicle
+      running 95&nbsp;% of the distance without a single stop — pods handle
+      the last mile, docking without anyone stopping. At sea the logic is
+      even stronger: a hydrofoil's expensive moment is coming down off its
+      foils, so the big foil <em>never</em> stops — feeder boats dock with it
+      while both are foiling (up and down the Oslofjord, along coastlines)
+      and meet pods and buses at dedicated quays.
+    </p>
+    <p class="muted">
+      Every moving rendezvous is a routing constraint ~100× tighter than a
+      delivery slot, replanned continuously at fleet scale. That is why a
+      single-process engine with fleet-sized matrices in seconds, SOTA solve
+      quality per second and a live-updatable hierarchy is the load-bearing
+      piece. Full write-up:
+      <a href="https://github.com/punnerud/mpee/blob/main/docs/future-vision.md">docs/future-vision.md</a>.
+    </p>
+  </section>
+
   <!-- ============================================================= -->
   <!-- Dense, plain-text quick reference for LLM agents reading the page -->
   <!-- ============================================================= -->
