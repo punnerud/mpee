@@ -221,8 +221,22 @@ fn handle(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
     }
 
     if let Some(rest) = path_only.strip_prefix("/nearest/v1/") {
-        return dispatch_with_profile(&mut stream, state, rest, |stream, svc, rest| {
-            handle_nearest(stream, svc, rest)
+        let query = match path.find('?') {
+            Some(i) => path[i + 1..].to_string(),
+            None => String::new(),
+        };
+        return dispatch_with_profile(&mut stream, state, rest, move |stream, svc, rest| {
+            handle_nearest(stream, svc, rest, &query)
+        });
+    }
+
+    if let Some(rest) = path_only.strip_prefix("/trip/v1/") {
+        let query = match path.find('?') {
+            Some(i) => path[i + 1..].to_string(),
+            None => String::new(),
+        };
+        return dispatch_with_profile(&mut stream, state, rest, move |stream, svc, rest| {
+            handle_trip(stream, svc, rest, &query)
         });
     }
 
@@ -364,7 +378,10 @@ fn handle_nearest(
     stream: &mut TcpStream,
     svc: &RoutingService,
     coords_part: &str,
+    query: &str,
 ) -> std::io::Result<()> {
+    // Strip any query string the dispatcher left on the coords part.
+    let coords_part = coords_part.split('?').next().unwrap_or(coords_part);
     if coords_part.is_empty() {
         return write_response(
             stream,
@@ -393,19 +410,120 @@ fn handle_nearest(
             r#"{"code":"InvalidUrl","message":"unparseable coordinate"}"#,
         );
     };
+    // OSRM-compatible `number=K` (default 1, capped to keep responses sane).
+    let k: usize = query_param(query, "number")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .clamp(1, 100);
     let t = Instant::now();
-    let csr = svc.nearest_node(lat, lon);
+    let hits = svc.nearest_nodes(lat, lon, k);
     let elapsed_us = t.elapsed().as_micros();
-    let (snap_lat, snap_lon) = svc.coords[csr as usize];
-    let dist = haversine_m(lat, lon, snap_lat, snap_lon);
+    let waypoints: Vec<String> = hits
+        .iter()
+        .map(|&(id, snap_lat, snap_lon)| {
+            let dist = haversine_m(lat, lon, snap_lat, snap_lon);
+            let name = svc.reverse(snap_lat, snap_lon).unwrap_or("");
+            format!(
+                r#"{{"location":[{slon},{slat}],"name":"{name}","distance":{d:.1},"node":{id}}}"#,
+                slon = snap_lon,
+                slat = snap_lat,
+                d = dist,
+            )
+        })
+        .collect();
     let body = format!(
-        r#"{{"code":"Ok","waypoints":[{{"location":[{slon},{slat}],"name":"","distance":{d:.1}}}],"elapsed_us":{e}}}"#,
-        slon = snap_lon,
-        slat = snap_lat,
-        d = dist,
+        r#"{{"code":"Ok","waypoints":[{}],"elapsed_us":{e}}}"#,
+        waypoints.join(","),
         e = elapsed_us,
     );
     write_response(stream, 200, "OK", "application/json", &body)
+}
+
+/// Extract a `key=value` pair from a raw query string.
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|kv| {
+        let mut it = kv.splitn(2, '=');
+        (it.next()? == key).then(|| it.next().unwrap_or(""))
+    })
+}
+
+/// Trip service: `GET /trip/v1/{profile}/{lon,lat;lon,lat;...}?roundtrip=true`.
+/// Orders the waypoints into the shortest visiting sequence (exact for ≤13,
+/// 2-opt/Or-opt heuristic above) and returns per-leg routes.
+fn handle_trip(
+    stream: &mut TcpStream,
+    svc: &RoutingService,
+    coords_part: &str,
+    query: &str,
+) -> std::io::Result<()> {
+    let coords_part = coords_part.split('?').next().unwrap_or(coords_part);
+    let waypoints: Vec<(f32, f32)> = coords_part
+        .split(';')
+        .filter_map(|wp| {
+            let mut it = wp.split(',');
+            let lon = it.next()?.parse::<f32>().ok()?;
+            let lat = it.next()?.parse::<f32>().ok()?;
+            Some((lat, lon))
+        })
+        .collect();
+    if waypoints.len() < 2 {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidUrl","message":"trip requires at least 2 waypoints"}"#,
+        );
+    }
+    if waypoints.len() > 500 {
+        return write_response(
+            stream,
+            400,
+            "Bad Request",
+            "application/json",
+            r#"{"code":"InvalidUrl","message":"trip caps at 500 waypoints"}"#,
+        );
+    }
+    let roundtrip = query_param(query, "roundtrip") != Some("false");
+    let t = Instant::now();
+    let trip = svc.trip(&waypoints, roundtrip);
+    let elapsed_us = t.elapsed().as_micros();
+    match trip {
+        Some(tr) => {
+            let legs: Vec<String> = tr
+                .legs
+                .iter()
+                .map(|leg| {
+                    let geom: Vec<String> = leg
+                        .geometry
+                        .iter()
+                        .map(|&(la, lo)| format!("[{lo},{la}]"))
+                        .collect();
+                    format!(
+                        r#"{{"duration":{:.1},"distance":{:.1},"geometry":{{"type":"LineString","coordinates":[{}]}}}}"#,
+                        leg.duration_s,
+                        leg.distance_m,
+                        geom.join(",")
+                    )
+                })
+                .collect();
+            let order: Vec<String> = tr.order.iter().map(|i| i.to_string()).collect();
+            let body = format!(
+                r#"{{"code":"Ok","order":[{}],"roundtrip":{roundtrip},"duration":{:.1},"distance":{:.1},"legs":[{}],"elapsed_us":{elapsed_us}}}"#,
+                order.join(","),
+                tr.duration_s,
+                tr.distance_m,
+                legs.join(","),
+            );
+            write_response(stream, 200, "OK", "application/json", &body)
+        }
+        None => {
+            let body = format!(
+                r#"{{"code":"NoTrip","message":"no feasible ordering (disconnected waypoints?)","elapsed_us":{elapsed_us}}}"#,
+            );
+            write_response(stream, 200, "OK", "application/json", &body)
+        }
+    }
 }
 
 fn haversine_m(lat1: f32, lon1: f32, lat2: f32, lon2: f32) -> f32 {

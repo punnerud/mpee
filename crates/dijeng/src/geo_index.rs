@@ -145,11 +145,85 @@ impl LatLonGrid {
         }
         best.map(|(id, _)| id)
     }
+
+    /// K nearest points to (lat, lon), ascending by ground distance. Same
+    /// concentric-ring sweep as [`nearest`], but keeps a top-K set and only
+    /// terminates once the ring boundary is farther than the K-th best (or
+    /// the grid is exhausted). Returns fewer than `k` when the index holds
+    /// fewer points.
+    pub fn nearest_k(
+        &self,
+        lat: f32,
+        lon: f32,
+        coords: &[(f32, f32)],
+        k: usize,
+    ) -> Vec<u32> {
+        if self.cells.is_empty() || k == 0 {
+            return Vec::new();
+        }
+        let lon_scale = ((lat as f64).to_radians().cos() as f32).max(1e-6);
+        let qr = (((lat - self.min_lat) / self.cell_size_deg).floor() as isize)
+            .clamp(0, self.rows as isize - 1);
+        let qc = (((lon - self.min_lon) / self.cell_size_deg).floor() as isize)
+            .clamp(0, self.cols as isize - 1);
+
+        // Small k: a sorted Vec beats a heap.
+        let mut best: Vec<(f32, u32)> = Vec::with_capacity(k + 1);
+        let max_ring = self.rows.max(self.cols) as isize;
+        for ring in 0..=max_ring {
+            for dr in -ring..=ring {
+                let rr = qr + dr;
+                if rr < 0 || rr >= self.rows as isize {
+                    continue;
+                }
+                for dc in -ring..=ring {
+                    if dr.abs() != ring && dc.abs() != ring {
+                        continue;
+                    }
+                    let cc = qc + dc;
+                    if cc < 0 || cc >= self.cols as isize {
+                        continue;
+                    }
+                    let cell = &self.cells[rr as usize * self.cols + cc as usize];
+                    for &id in cell {
+                        let (la, lo) = coords[id as usize];
+                        let dlat = lat - la;
+                        let dlon = (lon - lo) * lon_scale;
+                        let d = dlat * dlat + dlon * dlon;
+                        if best.len() < k || d < best.last().unwrap().0 {
+                            let pos = best.partition_point(|&(bd, _)| bd < d);
+                            best.insert(pos, (d, id));
+                            best.truncate(k);
+                        }
+                    }
+                }
+            }
+            if best.len() >= k && ring > 0 {
+                let ring_d = (ring as f32) * self.cell_size_deg;
+                let bound = ring_d * lon_scale.min(1.0);
+                if bound * bound > best.last().unwrap().0 {
+                    break;
+                }
+            }
+        }
+        best.into_iter().map(|(_, id)| id).collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearest_k_orders_by_distance() {
+        let coords = vec![(51.5, -0.1), (51.5, -0.2), (51.6, -0.1), (51.7, -0.3)];
+        let g = LatLonGrid::from_coords(&coords, 0.01);
+        let hits = g.nearest_k(51.501, -0.099, &coords, 3);
+        assert_eq!(hits, vec![0, 1, 2], "ascending ground distance");
+        // k larger than the index → everything, still sorted.
+        let all = g.nearest_k(51.501, -0.099, &coords, 10);
+        assert_eq!(all, vec![0, 1, 2, 3]);
+    }
 
     #[test]
     fn finds_nearest_in_three_points() {

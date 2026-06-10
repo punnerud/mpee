@@ -19,6 +19,49 @@ use crate::geo_index::LatLonGrid;
 const CH_REQUIRED: &str =
     "matrix requires a CH cache — this service was opened for geocoding only (no .ch)";
 
+/// Membership mask (by INTERNAL id) of the largest weakly-connected component
+/// of the CH graph. Undirected BFS treating fwd+bwd edges as one edge set;
+/// shortcuts only mirror base-graph connectivity, so this equals the base
+/// graph's weak components.
+fn largest_component(ch: &ContractionHierarchy) -> Vec<bool> {
+    let n = ch.graph_fwd.n;
+    let mut comp_of: Vec<u32> = vec![u32::MAX; n];
+    let mut sizes: Vec<u32> = Vec::new();
+    let mut stack: Vec<u32> = Vec::with_capacity(1024);
+    for start in 0..n {
+        if comp_of[start] != u32::MAX {
+            continue;
+        }
+        let cid = sizes.len() as u32;
+        let mut size = 0u32;
+        comp_of[start] = cid;
+        stack.push(start as u32);
+        while let Some(v) = stack.pop() {
+            size += 1;
+            let vu = v as usize;
+            for (g_ref, _) in [(&ch.graph_fwd, ()), (&ch.graph_bwd, ())] {
+                let s = g_ref.head[vu] as usize;
+                let e = g_ref.head[vu + 1] as usize;
+                for k in s..e {
+                    let w = g_ref.edge_to[k] as usize;
+                    if comp_of[w] == u32::MAX {
+                        comp_of[w] = cid;
+                        stack.push(w as u32);
+                    }
+                }
+            }
+        }
+        sizes.push(size);
+    }
+    let largest = sizes
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &s)| s)
+        .map(|(i, _)| i as u32)
+        .unwrap_or(0);
+    comp_of.into_iter().map(|c| c == largest).collect()
+}
+
 pub struct RoutingService {
     /// The contraction hierarchy needed for `route`/`matrix`. `None` when the
     /// service was opened for **geocoding only** (no `.ch`), which lets a pure
@@ -28,8 +71,18 @@ pub struct RoutingService {
     /// `inv_perm[internal_id] = csr_id`. Built at construction time from
     /// `ch.perm` so we can map a CH-path back to coordinates (empty without ch).
     inv_perm: Buffer<u32>,
-    /// Spatial index over `coords` for sub-100 µs nearest-vertex lookup.
+    /// Spatial index for sub-100 µs nearest-vertex lookup. For a ROUTING
+    /// service this indexes only nodes that are routable in the mounted
+    /// profile (degree ≥ 1 in the CH graph) — central-city coordinates would
+    /// otherwise snap to footpath/rail nodes with no car edges and every
+    /// route from them would be "no path" (long-standing bug surfaced by the
+    /// trip service). Geocoding-only services index every node.
     snap_grid: LatLonGrid,
+    /// Grid-index → CSR node id for the filtered grid. Empty = identity
+    /// (geocoding-only service, grid built over all of `coords`).
+    snap_ids: Vec<u32>,
+    /// Coordinates parallel to `snap_ids` (what the filtered grid indexes).
+    snap_coords: Vec<(f32, f32)>,
     /// Optional street-name sidecar, enabling offline geocoding. Reverse
     /// lookups reuse `snap_grid`; forward lookups scan the distinct names.
     /// `None` when no `.names` sidecar was attached.
@@ -56,6 +109,20 @@ pub struct RouteResponse {
     pub destination_snapped: (f32, f32),
 }
 
+/// Result of the trip service: the optimised visiting order over the input
+/// waypoints plus one routed leg per consecutive pair (closing leg included
+/// for roundtrips).
+pub struct TripResponse {
+    /// Visiting order as indices into the input waypoint slice. Starts at 0;
+    /// open paths end at `len - 1`.
+    pub order: Vec<usize>,
+    /// One routed leg per consecutive pair in `order` (+ the closing leg when
+    /// roundtrip), in travel order.
+    pub legs: Vec<RouteResponse>,
+    pub duration_s: f32,
+    pub distance_m: f32,
+}
+
 impl RoutingService {
     /// `coords[csr_id] = (lat, lon)`. `ch` was built from the same CSR graph,
     /// so `ch.perm[csr_id]` gives the internal (rank-ordered) id.
@@ -73,12 +140,32 @@ impl RoutingService {
         // 0.005° (~550 m at mid-latitudes) hits this sweet spot for London;
         // for a continent-scale graph use slightly larger (0.01°).
         let cell_size_deg = if n > 5_000_000 { 0.01 } else { 0.005 };
-        let snap_grid = LatLonGrid::from_coords(coords.as_slice(), cell_size_deg);
+        // Snap only to nodes the profile can actually route between: members
+        // of the LARGEST weakly-connected component of the profile graph.
+        // OSM car graphs are full of tiny disconnected fragments (service-road
+        // stubs, parking aisles, pedestrian-zone slivers) — in central London
+        // the nearest node to a landmark is frequently a 2-node stub, and
+        // every route from it is "no path" (long-standing bug surfaced by the
+        // trip service). One undirected BFS over the CH edges (originals +
+        // shortcuts share the base graph's connectivity) finds the giant
+        // component in ~100 ms at mount time.
+        let comp = largest_component(&ch);
+        let mut snap_ids: Vec<u32> = Vec::with_capacity(n);
+        let mut snap_coords: Vec<(f32, f32)> = Vec::with_capacity(n);
+        for csr_id in 0..n {
+            if comp[ch.perm[csr_id] as usize] {
+                snap_ids.push(csr_id as u32);
+                snap_coords.push(coords[csr_id]);
+            }
+        }
+        let snap_grid = LatLonGrid::from_coords(&snap_coords, cell_size_deg);
         Self {
             ch: Some(ch),
             coords,
             inv_perm: inv.into(),
             snap_grid,
+            snap_ids,
+            snap_coords,
             names: None,
             addresses: None,
             road_graph: None,
@@ -99,6 +186,8 @@ impl RoutingService {
             coords,
             inv_perm: Buffer::from(Vec::new()),
             snap_grid,
+            snap_ids: Vec::new(),   // identity: grid indexes all of `coords`
+            snap_coords: Vec::new(),
             names: None,
             addresses: None,
             road_graph: None,
@@ -302,9 +391,37 @@ impl RoutingService {
     /// `cos(lat)` for correct ordering). Backed by a uniform grid index;
     /// typically ~50 µs on city/country-scale graphs.
     pub fn nearest_node(&self, lat: f32, lon: f32) -> u32 {
-        self.snap_grid
-            .nearest(lat, lon, self.coords.as_slice())
-            .unwrap_or(0)
+        if self.snap_ids.is_empty() {
+            self.snap_grid
+                .nearest(lat, lon, self.coords.as_slice())
+                .unwrap_or(0)
+        } else {
+            self.snap_grid
+                .nearest(lat, lon, &self.snap_coords)
+                .map(|i| self.snap_ids[i as usize])
+                .unwrap_or(0)
+        }
+    }
+
+    /// K nearest road nodes to (lat, lon), ascending by ground distance —
+    /// the OSRM `/nearest?number=K` service. Each hit is
+    /// `(node_id, snapped_lat, snapped_lon)`.
+    pub fn nearest_nodes(&self, lat: f32, lon: f32, k: usize) -> Vec<(u32, f32, f32)> {
+        let hits = if self.snap_ids.is_empty() {
+            self.snap_grid.nearest_k(lat, lon, self.coords.as_slice(), k)
+        } else {
+            self.snap_grid
+                .nearest_k(lat, lon, &self.snap_coords, k)
+                .into_iter()
+                .map(|i| self.snap_ids[i as usize])
+                .collect()
+        };
+        hits.into_iter()
+            .map(|id| {
+                let (la, lo) = self.coords[id as usize];
+                (id, la, lo)
+            })
+            .collect()
     }
 
     /// Many-to-many duration matrix: `out[i*dsts.len() + j]` is the
@@ -340,6 +457,42 @@ impl RoutingService {
             .map(|&csr| self.coords[csr as usize])
             .collect();
         (durations, snapped_src_coords, snapped_dst_coords)
+    }
+
+    /// Trip service (OSRM `/trip`): order `pts` into the shortest visiting
+    /// sequence and return per-leg routes. `roundtrip = true` gives a closed
+    /// tour starting/ending at `pts[0]`; `false` gives an open path pinned to
+    /// start at `pts[0]` and end at the last point. Returns `None` when there
+    /// is no CH, fewer than 2 points, or no feasible ordering (disconnected).
+    pub fn trip(&self, pts: &[(f32, f32)], roundtrip: bool) -> Option<TripResponse> {
+        self.ch.as_ref()?;
+        let n = pts.len();
+        if n < 2 {
+            return None;
+        }
+        // Waypoint duration matrix (tiny: n ≤ a few dozen in practice).
+        let (durations, _, _) = self.matrix(pts, pts);
+        let order = crate::trip::tsp_order(&durations, n, roundtrip);
+        if !crate::trip::tour_cost(&durations, n, &order, roundtrip).is_finite() {
+            return None;
+        }
+        // Per-leg routes with geometry, following the chosen order.
+        let mut legs: Vec<RouteResponse> = Vec::with_capacity(n);
+        let mut total_dur = 0.0f32;
+        let mut total_dist = 0.0f32;
+        let leg_pairs = order
+            .windows(2)
+            .map(|w| (w[0], w[1]))
+            .chain(roundtrip.then(|| (*order.last().unwrap(), order[0])));
+        for (a, b) in leg_pairs {
+            let (sla, slo) = pts[a];
+            let (dla, dlo) = pts[b];
+            let r = self.route(sla, slo, dla, dlo)?;
+            total_dur += r.duration_s;
+            total_dist += r.distance_m;
+            legs.push(r);
+        }
+        Some(TripResponse { order, legs, duration_s: total_dur, distance_m: total_dist })
     }
 
     /// Variant of `matrix` that also returns per-cell distances. With a
