@@ -454,8 +454,8 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     <table>
       <thead><tr><th>Matrix</th><th>MPEE — time</th><th>MPEE — peak RAM</th><th>OSRM</th></tr></thead>
       <tbody>
-        <tr><td>10k × 10k</td><td>4.3 s</td><td>streamed</td><td>impractical — no chunked many-to-many</td></tr>
-        <tr><td><b>50k × 50k</b></td><td><b>94 s</b></td><td><b>≤ 500 MB</b></td><td><b>OOM</b> — the matrix alone is ~10 GB</td></tr>
+        <tr><td>10k × 10k</td><td>1.39 s</td><td>streamed</td><td>impractical — no chunked many-to-many</td></tr>
+        <tr><td><b>50k × 50k</b></td><td><b>29.5 s</b></td><td><b>≤ 500 MB</b></td><td><b>OOM</b> — the matrix alone is ~10 GB</td></tr>
       </tbody>
     </table>
 
