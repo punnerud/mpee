@@ -412,14 +412,26 @@ impl Router {
 
     /// Build a `.pp` + `.ch` cache from an OSM `.pbf` extract. This is the
     /// slow, one-time offline preprocessing step (seconds for a city,
-    /// minutes for a country). `profile` is "car" | "bicycle" | "foot".
+    /// minutes for a country). `profile` is "car" | "bicycle" | "foot" — or a
+    /// path to a `.profile` file (per-class speeds, allow/block, penalties).
     /// Returns a dict with the output paths and graph size.
     /// `progress` (default True) prints the engine's parse/CH progress to
     /// stdout — pass False to silence it (e.g. when driving the library from
     /// another program). `force=False` reuses an existing `.pp`+`.ch` cache
     /// instead of rebuilding, so repeated calls return instantly.
+    ///
+    /// `costing` is the fully programmable path (the Lua-script equivalent):
+    /// a Python callable `f(highway: str, maxspeed_kmh: float | None) ->
+    /// float | None`, called per OSM way at build time. Return a speed in
+    /// km/h to decide the way outright, or `None` to fall through to the
+    /// profile's declarative rules. The callable crosses the GIL per way, so
+    /// a custom-costing build runs slower than a declarative one — fine for
+    /// a one-off preprocessing step. Caches are named after the profile
+    /// (`<map>.<name>.pp/.ch`); give distinct costing builds distinct names
+    /// via a `.profile` file's `name =`, or successive builds with the same
+    /// base overwrite each other.
     #[staticmethod]
-    #[pyo3(signature = (pbf, profile = "car", progress = true, force = false, keep_csr = false))]
+    #[pyo3(signature = (pbf, profile = "car", progress = true, force = false, keep_csr = false, costing = None))]
     fn build<'py>(
         py: Python<'py>,
         pbf: &str,
@@ -427,11 +439,37 @@ impl Router {
         progress: bool,
         force: bool,
         keep_csr: bool,
+        costing: Option<PyObject>,
     ) -> PyResult<Bound<'py, PyDict>> {
         // Builtin name or a path to a custom `.profile` file (per-class
         // speeds, allow/block, penalties — the Lua-profile equivalent).
-        let prof = dijeng::osm_profile::ProfileSpec::from_arg(profile)
+        let mut prof = dijeng::osm_profile::ProfileSpec::from_arg(profile)
             .map_err(PyRuntimeError::new_err)?;
+        if let Some(cb) = costing {
+            // Wrap the Python callable as the profile's speed_fn hook; each
+            // call re-acquires the GIL (the build itself runs without it).
+            use dijeng::osm_profile::{CustomProfile, ProfileSpec};
+            let mut custom = match &prof {
+                ProfileSpec::Custom(c) => (**c).clone(),
+                ProfileSpec::Builtin(b) => CustomProfile {
+                    name: b.name().to_string(),
+                    base: Some(*b),
+                    speed_factor: 1.0,
+                    respect_maxspeed: true,
+                    ..Default::default()
+                },
+            };
+            custom.speed_fn = Some(std::sync::Arc::new(move |highway, maxspeed| {
+                Python::with_gil(|py| {
+                    let res = cb.call1(py, (highway, maxspeed)).ok()?;
+                    if res.is_none(py) {
+                        return None;
+                    }
+                    res.extract::<f32>(py).ok()
+                })
+            }));
+            prof = ProfileSpec::from(custom);
+        }
         let pbf_owned = pbf.to_string();
         // The whole pipeline (parse → preprocess → CH) runs in-process in the
         // shared `dijeng::build` helper; release the GIL for it. The .csr
