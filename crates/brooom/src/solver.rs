@@ -567,11 +567,41 @@ fn solve_scalar_with_extra_global(
         let avg_route_len = assigned as f64 / routes as f64;
         let min_len: f64 = std::env::var("BROOOM_HGS_MIN_ROUTELEN")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(8.0);
+        // Second signal: TIME-WINDOW SLACK. The route-length proxy misses
+        // instances with mid-size routes but wide windows (real-map CVRPTW:
+        // ~6 stops/route, 3 h windows on a 12 h horizon — measured on
+        // sf_s11_n80: forcing HGS closed the PyVRP gap +0.65% → +0.06%).
+        // Windows ≥ `tw_frac` of the vehicle horizon leave Split/SREX room to
+        // re-partition, which is what HGS exploits; tight-window R1/RC1 sit
+        // at ~4% and stay on the protected pure-ILS path.
+        let tw_frac_min: f64 = std::env::var("BROOOM_HGS_TW_FRAC")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(0.15);
+        let horizon = {
+            let vw = problem.vehicles[0].time_window();
+            ((vw.end - vw.start).max(1)) as f64
+        };
+        let avg_tw_frac = if problem.jobs.is_empty() {
+            1.0
+        } else {
+            let sum: f64 = problem
+                .jobs
+                .iter()
+                .map(|j| match j.time_windows.first() {
+                    Some(w) => ((w.end - w.start) as f64 / horizon).min(1.0),
+                    None => 1.0, // no window = fully flexible
+                })
+                .sum();
+            sum / problem.jobs.len() as f64
+        };
+        let on = avg_route_len >= min_len || avg_tw_frac >= tw_frac_min;
         if config.verbose {
-            eprintln!("brooom: HGS gate — greedy avg route len {:.1} (min {:.1}) ⇒ HGS {}",
-                avg_route_len, min_len, if avg_route_len >= min_len { "ON" } else { "off" });
+            eprintln!(
+                "brooom: HGS gate — greedy avg route len {:.1} (min {:.1}), avg TW width {:.0}% of horizon (min {:.0}%) ⇒ HGS {}",
+                avg_route_len, min_len, avg_tw_frac * 100.0, tw_frac_min * 100.0,
+                if on { "ON" } else { "off" }
+            );
         }
-        avg_route_len >= min_len
+        on
     } else {
         false
     };

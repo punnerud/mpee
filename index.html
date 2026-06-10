@@ -753,14 +753,16 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
     <table>
       <thead><tr><th>Solver</th><th>Cost</th><th>Δ vs best</th><th>Time</th></tr></thead>
       <tbody>
-        <tr><td><b>brooom (MPEE)</b></td><td>28218</td><td>+2.1%</td><td><b>1.9 s</b></td></tr>
+        <tr><td><b>brooom (MPEE)</b></td><td><b>27648</b></td><td><b>+0.06%</b></td><td>10 s (27 648 already at 6 s)</td></tr>
         <tr><td>OR-Tools</td><td>28105</td><td>+1.7%</td><td>10 s</td></tr>
         <tr><td>PyVRP (HGS)</td><td><b>27632</b></td><td>+0.0%</td><td>10 s</td></tr>
       </tbody>
     </table>
     <p class="muted" style="font-size:.88rem">
-      Same story on real roads: ~2% behind HGS on quality, but the answer lands in
-      <b>1.9 s vs 10 s</b>. Reproduce exactly:
+      Same story on real roads as on Solomon: brooom ties HGS-class quality
+      (+0.06% — was +2.1% before the time-window-aware HGS gate let the
+      population search run on real-map instances), and already matches that at a
+      6 s budget. Reproduce exactly:
       <code>python3 gen_realmap.py --region sf --seed 11 --n 80 --matrix osrm --osrm-host &lt;host&gt;</code>
       then <code>run_multi_bench.py</code> over the result. Regions: sf, oslo,
       london, nyc. brooom can also share OSRM's matrix (<code>--routing osrm</code>)
