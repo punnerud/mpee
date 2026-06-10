@@ -189,6 +189,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "getrandom 0.2.17",
+ "matcodec",
  "ndarray",
  "ort",
  "pollster",

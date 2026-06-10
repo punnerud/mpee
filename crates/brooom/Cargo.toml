@@ -54,6 +54,7 @@ pyspell-python = ["pyspell", "dep:rustpython-parser"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+matcodec = { path = "../matcodec" }
 clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"
 rayon = { version = "1.10", optional = true }

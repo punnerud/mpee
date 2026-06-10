@@ -37,6 +37,18 @@ struct Cli {
     #[arg(short = 'i', long)]
     input: Option<String>,
 
+    /// Load the duration matrix from a matcodec `.mtz` blob (MTZS/MTZT/MTZU),
+    /// overriding the durations embedded in the input JSON (an embedded
+    /// distances matrix is kept). Decoded losslessly row-band by row-band; the
+    /// blob is typically 4–8× smaller than the JSON matrix it replaces.
+    #[arg(long = "matrix-mtz")]
+    matrix_mtz: Option<String>,
+
+    /// Optional distance matrix from a matcodec `.mtz` blob (meters),
+    /// complementing --matrix-mtz.
+    #[arg(long = "distances-mtz")]
+    distances_mtz: Option<String>,
+
     /// Output JSON file. Use `-` or omit for stdout.
     #[arg(short = 'o', long)]
     output: Option<String>,
@@ -455,6 +467,49 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             brooom::io::parse_input_reader_with_options(std::io::BufReader::new(f))?
         }
     };
+
+    // `--matrix-mtz`/`--distances-mtz`: decode matcodec blobs into the
+    // provided-matrix slot, so the solver runs on exactly the same numbers but
+    // the files shipped around are 4–8× smaller than the JSON matrices. An
+    // embedded distances matrix in the input is kept unless overridden.
+    if cli.matrix_mtz.is_some() || cli.distances_mtz.is_some() {
+        let load = |path: &str| -> Result<Vec<Vec<i64>>, Box<dyn std::error::Error>> {
+            let bytes = std::fs::read(path)?;
+            let mut rows: Vec<Vec<i64>> = Vec::new();
+            matcodec::decompress_rows(&bytes, |_, row| {
+                rows.push(row.iter().map(|&v| v as i64).collect());
+            })
+            .map_err(|e| format!("{path}: {e}"))?;
+            Ok(rows)
+        };
+        let profile = problem
+            .vehicles
+            .first()
+            .map(|v| v.profile.clone())
+            .unwrap_or_else(|| "car".to_string());
+        let prior = problem.matrices.remove(&profile);
+        let durations = match &cli.matrix_mtz {
+            Some(p) => {
+                let d = load(p)?;
+                if cli.verbose {
+                    eprintln!("[matrix] {}x{} durations from {p}", d.len(), d.first().map(|r| r.len()).unwrap_or(0));
+                }
+                d
+            }
+            None => prior
+                .as_ref()
+                .map(|m| m.durations.clone())
+                .ok_or("--distances-mtz without --matrix-mtz needs a durations matrix in the input")?,
+        };
+        let distances = match &cli.distances_mtz {
+            Some(p) => Some(load(p)?),
+            None => prior.and_then(|m| m.distances),
+        };
+        problem.matrices.insert(
+            profile,
+            brooom::problem::ProvidedMatrix { durations, distances },
+        );
+    }
 
     // Build the effective solver options by merging, in increasing precedence:
     //   1. the input JSON's `options` object,
