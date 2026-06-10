@@ -3,9 +3,9 @@
 //!
 //! Each matrix row is produced on demand as one CH one-to-many query
 //! (`ch::matrix` with a single source → all targets); `matcodec` pulls rows
-//! through the [`matcodec::RowSource`] trait and writes the streamed `MTZT`
-//! container (resident gateway index + residual-only frames). Peak memory is
-//! the L resident landmark rows + the n×L gateway index + one working row —
+//! through the [`matcodec::RowSource`] trait and writes the streamed `MTZU`
+//! container (directional path labels + varint residual frames). Peak memory
+//! is the candidate rows used for hub mining + the labels + one working row —
 //! independent of n². This is the "rest of the world" path: a matrix far
 //! larger than RAM can be compressed by computing it block/row at a time from
 //! the contraction hierarchy.
@@ -83,17 +83,15 @@ fn main() {
     let n = ids.len();
     assert!(n >= 2, "need at least 2 nodes");
 
-    // Landmarks for the bridge model: evenly spread row indices. (No full matrix
-    // exists to do farthest-point sampling, so we spread across the point set —
-    // good enough; the residual is exact either way, only the ratio shifts.)
-    let mut l = 32usize;
+    // Path-label model (MTZU): hubs are mined from candidate rows fetched via
+    // RowSource random access, so no full matrix is ever needed. --landmarks L
+    // maps to the hub count for backwards compatibility.
+    let mut opts = matcodec::HubOpts::default();
     if let Some(p) = args.iter().position(|a| a == "--landmarks") {
         if let Some(v) = args.get(p + 1) {
-            l = v.parse().unwrap_or(32);
+            opts.hubs = v.parse().unwrap_or(opts.hubs);
         }
     }
-    l = l.min(n - 1).max(1);
-    let lm: Vec<usize> = (0..l).map(|k| (k * n) / l).collect();
 
     let mut src = ChRowSource { ch, ids };
     let dump = args
@@ -130,20 +128,21 @@ fn main() {
         eprintln!("dumped full matrix to {dp} (comparison only; streaming itself never materialises)");
         let mut sbuf = matcodec::SliceRows { d: &full, n };
         let mut out = BufWriter::new(fs::File::create(&args[3]).expect("create out.mtz"));
-        matcodec::compress_stream(&mut sbuf, &lm, &mut out).expect("compress_stream")
+        matcodec::compress_stream_hub(&mut sbuf, &opts, &mut out).expect("compress_stream")
     } else {
         // Pure streaming: rows pulled on demand from the CH, n² never held.
         let mut out = BufWriter::new(fs::File::create(&args[3]).expect("create out.mtz"));
-        matcodec::compress_stream(&mut src, &lm, &mut out).expect("compress_stream")
+        matcodec::compress_stream_hub(&mut src, &opts, &mut out).expect("compress_stream")
     };
 
     let sz = fs::metadata(&args[3]).map(|m| m.len()).unwrap_or(0);
     let raw = (n as u64) * (n as u64) * 4;
     println!(
-        "stream-compressed {n}x{n} CH road matrix (never materialised): {} -> {} bytes ({:.2}x), L={l}",
+        "stream-compressed {n}x{n} CH road matrix (never materialised): {} -> {} bytes ({:.2}x), H={}",
         raw,
         sz,
-        raw as f64 / sz.max(1) as f64
+        raw as f64 / sz.max(1) as f64,
+        opts.hubs
     );
     for w in rep.warnings() {
         eprintln!("{w}");

@@ -126,6 +126,22 @@ fn main() {
             let rep = matcodec::validate(&d, n);
             print_report(&rep);
             if rest.iter().any(|a| a == "--stream") {
+                // MTZU: path-label container (resident query index, varint frames)
+                let mut src = matcodec::SliceRows { d: &d, n };
+                let mut f = std::io::BufWriter::new(fs::File::create(&args[3]).unwrap());
+                matcodec::compress_stream_hub(&mut src, &matcodec::HubOpts::default(), &mut f)
+                    .unwrap();
+                drop(f);
+                let sz = fs::metadata(&args[3]).map(|m| m.len()).unwrap_or(0);
+                println!(
+                    "compressed (stream, path-label MTZU) N={n}: {} -> {} bytes ({:.2}x)",
+                    raw,
+                    sz,
+                    raw as f64 / sz.max(1) as f64
+                );
+            } else if rest.iter().any(|a| a == "--stream-mtzt") {
+                // legacy landmark container (kept for strongly gateway-structured
+                // matrices where full pivot mining wins)
                 let l = parse_landmarks(rest, n);
                 let lm = matcodec::pick_landmarks(&d, n, l);
                 let mut src = matcodec::SliceRows { d: &d, n };

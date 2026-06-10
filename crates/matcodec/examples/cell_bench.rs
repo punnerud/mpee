@@ -87,6 +87,75 @@ fn bench(name: &str, d: &[i32], n: usize, l: usize, probes: usize) {
         pick_t.as_secs_f64()
     );
 
+    // ---- MTZU (path labels) on the same matrix ----
+    {
+        let t = Instant::now();
+        let mut src = SliceRows { d, n };
+        let mut hub_blob = Vec::new();
+        let mut hub_opts = matcodec::HubOpts::default();
+        if let Ok(c) = std::env::var("HUB_C") {
+            hub_opts.candidates = c.parse().unwrap_or(hub_opts.candidates);
+        }
+        if let Ok(s) = std::env::var("HUB_S") {
+            hub_opts.samples_per_row = s.parse().unwrap_or(hub_opts.samples_per_row);
+        }
+        matcodec::compress_stream_hub(&mut src, &hub_opts, &mut hub_blob)
+            .expect("compress hub");
+        let enc_t = t.elapsed();
+        let mut rd = MtzReader::open(hub_blob.clone(), 64).expect("open hub");
+        println!(
+            "  MTZU: blob {:.2} MB ({:.2}x)   resident {:.2} MB   encode {:.1}s   index-exact {:.0}%   tol 2/5/15/60: {:.0}%/{:.0}%/{:.0}%/{:.0}%",
+            hub_blob.len() as f64 / 1e6,
+            raw as f64 / hub_blob.len() as f64,
+            rd.resident_bytes() as f64 / 1e6,
+            enc_t.as_secs_f64(),
+            100.0 * rd.exact_index_block_share(),
+            100.0 * rd.index_share_within(2),
+            100.0 * rd.index_share_within(5),
+            100.0 * rd.index_share_within(15),
+            100.0 * rd.index_share_within(60),
+        );
+        let mut s: u64 = 1234567;
+        let mut next = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((s >> 33) as usize) % n
+        };
+        let mut err = 0usize;
+        let t = Instant::now();
+        let mut sink = 0i64;
+        for _ in 0..probes {
+            let (i, j) = (next(), next());
+            let v = rd.cell(i, j).expect("hub cell");
+            sink += v as i64;
+            if v != d[i * n + j] {
+                err += 1;
+            }
+        }
+        let exact_t = t.elapsed();
+        assert_eq!(err, 0, "MTZU lookup mismatch");
+        let t = Instant::now();
+        for _ in 0..probes {
+            let (i, j) = (next(), next());
+            sink += rd.cell_within(i, j, 5).expect("hub within") as i64;
+        }
+        let within_t = t.elapsed();
+        let t = Instant::now();
+        for _ in 0..probes {
+            let (i, j) = (next(), next());
+            let (lo, up) = rd.cell_bounds(i, j);
+            sink += (lo as i64) ^ (up as i64);
+        }
+        let bounds_t = t.elapsed();
+        std::hint::black_box(sink);
+        let per = |dt: std::time::Duration| dt.as_nanos() as f64 / probes as f64;
+        println!(
+            "  MTZU: cell() {:.0} ns/op   cell_within(5) {:.0} ns/op   cell_bounds() {:.0} ns/op",
+            per(exact_t),
+            per(within_t),
+            per(bounds_t)
+        );
+    }
+
     // pseudo-random probe sequence, identical for both passes
     let mk_probes = || {
         let mut s: u64 = 1234567;
@@ -203,7 +272,6 @@ fn bench_mtz(path: &str, probes: usize) {
     let open_t = t.elapsed();
     let n = rd.n();
     let l = rd.landmarks().len();
-    let resident = 2 * l * n * 4 + l * n + 2 * n;
     println!("\n== reader-only {path}  n={n} L={l} ==");
     println!(
         "  blob {:.1} MB (raw would be {:.1} MB, {:.2}x)   open {:.2}s   resident index {:.1} MB",
@@ -211,7 +279,7 @@ fn bench_mtz(path: &str, probes: usize) {
         (n * n * 4) as f64 / 1e6,
         (n * n * 4) as f64 / blob_len as f64,
         open_t.as_secs_f64(),
-        resident as f64 / 1e6
+        rd.resident_bytes() as f64 / 1e6
     );
     println!(
         "  index-exact: {:.0}% of blocks   within tol 2/5/15/60: {:.0}%/{:.0}%/{:.0}%/{:.0}%",
