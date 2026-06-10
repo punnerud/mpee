@@ -803,6 +803,32 @@ fn recompute_fitness(pop: &mut [Indiv]) -> usize {
     by_cost[0]
 }
 
+
+/// Education seeding for SREX children: routes inherited *verbatim* from a
+/// parent were LS-converged there — only the rebuilt/mixed routes need
+/// re-probing. Returns the UNSETTLED set (tasks in routes that match neither
+/// parent), so education costs O(changed region), not O(N). OX+Split children
+/// rebuild every route and keep full education.
+fn srex_unsettled(
+    child: &Solution,
+    pa: &Solution,
+    pb: &Solution,
+) -> std::collections::HashSet<TaskRef> {
+    let mut parent_routes: HashSet<&[TaskRef]> = HashSet::new();
+    for r in pa.routes.iter().chain(pb.routes.iter()) {
+        if !r.steps.is_empty() {
+            parent_routes.insert(r.steps.as_slice());
+        }
+    }
+    let mut unsettled = std::collections::HashSet::new();
+    for r in &child.routes {
+        if !r.steps.is_empty() && !parent_routes.contains(r.steps.as_slice()) {
+            unsettled.extend(r.steps.iter().copied());
+        }
+    }
+    unsettled
+}
+
 /// Cull `pop` down to `mu` survivors by Vidal biased fitness. The best-cost
 /// member is always retained.
 fn cull(pop: &mut Vec<Indiv>, mu: usize) {
@@ -934,7 +960,7 @@ pub fn solve_genetic(
     // at 25 % of the phase budget; offspring grow the population back.
     let phase_start = Instant::now();
     let init_deadline = deadline
-        .map(|d| phase_start + d.saturating_duration_since(phase_start).mul_f64(0.25));
+        .map(|d| phase_start + d.saturating_duration_since(phase_start).mul_f64(0.15));
     let mut pop: Vec<Indiv> = Vec::with_capacity(max_pop);
     let mut push_educated = |pop: &mut Vec<Indiv>, mut sol: Solution, passes: usize| {
         // Normalise through Split (optimal partition of this ordering) then educate.
@@ -1034,6 +1060,10 @@ pub fn solve_genetic(
     // generations discovering it.
     let starved = pop.len() < mu;
     let mut edu_passes = if starved { 1 } else { max_passes };
+    // Starved regime: smaller offspring batches between culls keep selection
+    // pressure up when each education is expensive.
+    let lambda = if starved { lambda.min(20) } else { lambda };
+    let max_pop = mu + lambda;
     for gen in 0..max_gens {
         gen_count = gen;
         if let Some(d) = deadline {
@@ -1083,7 +1113,10 @@ pub fn solve_genetic(
             }));
             let child_opt = srex_crossover(&pop[pa].sol, &pb_sol, problem, matrix, &mut rng);
             let soft_child = child_opt.map(|mut c| {
-                local_search(problem, matrix, &mut c, edu_passes, granular);
+                let uns = srex_unsettled(&c, &pop[pa].sol, &pb_sol);
+                crate::local_search::local_search_seeded(
+                    problem, matrix, &mut c, edu_passes, granular, &uns,
+                );
                 c
             });
             crate::solution::set_soft_penalties(None);
@@ -1151,7 +1184,8 @@ pub fn solve_genetic(
         if pb == pa {
             pb = (pb + 1) % pop.len();
         }
-        let child_opt = if rng.gen_bool(srex_p) {
+        let used_srex = rng.gen_bool(srex_p);
+        let child_opt = if used_srex {
             // SREX keeps whole routes from both parents (no Split — the
             // partition IS the inherited structure).
             srex_crossover(&pop[pa].sol, &pop[pb].sol, problem, matrix, &mut rng)
@@ -1162,7 +1196,14 @@ pub fn solve_genetic(
         let Some(mut child) = child_opt else {
             continue;
         };
-        local_search(problem, matrix, &mut child, edu_passes, granular);
+        if used_srex {
+            let uns = srex_unsettled(&child, &pop[pa].sol, &pop[pb].sol);
+            crate::local_search::local_search_seeded(
+                problem, matrix, &mut child, edu_passes, granular, &uns,
+            );
+        } else {
+            local_search(problem, matrix, &mut child, edu_passes, granular);
+        }
         if !child.unassigned.is_empty() {
             continue;
         }
