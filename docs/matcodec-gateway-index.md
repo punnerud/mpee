@@ -130,6 +130,39 @@ mate kodeken fra dijengs *chunked* many-to-many (som genererer 100k × 100k på
 under 90 s, se README-tabellen) — formatet er klart for det, adapteren er ikke
 skrevet.
 
+## Lab: to kandidat-forbedringer målt (2026-06-10)
+
+`cargo run --release -p matcodec --example structure_lab -- <varint|pyramid> <matrix.json|gateway:N>`
+— måling uten formatendring.
+
+**1. Polyline-stil koding (delta + zigzag + varint før deflate): KLAR GEVINST.**
+Blob-størrelse mot dagens deflate-over-rå-i32, samme innhold, fortsatt tapsfritt:
+
+| Verden | I dag | Beste variant | Mindre |
+|---|--:|--:|--:|
+| Ekte London 2000² | 4,12 MB | 2,77 MB | **33 %** |
+| Ekte London 4000² | 15,08 MB | 9,71 MB | **36 %** |
+| Gateway 3000 | 2,04 MB | 1,46 MB | 28 % |
+| Gateway 6000 | 7,41 MB | 5,47 MB | 26 % |
+
+Det som virker: zigzag-varint **+ deflate** på residual-rammene (varint alene er
+*verre* enn deflate på ekte data), celle-gruppert kolonnerekkefølge med delta
+innen gruppen (best på ekte data; krever at dekoderen kjenner `cell_of`, som
+allerede avledes resident), og delta-langs-punkt for `dil` / celle-gruppert
+delta for `dlj` (halverer dlj). Oppslagsstiene påvirkes ikke — tabellene
+dekodes til flate arrays ved `open`. Gevinsten vokser med n på ekte data.
+
+**2. Naiv 2-nivå pyramide (k nærmeste huber + tett hub-matrise): NEGATIVT på
+ekte data.** Per byte taper den mot dagens flate pivot-tabell: på London 4000²
+gir pyr H=128/k=8 (386 KB resident) samme kvalitet som flat L=8 (296 KB), mens
+flat L=32 (1,2 MB) er langt foran begge. Årsaken er hub-*utvalget*: punktets k
+*nærmeste* huber er ikke hubene som ligger *på korteste vei* til målet — riktig
+"exit" avhenger av retningen. I gateway-verdenen (der nærmeste hub ofte ER
+gateway) vinner pyramiden per byte (70 % eksakt på 136 KB mot flat L=8: 65 % på
+222 KB) — som bekrefter at idéen står og faller på sti-bevisst hub-utvalg
+(CH-/hub-labeling-stil, eller veiklasse-noder fra dijeng-grafen), ikke på
+pyramide-strukturen i seg selv.
+
 ## Hva dette IKKE gjør (ennå)
 
 - brooms local search bruker fortsatt en tett in-RAM-matrise — matcodec sitter
