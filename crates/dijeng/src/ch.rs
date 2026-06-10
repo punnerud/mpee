@@ -31,12 +31,27 @@ use std::time::Instant;
 /// more shortcuts. Higher → slower, fewer shortcuts.
 const WITNESS_HOPS_LIMIT: u32 = 5;
 
-/// Stall-on-demand master switch (A/B: set DIJENG_NO_STALL=1 to disable).
-/// Read once — an env lookup per query would cost more than the stall scan.
+/// Stall-on-demand master switch (A/B: set DIJENG_NO_STALL=1 at process start,
+/// or toggle programmatically with [`set_stall`] — used by `ch_verify` to
+/// compare both modes in one process). A relaxed atomic load per query is
+/// noise next to the stall scans themselves.
+static STALL_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static STALL_ENV_APPLIED: std::sync::Once = std::sync::Once::new();
+
 #[inline]
 fn stall_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("DIJENG_NO_STALL").is_err())
+    STALL_ENV_APPLIED.call_once(|| {
+        if std::env::var("DIJENG_NO_STALL").is_ok() {
+            STALL_ON.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    STALL_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Override the stall-on-demand switch (returns the previous value).
+pub fn set_stall(enabled: bool) -> bool {
+    STALL_ENV_APPLIED.call_once(|| {});
+    STALL_ON.swap(enabled, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Stall-on-demand check for a node `u` popped at distance `d` in a search
@@ -648,6 +663,31 @@ pub fn query_with_path_into(
     }
 }
 
+/// Find the edge `from → target` in the half of `from`'s adjacency where the
+/// CH invariant says it must live: a shortcut's midpoint has LOWER rank than
+/// both endpoints, so `from → via` is a DOWNWARD edge of `from` and
+/// `via → to` is an UPWARD edge of `via`. Scanning only the right section
+/// halves the unpack probes. Falls back to the other section defensively
+/// (never expected; keeps unpacking correct even if an edge was misfiled).
+#[inline]
+fn find_edge(g: &CsrGraph, up_count: &[u32], from: u32, target: u32, upward: bool) -> Option<usize> {
+    let s = g.head[from as usize] as usize;
+    let e = g.head[from as usize + 1] as usize;
+    let mid = s + up_count[from as usize] as usize;
+    let (first, second) = if upward { (s..mid, mid..e) } else { (mid..e, s..mid) };
+    for k in first {
+        if g.edge_to[k] == target {
+            return Some(k);
+        }
+    }
+    for k in second {
+        if g.edge_to[k] == target {
+            return Some(k);
+        }
+    }
+    None
+}
+
 /// Recursively unpack a forward shortcut. Appends INTERMEDIATE vertices
 /// (excluding endpoints) to `out`.
 fn unpack_edge_fwd(
@@ -657,30 +697,18 @@ fn unpack_edge_fwd(
     to: u32,
     out: &mut Vec<u32>,
 ) {
-    let _ = to;
     let via = ch.via_fwd[edge_idx];
     if via == u32::MAX {
         // original edge — no intermediate
         return;
     }
-    // The shortcut went from→via→to. Find the two original/sub-shortcuts.
-    // Forward edge from→via (find in graph_fwd[from] looking at via).
-    let s = ch.graph_fwd.head[from as usize] as usize;
-    let e = ch.graph_fwd.head[from as usize + 1] as usize;
-    for k in s..e {
-        if ch.graph_fwd.edge_to[k] == via {
-            unpack_edge_fwd(ch, from, k, via, out);
-            break;
-        }
+    // The shortcut went from→via→to: from→via is downward, via→to is upward.
+    if let Some(k) = find_edge(&ch.graph_fwd, &ch.up_count_fwd, from, via, false) {
+        unpack_edge_fwd(ch, from, k, via, out);
     }
     out.push(via);
-    let s = ch.graph_fwd.head[via as usize] as usize;
-    let e = ch.graph_fwd.head[via as usize + 1] as usize;
-    for k in s..e {
-        if ch.graph_fwd.edge_to[k] == to {
-            unpack_edge_fwd(ch, via, k, to, out);
-            break;
-        }
+    if let Some(k) = find_edge(&ch.graph_fwd, &ch.up_count_fwd, via, to, true) {
+        unpack_edge_fwd(ch, via, k, to, out);
     }
 }
 
@@ -691,27 +719,16 @@ fn unpack_edge_bwd(
     to: u32,
     out: &mut Vec<u32>,
 ) {
-    let _ = to;
     let via = ch.via_bwd[edge_idx];
     if via == u32::MAX {
         return;
     }
-    let s = ch.graph_bwd.head[from as usize] as usize;
-    let e = ch.graph_bwd.head[from as usize + 1] as usize;
-    for k in s..e {
-        if ch.graph_bwd.edge_to[k] == via {
-            unpack_edge_bwd(ch, from, k, via, out);
-            break;
-        }
+    if let Some(k) = find_edge(&ch.graph_bwd, &ch.up_count_bwd, from, via, false) {
+        unpack_edge_bwd(ch, from, k, via, out);
     }
     out.push(via);
-    let s = ch.graph_bwd.head[via as usize] as usize;
-    let e = ch.graph_bwd.head[via as usize + 1] as usize;
-    for k in s..e {
-        if ch.graph_bwd.edge_to[k] == to {
-            unpack_edge_bwd(ch, via, k, to, out);
-            break;
-        }
+    if let Some(k) = find_edge(&ch.graph_bwd, &ch.up_count_bwd, via, to, true) {
+        unpack_edge_bwd(ch, via, k, to, out);
     }
 }
 
@@ -906,6 +923,11 @@ pub fn matrix_with_dist(
     // Each rayon worker owns its own scratch (dist arrays, heap, touched) and
     // its own accumulator of (vertex, s_idx, dur, dist) records. After the
     // parallel phase we radix-style scatter into a CSR-shaped bucket array.
+    // Stall-on-demand (Knopp et al. use it in the MMM sweeps too): a stalled
+    // vertex is on no shortest up-down path, so it gets NO bucket entry and no
+    // expansion — shrinking both the search and, crucially, the bucket lists
+    // the backward sweep has to scan.
+    let stall = stall_enabled();
     type FwdEntry = (u32, u32, f32, f32);
     let entries: Vec<FwdEntry> = srcs
         .par_iter()
@@ -936,6 +958,9 @@ pub fn matrix_with_dist(
 
                 while let Some(HItem { d, v: u }) = pop(&mut heap) {
                     if d > dist_dur[u as usize] {
+                        continue;
+                    }
+                    if stall && stalled(&ch.graph_bwd, &ch.up_count_bwd, &dist_dur, u, d) {
                         continue;
                     }
                     acc.push((u, s_idx as u32, d, dist_dist[u as usize]));
@@ -1024,6 +1049,9 @@ pub fn matrix_with_dist(
                 if d > dist_dur[u as usize] {
                     continue;
                 }
+                if stall && stalled(&ch.graph_fwd, &ch.up_count_fwd, dist_dur, u, d) {
+                    continue;
+                }
                 let head_u = bucket_head[u as usize] as usize;
                 let tail_u = bucket_head[u as usize + 1] as usize;
                 let dist_u_dist = dist_dist[u as usize];
@@ -1102,6 +1130,7 @@ pub fn matrix_with_dist_chunked<F>(
         "matrix_with_dist_chunked requires a dual-channel CH (SSSPCH1D)"
     );
     let chunk = src_chunk.max(1).min(n_src);
+    let stall = stall_enabled();
 
     let mut s_start = 0;
     while s_start < n_src {
@@ -1140,6 +1169,9 @@ pub fn matrix_with_dist_chunked<F>(
 
                     while let Some(HItem { d, v: u }) = pop(&mut heap) {
                         if d > dist_dur[u as usize] {
+                            continue;
+                        }
+                        if stall && stalled(&ch.graph_bwd, &ch.up_count_bwd, &dist_dur, u, d) {
                             continue;
                         }
                         acc.push((u, local_s_idx as u32, d, dist_dist[u as usize]));
@@ -1225,6 +1257,9 @@ pub fn matrix_with_dist_chunked<F>(
                     if d > dist_dur[u as usize] {
                         continue;
                     }
+                    if stall && stalled(&ch.graph_fwd, &ch.up_count_fwd, dist_dur, u, d) {
+                        continue;
+                    }
                     let head_u = bucket_head[u as usize] as usize;
                     let tail_u = bucket_head[u as usize + 1] as usize;
                     let dist_u_dist = dist_dist[u as usize];
@@ -1277,6 +1312,7 @@ pub fn matrix(ch: &ContractionHierarchy, srcs: &[u32], dsts: &[u32]) -> Vec<f32>
     if n_src == 0 || n_dst == 0 {
         return out;
     }
+    let stall = stall_enabled();
 
     // Forward sweep parallelised across sources; same fold-then-scatter
     // strategy as `matrix_with_dist`.
@@ -1306,6 +1342,9 @@ pub fn matrix(ch: &ContractionHierarchy, srcs: &[u32], dsts: &[u32]) -> Vec<f32>
 
                 while let Some(HItem { d, v: u }) = pop(&mut heap) {
                     if d > dist[u as usize] {
+                        continue;
+                    }
+                    if stall && stalled(&ch.graph_bwd, &ch.up_count_bwd, &dist, u, d) {
                         continue;
                     }
                     acc.push((u, s_idx as u32, d));
@@ -1381,6 +1420,9 @@ pub fn matrix(ch: &ContractionHierarchy, srcs: &[u32], dsts: &[u32]) -> Vec<f32>
 
             while let Some(HItem { d, v: u }) = pop(heap) {
                 if d > dist[u as usize] {
+                    continue;
+                }
+                if stall && stalled(&ch.graph_fwd, &ch.up_count_fwd, dist, u, d) {
                     continue;
                 }
                 let head_u = bucket_head[u as usize] as usize;

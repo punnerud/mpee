@@ -23,11 +23,11 @@ address space instead of IPC or file exchange.
 | **Single p2p distance `ch::query_dist_into`** | **19.9 µs/call** | **50 k calls/s (1 thread)** — beats OSRM's ~30 µs |
 | Single p2p with full path `ch::query_with_path_into` | 62 µs/call | 16 k calls/s (1 thread) |
 | Single p2p in parallel (11 threads, reused scratch) | 14.6 µs effective | 68.6 k calls/s |
-| Matrix 5k × 5k dur+dist | 1.13 s | 22 M cells/s |
-| Matrix 10k × 10k dur+dist | 4.3 s | 23 M cells/s |
-| Matrix 30k × 30k dur+dist | 159 s | 5.7 M cells/s |
-| **Matrix 50k × 50k dur+dist (chunked, 500 MB cap)** | **94 s** | **26.6 M cells/s** |
-| Matrix 100k × 100k dur+dist | 1098 s | 9.1 M cells/s |
+| Matrix 5k × 5k dur+dist | 0.39 s | 64 M cells/s |
+| Matrix 10k × 10k dur+dist | 1.39 s | 72 M cells/s |
+| Matrix 30k × 30k dur+dist | 8.5 s | 106 M cells/s |
+| **Matrix 50k × 50k dur+dist (chunked, 500 MB cap)** | **29.5 s** | **84.8 M cells/s** |
+| Matrix 100k × 100k dur+dist | 1098 s | 9.1 M cells/s (pre-stall number, rerun pending) |
 | **K-NN 50k × K=160 (granular)** | **1.22 s** | 41 k srcs/s, 92 MB output |
 | FF-ordering 50k coords | 8.0 s | row permutation for streaming |
 | CH build (one-off, caches to disk) | **4.0 s** | 140 MB cache (edge-difference ordering; was 3–4 min) |
@@ -75,7 +75,7 @@ Correctness verified against full Dijeng on every benchmark (ε = 1e-3 relative)
                   └─┬──────────────┬───────────────┬───┘
                     │              │               │
         ch::query   │              │ knn_matrix    │ matrix_with_dist_chunked
-        (19.9 µs)   │              │ (1.22 s/50k)  │ (94 s/50k×50k)
+        (19.9 µs)   │              │ (1.22 s/50k)  │ (29.5 s/50k×50k)
                     ▼              ▼               ▼
               ┌─────────┐    ┌────────────┐  ┌─────────────────┐
               │ Single  │    │ Granular   │  │  Streaming      │
@@ -113,7 +113,8 @@ Naive approach: call `ch::query(src, dst)` for every (s,t) pair. For
 50k×50k = 2.5 billion calls × ~20 µs = 14 hours. Unworkable.
 
 Bucket-MMM (Knopp et al.) is O(forward_per_src + backward_per_dst +
-bucket_scans). For 50k×50k on London = **94 s in parallel**, ~3000×
+bucket_scans). For 50k×50k on London = **29.5 s in parallel** (stall-on-demand
+prunes both the sweeps and the bucket lists — it cut this from 94 s), ~3000×
 faster than the naive p2p loop.
 
 The algorithm:
@@ -199,10 +200,13 @@ profile keeps the unsuffixed names for backward compatibility.
 
 ### Memory-budget scan (50k × 50k, M3 Pro, 11 threads)
 
+(Scan ran pre-stall-on-demand; the relative budget/chunk trade-offs hold, the
+absolute times are ~3× lower now — chunk=576 re-measured at **29.5 s**.)
+
 | Budget cap | Plan | Actual peak | Time | Note |
 |---:|---|---:|---:|---|
 | 200 MB | chunk=112 | 192 MB | 296 s | tight — too-small chunks add batch overhead |
-| 500 MB | chunk=576 | 371 MB | **94 s** | **sweet spot** |
+| 500 MB | chunk=576 | 371 MB | **94 s → 29.5 s** | **sweet spot** |
 | 800 MB | chunk=1039 | 762 MB | 94 s | same perf, more headroom for other apps |
 | 1500 MB | chunk=1500 (capped) | 1057 MB | 95 s | saturated at chunk=1500 |
 
@@ -228,14 +232,17 @@ lose 4× to allocator contention in parallel workloads.
 
 ### Matrix scaling
 
+Re-measured with stall-on-demand where marked ✦; other rows are pre-stall
+(expect ~3–19× lower when rerun, the speedup grows with N).
+
 | Size | Time (random src) | Time (FF ordering) | Output | Peak |
 |---:|---:|---:|---:|---:|
 | 1k × 1k | 0.27 s | 0.27 s + 0.08 s ff | 8 MB | < 1 GB |
-| 5k × 5k | 1.13 s | 1.21 s + 0.5 s ff | 191 MB | < 1 GB |
-| 10k × 10k | 4.3 s | 4.3 s + 1.1 s ff | 763 MB | 1.6 GB |
+| 5k × 5k | **0.39 s** ✦ | 1.21 s + 0.5 s ff | 191 MB | < 1 GB |
+| 10k × 10k | **1.39 s** ✦ | 4.3 s + 1.1 s ff | 763 MB | 1.6 GB |
 | 20k × 20k | 50 s | 50 s + ~3 s ff | 3.0 GB | 3.9 GB |
-| 30k × 30k | 159 s | — | 6.8 GB | 8.2 GB |
-| **50k × 50k** | **94 s (chunked)** | **205 s + 8 s ff** | 19 GB (or streamed) | **2.5 GB** |
+| 30k × 30k | **8.5 s** ✦ | — | 6.8 GB | 8.2 GB |
+| **50k × 50k** | **29.5 s (chunked)** ✦ | 205 s + 8 s ff | 19 GB (or streamed) | **2.5 GB** |
 | 100k × 100k | 1098 s (chunked) | — | 76 GB (streamed) | 4.6 GB |
 
 For 50k+ chunked output is mandatory on a 36 GB machine. On a 64+ GB
@@ -265,8 +272,8 @@ Same machine (M3 Pro), London road network:
 | p2p query with full path (internal) | 62 µs | — |
 | p2p query (over HTTP) | n/a | ~780 µs |
 | /table 1000×1000 over HTTP | ~0.4 s (local, internal) | ~0.8 s |
-| /table 10k×10k dur+dist | 4.3 s | impractical (M-by-N matrix mode, no chunking) |
-| /table 50k×50k dur+dist | 94 s (chunked, 500 MB) | n/a (RAM OOM) |
+| /table 10k×10k dur+dist | 1.39 s | impractical (M-by-N matrix mode, no chunking) |
+| /table 50k×50k dur+dist | 29.5 s (chunked, 500 MB) | n/a (RAM OOM) |
 
 dijeng now wins the single-query race too (19.9 µs vs ~30 µs internal,
 stall-on-demand + edge-difference ordering — was 88 µs, 3× *slower*),
