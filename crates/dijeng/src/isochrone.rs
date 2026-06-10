@@ -166,7 +166,11 @@ fn trace_rings(mask: &[bool], rows: usize, cols: usize) -> Vec<Vec<(usize, usize
             }
         }
     }
-    // Chain segments into rings.
+    // Chain segments into rings. At a SADDLE corner (two filled cells touching
+    // diagonally share the corner, so two outgoing segments) the correct
+    // continuation is the LEFT turn relative to the incoming direction — that
+    // keeps the filled region on the same side and keeps the two rings
+    // separate instead of merging them into a figure-eight.
     let mut rings = Vec::new();
     let mut used = 0usize;
     while used < n_segments {
@@ -176,11 +180,28 @@ fn trace_rings(mask: &[bool], rows: usize, cols: usize) -> Vec<Vec<(usize, usize
         };
         let mut ring = vec![start];
         let mut cur = start;
+        let mut prev: Option<(usize, usize)> = None;
         loop {
             let Some(outs) = next.get_mut(&cur) else { break };
-            let Some(nxt) = outs.pop() else { break };
+            if outs.is_empty() {
+                break;
+            }
+            let idx = match prev {
+                Some(p) if outs.len() > 1 => {
+                    let dir = (cur.0 as isize - p.0 as isize, cur.1 as isize - p.1 as isize);
+                    let want = (dir.1, -dir.0); // left turn
+                    outs.iter()
+                        .position(|&n| {
+                            (n.0 as isize - cur.0 as isize, n.1 as isize - cur.1 as isize) == want
+                        })
+                        .unwrap_or(outs.len() - 1)
+                }
+                _ => outs.len() - 1,
+            };
+            let nxt = outs.swap_remove(idx);
             used += 1;
             ring.push(nxt);
+            prev = Some(cur);
             cur = nxt;
             if cur == start {
                 break;
