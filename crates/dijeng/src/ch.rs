@@ -624,43 +624,229 @@ pub fn query_with_path_into(
             return None;
         }
 
-        // ---- Forward path: src → meet ----
-        let mut fwd_edges: Vec<(u32, u32, u32)> = Vec::with_capacity(64);
-        let mut cur = meet;
-        while cur != src && cur != u32::MAX {
-            let (prev, edge_idx) = parent_f[cur as usize];
-            if prev == u32::MAX {
-                break;
-            }
-            fwd_edges.push((prev, edge_idx, cur));
-            cur = prev;
-        }
-        fwd_edges.reverse();
-
-        scratch.path.push(src);
-        for &(from, idx, to) in &fwd_edges {
-            unpack_edge_fwd(ch, from, idx as usize, to, &mut scratch.path);
-            scratch.path.push(to);
-        }
-
-        // ---- Backward path: meet → dst ----
-        let mut cur = meet;
-        let mut tmp: Vec<u32> = Vec::with_capacity(64);
-        while cur != dst && cur != u32::MAX {
-            let (prev, edge_idx) = parent_b[cur as usize];
-            if prev == u32::MAX {
-                break;
-            }
-            tmp.clear();
-            unpack_edge_bwd(ch, prev, edge_idx as usize, cur, &mut tmp);
-            tmp.reverse();
-            scratch.path.extend_from_slice(&tmp);
-            scratch.path.push(prev);
-            cur = prev;
-        }
-
+        assemble_path(ch, &scratch.parent_f, &scratch.parent_b, src, dst, meet, &mut scratch.path);
         Some(best)
     }
+}
+
+/// Assemble the unpacked vertex path src → meet → dst from the two parent
+/// arrays a bidirectional search produced. Appends into `out`.
+fn assemble_path(
+    ch: &ContractionHierarchy,
+    parent_f: &[(u32, u32)],
+    parent_b: &[(u32, u32)],
+    src: u32,
+    dst: u32,
+    meet: u32,
+    out: &mut Vec<u32>,
+) {
+    // ---- Forward path: src → meet ----
+    let mut fwd_edges: Vec<(u32, u32, u32)> = Vec::with_capacity(64);
+    let mut cur = meet;
+    while cur != src && cur != u32::MAX {
+        let (prev, edge_idx) = parent_f[cur as usize];
+        if prev == u32::MAX {
+            break;
+        }
+        fwd_edges.push((prev, edge_idx, cur));
+        cur = prev;
+    }
+    fwd_edges.reverse();
+
+    out.push(src);
+    for &(from, idx, to) in &fwd_edges {
+        unpack_edge_fwd(ch, from, idx as usize, to, out);
+        out.push(to);
+    }
+
+    // ---- Backward path: meet → dst ----
+    let mut cur = meet;
+    let mut tmp: Vec<u32> = Vec::with_capacity(64);
+    while cur != dst && cur != u32::MAX {
+        let (prev, edge_idx) = parent_b[cur as usize];
+        if prev == u32::MAX {
+            break;
+        }
+        tmp.clear();
+        unpack_edge_bwd(ch, prev, edge_idx as usize, cur, &mut tmp);
+        tmp.reverse();
+        out.extend_from_slice(&tmp);
+        out.push(prev);
+        cur = prev;
+    }
+}
+
+/// Alternative routes via the PLATEAU/via-node method (Abraham et al.):
+/// every vertex settled in both directions of the bidirectional search is a
+/// candidate "via"; its route is the best src→via→dst path. Candidates are
+/// kept when they are (a) not much longer than the optimum
+/// (`total ≤ best × (1 + max_stretch)`) and (b) sufficiently different from
+/// every already-accepted route (edge sharing ≤ `max_share`).
+///
+/// Returns `(distance, path)` per route, best first — `alts + 1` routes max.
+pub fn query_alternatives(
+    ch: &ContractionHierarchy,
+    src: u32,
+    dst: u32,
+    scratch: &mut PathScratch,
+    alts: usize,
+    max_stretch: f32,
+    max_share: f32,
+) -> Vec<(f32, Vec<u32>)> {
+    // Re-run the search, collecting every double-settled vertex. (Same loop as
+    // query_with_path_into; collecting on the existing path would cost the hot
+    // route query a branch per pop, so alternatives pay for their own search.)
+    scratch.reset();
+    if src == dst || alts == 0 {
+        return match query_with_path_into(ch, src, dst, scratch) {
+            Some(d) => vec![(d, scratch.path.clone())],
+            None => Vec::new(),
+        };
+    }
+    let mut meets: Vec<(u32, f32)> = Vec::new();
+    let mut best = INF;
+    let mut best_meet = u32::MAX;
+    {
+        let dist_f = &mut scratch.dist_f;
+        let dist_b = &mut scratch.dist_b;
+        let parent_f = &mut scratch.parent_f;
+        let parent_b = &mut scratch.parent_b;
+        let touched_f = &mut scratch.touched_f;
+        let touched_b = &mut scratch.touched_b;
+        let hf = &mut scratch.hf;
+        let hb = &mut scratch.hb;
+        dist_f[src as usize] = 0.0;
+        touched_f.push(src);
+        dist_b[dst as usize] = 0.0;
+        touched_b.push(dst);
+        push(hf, 0.0, src);
+        push(hb, 0.0, dst);
+        let stall = stall_enabled();
+        // Search slightly past optimality so longer-but-different candidates
+        // surface: keep popping until the frontier exceeds best × (1+stretch).
+        loop {
+            let tf = hf.first().map(|h| h.d).unwrap_or(INF);
+            let tb = hb.first().map(|h| h.d).unwrap_or(INF);
+            let horizon = if best.is_finite() { best * (1.0 + max_stretch) } else { INF };
+            if tf >= horizon && tb >= horizon {
+                break;
+            }
+            if hf.is_empty() && hb.is_empty() {
+                break;
+            }
+            if tf <= tb && !hf.is_empty() {
+                let HItem { d, v: u } = pop(hf).unwrap();
+                if d > dist_f[u as usize] {
+                    continue;
+                }
+                let total = d + dist_b[u as usize];
+                if total.is_finite() {
+                    meets.push((u, total));
+                    if total < best {
+                        best = total;
+                        best_meet = u;
+                    }
+                }
+                if d >= horizon {
+                    continue;
+                }
+                if stall && stalled(&ch.graph_bwd, &ch.up_count_bwd, dist_f, u, d) {
+                    continue;
+                }
+                let s = ch.graph_fwd.head[u as usize] as usize;
+                let up_end = s + ch.up_count_fwd[u as usize] as usize;
+                for k in s..up_end {
+                    let v = ch.graph_fwd.edge_to[k];
+                    let nd = d + ch.graph_fwd.edge_w[k];
+                    if nd < dist_f[v as usize] {
+                        if dist_f[v as usize] == INF {
+                            touched_f.push(v);
+                        }
+                        dist_f[v as usize] = nd;
+                        parent_f[v as usize] = (u, k as u32);
+                        push(hf, nd, v);
+                    }
+                }
+            } else if !hb.is_empty() {
+                let HItem { d, v: u } = pop(hb).unwrap();
+                if d > dist_b[u as usize] {
+                    continue;
+                }
+                let total = d + dist_f[u as usize];
+                if total.is_finite() {
+                    meets.push((u, total));
+                    if total < best {
+                        best = total;
+                        best_meet = u;
+                    }
+                }
+                if d >= horizon {
+                    continue;
+                }
+                if stall && stalled(&ch.graph_fwd, &ch.up_count_fwd, dist_b, u, d) {
+                    continue;
+                }
+                let s = ch.graph_bwd.head[u as usize] as usize;
+                let up_end = s + ch.up_count_bwd[u as usize] as usize;
+                for k in s..up_end {
+                    let v = ch.graph_bwd.edge_to[k];
+                    let nd = d + ch.graph_bwd.edge_w[k];
+                    if nd < dist_b[v as usize] {
+                        if dist_b[v as usize] == INF {
+                            touched_b.push(v);
+                        }
+                        dist_b[v as usize] = nd;
+                        parent_b[v as usize] = (u, k as u32);
+                        push(hb, nd, v);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    if !best.is_finite() {
+        return Vec::new();
+    }
+
+    // Best route first.
+    let mut routes: Vec<(f32, Vec<u32>)> = Vec::with_capacity(alts + 1);
+    let mut path = Vec::new();
+    assemble_path(ch, &scratch.parent_f, &scratch.parent_b, src, dst, best_meet, &mut path);
+    let edge_set = |p: &[u32]| -> std::collections::HashSet<(u32, u32)> {
+        p.windows(2).map(|w| (w[0], w[1])).collect()
+    };
+    let mut accepted_edges = vec![edge_set(&path)];
+    routes.push((best, path));
+
+    // Candidate vias by total, deduped.
+    meets.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    meets.dedup_by_key(|m| m.0);
+    let limit = best * (1.0 + max_stretch);
+    for &(via, total) in &meets {
+        if routes.len() > alts {
+            break;
+        }
+        if via == best_meet || total > limit {
+            continue;
+        }
+        let mut p = Vec::new();
+        assemble_path(ch, &scratch.parent_f, &scratch.parent_b, src, dst, via, &mut p);
+        if p.len() < 2 {
+            continue;
+        }
+        let es = edge_set(&p);
+        let too_similar = accepted_edges.iter().any(|acc| {
+            let common = es.iter().filter(|e| acc.contains(e)).count();
+            (common as f32) / (es.len().max(1) as f32) > max_share
+        });
+        if too_similar {
+            continue;
+        }
+        accepted_edges.push(es);
+        routes.push((total, p));
+    }
+    routes
 }
 
 /// Find the edge `from → target` in the half of `from`'s adjacency where the
