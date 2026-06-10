@@ -90,6 +90,11 @@ enum Cmd {
         /// Keep the intermediate .csr file (default: delete it to save disk).
         #[arg(long)]
         keep_csr: bool,
+        /// Directory of SRTM `.hgt` elevation tiles. Writes a `.elev` sidecar
+        /// and applies hill-aware travel times for bicycle/foot/custom
+        /// profiles (use --force when adding/removing the DEM).
+        #[arg(long)]
+        dem: Option<PathBuf>,
     },
 
     /// Solve a Vroom-compatible problem in-process against a CH cache.
@@ -247,7 +252,7 @@ fn main() -> Result<()> {
             cmd_gen(&region, center, radius_km, n_jobs, n_vehicles, capacity, seed, &output)
         }
         Cmd::Download { region, out_dir } => cmd_download(&region, &out_dir),
-        Cmd::Build { pbf, profile, quiet, force, keep_csr } => cmd_build(&pbf, &profile, !quiet, force, keep_csr),
+        Cmd::Build { pbf, profile, quiet, force, keep_csr, dem } => cmd_build(&pbf, &profile, !quiet, force, keep_csr, dem.as_deref()),
         Cmd::Solve {
             problem,
             cache,
@@ -520,7 +525,7 @@ fn cmd_download(region: &str, out_dir: &Path) -> Result<()> {
 // and parallelised. The unified CLI keeps them visible as one command.
 // -------------------------------------------------------------------------
 
-fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool, keep_csr: bool) -> Result<()> {
+fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool, keep_csr: bool, dem: Option<&Path>) -> Result<()> {
     // Build the cache IN-PROCESS via the shared dijeng helper — no
     // `cargo run` subprocess, no recompilation, and works as a distributed
     // binary (cargo/source not required). Same pipeline as Python's
@@ -535,7 +540,7 @@ fn cmd_build(pbf: &Path, profile: &str, progress: bool, force: bool, keep_csr: b
     );
     // cmd_build's own status lines go to stderr, so they survive `--quiet`
     // (which only silences the engine's stdout progress chatter).
-    let res = dijeng::build::build_cache(pbf, prof, progress, force, keep_csr).map_err(|e| anyhow::anyhow!(e))?;
+    let res = dijeng::build::build_cache_dem(pbf, prof, progress, force, keep_csr, dem).map_err(|e| anyhow::anyhow!(e))?;
     if res.cached {
         eprintln!("reused existing cache (pass --force to rebuild)");
     } else {

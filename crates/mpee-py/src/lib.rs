@@ -431,7 +431,7 @@ impl Router {
     /// via a `.profile` file's `name =`, or successive builds with the same
     /// base overwrite each other.
     #[staticmethod]
-    #[pyo3(signature = (pbf, profile = "car", progress = true, force = false, keep_csr = false, costing = None))]
+    #[pyo3(signature = (pbf, profile = "car", progress = true, force = false, keep_csr = false, costing = None, dem = None))]
     fn build<'py>(
         py: Python<'py>,
         pbf: &str,
@@ -440,6 +440,7 @@ impl Router {
         force: bool,
         keep_csr: bool,
         costing: Option<PyObject>,
+        dem: Option<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
         // Builtin name or a path to a custom `.profile` file (per-class
         // speeds, allow/block, penalties — the Lua-profile equivalent).
@@ -476,7 +477,14 @@ impl Router {
         // intermediate is deleted unless keep_csr (routing only needs .pp/.ch).
         let res = py
             .allow_threads(move || {
-                dijeng::build::build_cache(std::path::Path::new(&pbf_owned), prof, progress, force, keep_csr)
+                dijeng::build::build_cache_dem(
+                    std::path::Path::new(&pbf_owned),
+                    prof,
+                    progress,
+                    force,
+                    keep_csr,
+                    dem.as_deref().map(std::path::Path::new),
+                )
             })
             .map_err(PyRuntimeError::new_err)?;
 

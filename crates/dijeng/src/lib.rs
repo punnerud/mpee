@@ -48,6 +48,7 @@ pub mod synth;
 #[cfg(feature = "native")]
 pub mod varint;
 #[cfg(feature = "native")]
+pub mod elevation;
 pub mod isochrone;
 pub mod matching;
 pub mod trip;

@@ -92,6 +92,23 @@ pub fn build_cache(
     force: bool,
     keep_csr: bool,
 ) -> Result<BuildResult, String> {
+    build_cache_dem(pbf, profile, progress, force, keep_csr, None)
+}
+
+/// `build_cache` with an optional DEM directory of SRTM `.hgt` tiles. When
+/// given: every node's elevation is sampled into a `.elev` sidecar, and for
+/// gravity-sensitive profiles (anything except builtin car/motorcycle) edge
+/// travel times get the grade factor from `elevation::grade_time_factor` —
+/// hill-aware bicycle/foot routing. NOTE: cache reuse does not know whether
+/// an existing cache was DEM-built; pass `force = true` when switching.
+pub fn build_cache_dem(
+    pbf: &Path,
+    profile: impl Into<ProfileSpec>,
+    progress: bool,
+    force: bool,
+    keep_csr: bool,
+    dem: Option<&Path>,
+) -> Result<BuildResult, String> {
     use crate::{cache, cache_ch, cache_pp, ch, names, osm, preprocess::preprocess};
 
     let profile: ProfileSpec = profile.into();
@@ -141,11 +158,55 @@ pub fn build_cache(
         name_pool,
         street_nodes,
         addresses,
-    } = osm::load_osm_routing_par(pbf, profile).map_err(|e| format!("osm load: {e}"))?;
+    } = osm::load_osm_routing_par(pbf, profile.clone()).map_err(|e| format!("osm load: {e}"))?;
     if keep_csr {
         if let Err(e) = cache::save(&csr_path, &graph, &coords, edge_dist.as_slice()) {
             eprintln!("[build] failed to write .csr accelerator: {e}");
         }
+    }
+
+    // DEM: per-node elevations (for the .elev sidecar) and, for gravity-
+    // sensitive profiles, grade-adjusted edge times. Uses the parser's
+    // per-edge road distances, so no re-derivation of geometry.
+    let mut graph = graph;
+    let mut elev_old: Option<Vec<f32>> = None;
+    if let Some(dem_dir) = dem {
+        let dem = crate::elevation::Dem::open(dem_dir);
+        let elev: Vec<f32> = coords
+            .iter()
+            .map(|&(la, lo)| dem.sample(la as f64, lo as f64).unwrap_or(f32::NAN))
+            .collect();
+        let covered = elev.iter().filter(|v| v.is_finite()).count();
+        if progress {
+            println!(
+                "[build] DEM: {covered}/{} nodes covered ({:.1}%)",
+                elev.len(),
+                100.0 * covered as f64 / elev.len().max(1) as f64
+            );
+        }
+        let apply_grade = !matches!(
+            profile,
+            ProfileSpec::Builtin(Profile::Car) | ProfileSpec::Builtin(Profile::Motorcycle)
+        );
+        if apply_grade && !edge_dist.is_empty() {
+            let mut w: Vec<f32> = graph.edge_w.to_vec();
+            for u in 0..graph.n {
+                let s = graph.head[u] as usize;
+                let e = graph.head[u + 1] as usize;
+                for k in s..e {
+                    let v = graph.edge_to[k] as usize;
+                    let delta = elev[v] - elev[u];
+                    w[k] *= crate::elevation::grade_time_factor(delta, edge_dist[k]);
+                }
+            }
+            graph = crate::graph::CsrGraph {
+                n: graph.n,
+                head: graph.head,
+                edge_to: graph.edge_to,
+                edge_w: w.into(),
+            };
+        }
+        elev_old = Some(elev);
     }
 
     // delta = average edge weight / average degree (matches bench_pp / iOS).
@@ -213,6 +274,20 @@ pub fn build_cache(
     // only routing is needed — it never affects route/solve).
     if let Err(e) = names::save(&names_path, &new_name_id, &name_pool, &street_offsets, &street_node_flat) {
         eprintln!("[build] failed to write names sidecar: {e}");
+    }
+
+    // Elevation sidecar, permuted to the same node order as coords/.pp.
+    if let Some(elev) = &elev_old {
+        let mut new_elev = vec![f32::NAN; graph.n];
+        for old in 0..graph.n {
+            new_elev[pre.new_id[old] as usize] = elev[old];
+        }
+        let elev_path = PathBuf::from(format!("{base}.elev"));
+        if let Err(e) = crate::elevation::save_elev(&elev_path, &new_elev) {
+            eprintln!("[build] failed to write elevation sidecar: {e}");
+        } else if progress {
+            println!("[build] elevation sidecar: {}", elev_path.display());
+        }
     }
 
     // House-number address sidecar (independent of the routing graph — its own
