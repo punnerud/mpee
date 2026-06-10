@@ -205,8 +205,12 @@ fn handle(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
     }
 
     if let Some(rest) = path_only.strip_prefix("/route/v1/") {
-        return dispatch_with_profile(&mut stream, state, rest, |stream, svc, rest| {
-            handle_route(stream, svc, rest)
+        let query = match path.find('?') {
+            Some(i) => path[i + 1..].to_string(),
+            None => String::new(),
+        };
+        return dispatch_with_profile(&mut stream, state, rest, move |stream, svc, rest| {
+            handle_route(stream, svc, rest, &query)
         });
     }
 
@@ -342,7 +346,9 @@ fn handle_route(
     stream: &mut TcpStream,
     svc: &RoutingService,
     coords_part: &str,
+    query: &str,
 ) -> std::io::Result<()> {
+    let coords_part = coords_part.split('?').next().unwrap_or(coords_part);
     if coords_part.is_empty() {
         return write_response(
             stream,
@@ -375,7 +381,31 @@ fn handle_route(
     let (src_lat, src_lon) = waypoints[0];
     let (dst_lat, dst_lon) = waypoints[1];
 
+    // OSRM-style `alternatives=true` (≤2 extras) or `alternatives=N` (≤5).
+    let alts: usize = match query_param(query, "alternatives") {
+        Some("true") => 2,
+        Some(v) => v.parse::<usize>().unwrap_or(0).min(5),
+        None => 0,
+    };
+
     let t = Instant::now();
+    if alts > 0 {
+        let routes = svc.route_alternatives(src_lat, src_lon, dst_lat, dst_lon, alts, 0.25, 0.6);
+        let elapsed_us = t.elapsed().as_micros();
+        return match routes {
+            Some(rs) if !rs.is_empty() => {
+                let body = render_routes(&rs, elapsed_us);
+                write_response(stream, 200, "OK", "application/json", &body)
+            }
+            _ => {
+                let body = format!(
+                    r#"{{"code":"NoRoute","message":"no path between waypoints","elapsed_us":{}}}"#,
+                    t.elapsed().as_micros()
+                );
+                write_response(stream, 200, "OK", "application/json", &body)
+            }
+        };
+    }
     let route = svc.route(src_lat, src_lon, dst_lat, dst_lon);
     let elapsed_us = t.elapsed().as_micros();
 
@@ -1196,6 +1226,28 @@ fn render_table(
     }
     s.push_str(&format!("],\"elapsed_us\":{}}}", elapsed_us));
     s
+}
+
+/// OSRM-compatible multi-route body (best first, like `alternatives=true`).
+fn render_routes(rs: &[RouteResponse], elapsed_us: u128) -> String {
+    let routes: Vec<String> = rs
+        .iter()
+        .map(|r| {
+            let geom = polyline::encode(&r.geometry, 5);
+            format!(
+                r#"{{"distance":{dist:.1},"duration":{dur:.1},"weight":{dur:.1},"weight_name":"duration","geometry":{geom:?},"legs":[{{"distance":{dist:.1},"duration":{dur:.1},"summary":"","steps":[],"weight":{dur:.1}}}]}}"#,
+                dist = r.distance_m,
+                dur = r.duration_s,
+                geom = geom,
+            )
+        })
+        .collect();
+    let (slat, slon) = rs[0].source_snapped;
+    let (dlat, dlon) = rs[0].destination_snapped;
+    format!(
+        r#"{{"code":"Ok","routes":[{}],"waypoints":[{{"location":[{slon},{slat}],"name":""}},{{"location":[{dlon},{dlat}],"name":""}}],"elapsed_us":{elapsed_us}}}"#,
+        routes.join(","),
+    )
 }
 
 fn render_ok(r: &RouteResponse, elapsed_us: u128) -> String {

@@ -797,6 +797,59 @@ impl RoutingService {
             destination_snapped,
         })
     }
+
+    /// Best route plus up to `alts` alternatives (plateau/via-node method:
+    /// every double-settled vertex of the bidirectional search is a candidate
+    /// detour). Alternatives are ≤ `max_stretch` longer than the optimum
+    /// (e.g. 0.25) and share ≤ `max_share` of their edges with any
+    /// already-returned route (e.g. 0.6). Best route first.
+    pub fn route_alternatives(
+        &self,
+        src_lat: f32,
+        src_lon: f32,
+        dst_lat: f32,
+        dst_lon: f32,
+        alts: usize,
+        max_stretch: f32,
+        max_share: f32,
+    ) -> Option<Vec<RouteResponse>> {
+        let ch = self.ch.as_ref()?;
+        let src_csr = self.nearest_node(src_lat, src_lon);
+        let dst_csr = self.nearest_node(dst_lat, dst_lon);
+        let src_int = ch.perm[src_csr as usize];
+        let dst_int = ch.perm[dst_csr as usize];
+        let mut scratch = ch::PathScratch::new(ch.graph_fwd.n);
+        let routes = ch::query_alternatives(
+            ch, src_int, dst_int, &mut scratch, alts, max_stretch, max_share,
+        );
+        if routes.is_empty() {
+            return None;
+        }
+        let source_snapped = self.coords[src_csr as usize];
+        let destination_snapped = self.coords[dst_csr as usize];
+        Some(
+            routes
+                .into_iter()
+                .map(|(duration_s, path_internal)| {
+                    let geometry: Vec<(f32, f32)> = path_internal
+                        .iter()
+                        .map(|&iid| self.coords[self.inv_perm[iid as usize] as usize])
+                        .collect();
+                    let mut distance_m = 0.0_f32;
+                    for w in geometry.windows(2) {
+                        distance_m += haversine_m(w[0].0, w[0].1, w[1].0, w[1].1);
+                    }
+                    RouteResponse {
+                        distance_m,
+                        duration_s,
+                        geometry,
+                        source_snapped,
+                        destination_snapped,
+                    }
+                })
+                .collect(),
+        )
+    }
 }
 
 #[inline]
