@@ -157,11 +157,33 @@ ekte data.** Per byte taper den mot dagens flate pivot-tabell: på London 4000²
 gir pyr H=128/k=8 (386 KB resident) samme kvalitet som flat L=8 (296 KB), mens
 flat L=32 (1,2 MB) er langt foran begge. Årsaken er hub-*utvalget*: punktets k
 *nærmeste* huber er ikke hubene som ligger *på korteste vei* til målet — riktig
-"exit" avhenger av retningen. I gateway-verdenen (der nærmeste hub ofte ER
-gateway) vinner pyramiden per byte (70 % eksakt på 136 KB mot flat L=8: 65 % på
-222 KB) — som bekrefter at idéen står og faller på sti-bevisst hub-utvalg
-(CH-/hub-labeling-stil, eller veiklasse-noder fra dijeng-grafen), ikke på
-pyramide-strukturen i seg selv.
+"exit" avhenger av retningen.
+
+**3. Sti-bevisst hub-utvalg (`hubpath`): GJENNOMBRUDD — slår den flate
+tabellen på ekte data med en brøkdel av minnet.** Samme residente layout som
+pyramiden, men hvert punkts huber velges ved *best-via-mining*: sample par
+(i,j), finn huben som minimerer `d(i,a)+d(a,j)`, kreditér den til ut-settet til
+`i` og inn-settet til `j`; behold de k mest krediterte per punkt (retningsdelt:
+k ut-huber og k inn-huber). Ekte London 4000² (delivery_van):
+
+| Variant | Resident | Eksakt | innen 2 s | innen 5 s |
+|---|--:|--:|--:|--:|
+| flat L=32 | 1160 KB | 27,3 % | 42,4 % | 53,3 % |
+| flat L=64 | 2312 KB | 42,4 % | 61,7 % | 72,2 % |
+| naiv H=128 k=8 | 386 KB | 8,9 % | 15,8 % | 23,5 % |
+| sti H=128 k=8 | 386 KB | 35,5 % | 56,0 % | 64,5 % |
+| **sti H=128 k=16** | **706 KB** | **43,1 %** | **66,0 %** | **74,7 %** |
+
+Sti-utvalget er 4x bedre enn naivt utvalg på identisk minne, og k=16-varianten
+slår flat L=64 på *alle* metrikker med **3,3x mindre resident minne** —
+oppslagskostnaden er sammenlignbar (k² min-plus-ledd ≈ L). I tillegg dekkes
+82 % av cellene av ren 2-hop hub-labeling (felles hub i ut/inn-settene), som er
+enda billigere per oppslag. Gevinsten vokser med n (på 2000² slår k=8-varianten
+flat L=32; på 4000² er den nær L=64). Konklusjonen fra forsøk 2 snudd til
+oppskrift: pyramiden virker — når hubene velges etter *stier*, ikke nærhet.
+Naturlig fortsettelse: bytt `dil`-tabellen i MTZT med retningsdelte
+sti-labels (n×2k i stedet for n×L), og hent hub-kandidater fra veiklassene i
+dijeng-grafen for enda bedre dekning.
 
 ## Hva dette IKKE gjør (ennå)
 
