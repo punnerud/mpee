@@ -495,6 +495,25 @@ impl RoutingService {
         Some(TripResponse { order, legs, duration_s: total_dur, distance_m: total_dist })
     }
 
+    /// Map matching (Newson-Krumm HMM): reconstruct the road path a noisy GPS
+    /// trace was driven on. `sigma_m` is the GPS noise (≈15 m urban). Returns
+    /// one matched road point per input ping plus a confidence in [0, 1].
+    pub fn match_trace(
+        &self,
+        trace: &[(f32, f32)],
+        k: usize,
+        sigma_m: f32,
+    ) -> Option<crate::matching::MatchResult> {
+        let ch = self.ch.as_ref()?;
+        Some(crate::matching::match_trace(
+            ch,
+            |la, lo| self.nearest_nodes(la, lo, k),
+            |csr| ch.perm[csr as usize],
+            trace,
+            sigma_m,
+        ))
+    }
+
     /// Isochrone bands from (lat, lon): polygons covering everything reachable
     /// within each of `limits` (seconds, ascending; metres when `metric_dist`).
     /// `cell_deg` controls polygon resolution (0.0015° ≈ 150 m). Rings come
