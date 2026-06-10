@@ -495,6 +495,31 @@ impl RoutingService {
         Some(TripResponse { order, legs, duration_s: total_dur, distance_m: total_dist })
     }
 
+    /// Isochrone bands from (lat, lon): polygons covering everything reachable
+    /// within each of `limits` (seconds, ascending; metres when `metric_dist`).
+    /// `cell_deg` controls polygon resolution (0.0015° ≈ 150 m). Rings come
+    /// back closed, in (lat, lon).
+    pub fn isochrone(
+        &self,
+        lat: f32,
+        lon: f32,
+        limits: &[f32],
+        cell_deg: f32,
+        metric_dist: bool,
+    ) -> Option<Vec<crate::isochrone::IsochroneBand>> {
+        let ch = self.ch.as_ref()?;
+        let src = self.nearest_node(lat, lon);
+        let src_int = ch.perm[src as usize];
+        Some(crate::isochrone::isochrone(
+            ch,
+            |internal| self.coords[self.inv_perm[internal as usize] as usize],
+            src_int,
+            limits,
+            cell_deg,
+            metric_dist,
+        ))
+    }
+
     /// Variant of `matrix` that also returns per-cell distances. With a
     /// dual-channel CH (`edge_dist_*` populated, SSSPCH1D format), this is
     /// just a single bucket-MMM sweep that accumulates both metrics —
