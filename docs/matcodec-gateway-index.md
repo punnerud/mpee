@@ -223,6 +223,36 @@ full pivot-mining over hele matrisen finner de 24 ekte gateway-punktene, mens
 MTZU-mineren bare ser kandidatutvalget. Derfor beholdes begge formatene; på
 ekte veidata er MTZU bedre på alt unntatt ren bounds-latens.
 
+## Veikryss-huber + brooom-ingest (2026-06-10, kveld)
+
+**Veikryss som hub-kandidater** (`stream_compress --graph-hubs C`): kandidatene
+hentes fra toppen av CH-kontraksjonsordenen — de C viktigste veikryssene i
+grafen (motorvei/stamvei) — og avstandstabellene deres lages med tre chunked
+CH-matrisekall. Formatet er uendret (dekoderen ser bare avstander), encoderen
+tar `ExternalHubs` (`compress_stream_hub_ext`). Ekte London, delivery_van,
+C=512 kandidater → H=128 valgte huber:
+
+| n | Blob (graph-hubs) | vs punkt-huber | vs MTZT | Blokker innen 2 s | `cell_within(5)` |
+|--:|--:|--:|--:|--:|--:|
+| 2000 | **2,2 MB (7,3x)** | 3,25 MB | 4,16 MB | 71 % (før 18 %) | 4,3 µs |
+| 4000 | **7,5 MB (8,6x)** | 10,7 MB | 13,1 MB | 67 % | 7,0 µs |
+| 10000 | **42,4 MB (9,4x)** | 52,9 MB | 121,8 MB | 61 % (før 39 %) | 16,3 µs |
+
+Ratioen *stiger* med n, og tapsfriheten er verifisert celle-for-celle mot
+fasit-dump. Eksakt-andelen er lav (1–8 %) fordi residualene er ±1–2 s
+rundingsstøy via kryssene — det er toleranselagene som høster gevinsten, slik
+ALT-/hub-labeling-teorien tilsier. Dette bekrefter veihierarki-hypotesen
+fullt ut: med ekte veikryss som huber er «de få motorveiutgangene per punkt»
+både komprimeringsmodellen og oppslagsindeksen.
+
+**brooom-ingest** (`brooom --matrix-mtz fil.mtz [--distances-mtz fil2.mtz]`):
+solveren kan nå lese matrisen direkte fra en matcodec-blob (alle formatene),
+flettet med ev. embedded distances. Verifisert: byte-identisk matrise og
+identiske løsninger mot embedded JSON (kostforskjeller i tidligere test viste
+seg å være solver-støy under wall-clock-grense, ikke ingest-avvik). Dette er
+transport/lagrings-gevinsten (4–9x mindre filer); selve solve-stien er fortsatt
+tett in-RAM — `cell_bounds`-pruning i LS gjenstår.
+
 ## Hva dette IKKE gjør (ennå)
 
 - brooms local search bruker fortsatt en tett in-RAM-matrise — matcodec sitter

@@ -93,6 +93,16 @@ fn main() {
         }
     }
 
+    // --graph-hubs C: use the C most important road-network nodes (top of the
+    // contraction order = motorway/trunk junctions) as hub candidates instead
+    // of matrix points. Their distance tables come from three chunked CH
+    // matrix calls; the MTZU format itself is unchanged.
+    let graph_hubs: Option<usize> = args
+        .iter()
+        .position(|a| a == "--graph-hubs")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse().ok());
+
     let mut src = ChRowSource { ch, ids };
     let dump = args
         .iter()
@@ -100,7 +110,31 @@ fn main() {
         .and_then(|p| args.get(p + 1))
         .cloned();
 
-    let rep = if let Some(dp) = dump {
+    let to_i32 = |v: &[f32]| -> Vec<i32> {
+        v.iter()
+            .map(|&s| if s.is_finite() { s.round() as i32 } else { matcodec::UNREACHABLE })
+            .collect()
+    };
+
+    let rep = if let Some(c) = graph_hubs {
+        let nn = src.ch.graph_fwd.n;
+        let mut top: Vec<u32> = (0..nn as u32).collect();
+        top.sort_by_key(|&v| std::cmp::Reverse(src.ch.rank[v as usize]));
+        top.truncate(c);
+        eprintln!("graph-hub candidates: top {c} CH-rank junctions");
+        let rows = to_i32(&ch::matrix(&src.ch, &top, &src.ids));
+        let cols = to_i32(&ch::matrix(&src.ch, &src.ids, &top));
+        let hub_hub = to_i32(&ch::matrix(&src.ch, &top, &top));
+        let ext = matcodec::ExternalHubs {
+            ids: top.iter().map(|&v| v as usize).collect(),
+            rows,
+            cols,
+            hub_hub,
+        };
+        let mut out = BufWriter::new(fs::File::create(&args[3]).expect("create out.mtz"));
+        matcodec::compress_stream_hub_ext(&mut src, &opts, &ext, &mut out)
+            .expect("compress_stream_hub_ext")
+    } else if let Some(dp) = dump {
         // Benchmark/comparison mode: materialise the matrix once, write it as
         // JSON (so `matcodec roundtrip`/`validate` can run the best-of model on
         // the same real CH data), then stream-compress from the buffer.

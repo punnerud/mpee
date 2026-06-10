@@ -939,6 +939,245 @@ impl HubModel {
     }
 }
 
+/// External hub candidates that are **not matrix points** — e.g. road-network
+/// junction nodes from the top of a contraction hierarchy. The decoder only
+/// ever uses label *distances*, so the format is unchanged; the encoder just
+/// needs the candidates' distances to/from every matrix point.
+pub struct ExternalHubs {
+    /// Candidate identifiers (graph node ids) — stored in the header for
+    /// reporting; never used to index the matrix.
+    pub ids: Vec<usize>,
+    /// `rows[a*n + j] = d(cand_a → point_j)`, C×n.
+    pub rows: Vec<i32>,
+    /// `cols[i*C + a] = d(point_i → cand_a)`, n×C.
+    pub cols: Vec<i32>,
+    /// `hub_hub[a*C + b] = d(cand_a → cand_b)`, C×C.
+    pub hub_hub: Vec<i32>,
+}
+
+/// [`compress_stream_hub`] with **external hub candidates** (road junctions
+/// etc.). All labels are mined up front from the candidate rows/columns; the
+/// matrix itself is streamed exactly once for the residual frames.
+pub fn compress_stream_hub_ext<S: RowSource, W: Write>(
+    src: &mut S,
+    opts: &HubOpts,
+    ext: &ExternalHubs,
+    out: &mut W,
+) -> io::Result<ValidationReport> {
+    let n = src.n();
+    let c = ext.ids.len();
+    assert!(ext.rows.len() == c * n && ext.cols.len() == n * c && ext.hub_hub.len() == c * c);
+    let h_count = opts.hubs.min(c).min(255).max(1);
+    let k = opts.k.min(h_count).max(1);
+
+    let mut state: u64 = 0xDA7A_BA5E_0F1C_E5;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as usize
+    };
+    // greedy facility location over sampled (i,j) point pairs; via-cost of
+    // candidate a = cols[i*c+a] + rows[a*n+j]
+    let s_count = (c * 24).min(16384);
+    let mut pairs = Vec::with_capacity(s_count);
+    while pairs.len() < s_count {
+        let i = next() % n;
+        let j = next() % n;
+        if i != j {
+            pairs.push((i, j));
+        }
+    }
+    let mut cur = vec![i64::MAX; s_count];
+    let mut used = vec![false; c];
+    let mut sel: Vec<usize> = Vec::with_capacity(h_count);
+    for _ in 0..h_count {
+        let mut best_a = usize::MAX;
+        let mut best_cost = i64::MAX;
+        for a in 0..c {
+            if used[a] {
+                continue;
+            }
+            let mut cost = 0i64;
+            for (s, &(i, j)) in pairs.iter().enumerate() {
+                let via = ext.cols[i * c + a] as i64 + ext.rows[a * n + j] as i64;
+                cost += cur[s].min(via);
+            }
+            if cost < best_cost {
+                best_cost = cost;
+                best_a = a;
+            }
+        }
+        if best_a == usize::MAX {
+            break;
+        }
+        used[best_a] = true;
+        sel.push(best_a);
+        for (s, &(i, j)) in pairs.iter().enumerate() {
+            let via = ext.cols[i * c + best_a] as i64 + ext.rows[best_a * n + j] as i64;
+            cur[s] = cur[s].min(via);
+        }
+    }
+    let h = sel.len();
+    let hub_ids: Vec<usize> = sel.iter().map(|&a| ext.ids[a]).collect();
+    let mut dhh = vec![0i32; h * h];
+    for (a, &sa) in sel.iter().enumerate() {
+        for (b, &sb) in sel.iter().enumerate() {
+            dhh[a * h + b] = ext.hub_hub[sa * c + sb];
+        }
+    }
+    let hub_row = |a: usize| -> &[i32] { &ext.rows[sel[a] * n..sel[a] * n + n] };
+    let hub_col = |i: usize, a: usize| -> i32 { ext.cols[i * c + sel[a]] };
+
+    let mut cell_of = vec![0u8; n];
+    for j in 0..n {
+        let mut best = i64::MAX;
+        for a in 0..h {
+            if (hub_row(a)[j] as i64) < best {
+                best = hub_row(a)[j] as i64;
+                cell_of[j] = a as u8;
+            }
+        }
+    }
+    let order = group_order(&cell_of);
+
+    // out- and in-labels mined entirely from the candidate tables: for each
+    // point and a destination/source sample, credit the best via hub
+    let spp = opts.samples_per_row.max(16);
+    let mut out_h = vec![0u8; n * k];
+    let mut out_d = vec![0i32; n * k];
+    let mut in_h = vec![0u8; n * k];
+    let mut in_d = vec![0i32; n * k];
+    {
+        let mut credit = vec![0u32; h];
+        let mut idx: Vec<usize> = Vec::with_capacity(h);
+        for i in 0..n {
+            for cnt in credit.iter_mut() {
+                *cnt = 0;
+            }
+            for _ in 0..spp {
+                let j = next() % n;
+                if j == i {
+                    continue;
+                }
+                let mut best = i64::MAX;
+                let mut ba = 0usize;
+                for a in 0..h {
+                    let v = hub_col(i, a) as i64 + hub_row(a)[j] as i64;
+                    if v < best {
+                        best = v;
+                        ba = a;
+                    }
+                }
+                credit[ba] += 1;
+            }
+            idx.clear();
+            idx.extend(0..h);
+            idx.sort_by_key(|&a| (std::cmp::Reverse(credit[a]), hub_col(i, a)));
+            for q in 0..k {
+                out_h[i * k + q] = idx[q] as u8;
+                out_d[i * k + q] = hub_col(i, idx[q]);
+            }
+        }
+        for j in 0..n {
+            for cnt in credit.iter_mut() {
+                *cnt = 0;
+            }
+            for _ in 0..spp {
+                let i = next() % n;
+                if j == i {
+                    continue;
+                }
+                let mut best = i64::MAX;
+                let mut ba = 0usize;
+                for a in 0..h {
+                    let v = hub_col(i, a) as i64 + hub_row(a)[j] as i64;
+                    if v < best {
+                        best = v;
+                        ba = a;
+                    }
+                }
+                credit[ba] += 1;
+            }
+            idx.clear();
+            idx.extend(0..h);
+            idx.sort_by_key(|&a| (std::cmp::Reverse(credit[a]), hub_row(a)[j]));
+            for q in 0..k {
+                in_h[j * k + q] = idx[q] as u8;
+                in_d[j * k + q] = hub_row(idx[q])[j];
+            }
+        }
+    }
+
+    // header
+    out.write_all(MAGIC_STREAM3)?;
+    out.write_all(&(n as u32).to_le_bytes())?;
+    out.write_all(&(h as u32).to_le_bytes())?;
+    out.write_all(&(k as u32).to_le_bytes())?;
+    for &id in &hub_ids {
+        out.write_all(&(id as u32).to_le_bytes())?;
+    }
+    let mut head = Vec::new();
+    put_blob_vz(&mut head, &dhh);
+    put_blob(&mut head, &cell_of);
+    put_blob(&mut head, &in_h);
+    put_blob_vz(&mut head, &in_d);
+    out.write_all(&head)?;
+
+    // main pass: residuals only (labels already fixed). Validation here is
+    // the value checks — the landmark-based asymmetry/triangle probes don't
+    // apply because the hubs aren't matrix columns.
+    let mut rep = ValidationReport::default();
+    let mut blockmax = vec![0u8; n * h];
+    let mut frame_mode = u8::MAX;
+    let model = HubModel { h, k, dhh, out_h, out_d, in_h, in_d };
+    for i in 0..n {
+        let row = src.row(i);
+        rep.rows_seen += 1;
+        let m = model.row_reach(i);
+        let mut resid = vec![0i32; n];
+        for j in 0..n {
+            let dij = row[j];
+            if dij < 0 {
+                rep.note(0, || format!("negative d({i},{j})={dij}"));
+            } else if i != j && dij >= UNREACHABLE {
+                rep.note(2, || format!("unreachable d({i},{j})={dij}"));
+            }
+            if i == j && dij != 0 {
+                rep.note(1, || format!("d({i},{i})={dij} (expected 0)"));
+            }
+            let base = model.base_from_reach(&m, j);
+            resid[j] = (dij as i64 - base) as i32;
+            let bm = &mut blockmax[i * h + cell_of[j] as usize];
+            if dij >= UNREACHABLE {
+                if !(dij == UNREACHABLE && base >= UNREACHABLE as i64) {
+                    *bm = 255;
+                }
+                continue;
+            }
+            let mag = (resid[j] as i64).unsigned_abs().min(255) as u8;
+            if mag > *bm {
+                *bm = mag;
+            }
+        }
+        if frame_mode == u8::MAX {
+            let plain = frame_encode(&resid, &order, false).len();
+            let grouped = frame_encode(&resid, &order, true).len();
+            frame_mode = if grouped < plain { FRAME_GROUPED } else { FRAME_PLAIN };
+            out.write_all(&[frame_mode])?;
+        }
+        let fc = frame_encode(&resid, &order, frame_mode == FRAME_GROUPED);
+        out.write_all(&(fc.len() as u32).to_le_bytes())?;
+        out.write_all(&fc)?;
+    }
+    let mut foot = Vec::new();
+    put_blob(&mut foot, &model.out_h);
+    put_blob_vz(&mut foot, &model.out_d);
+    put_blob(&mut foot, &blockmax);
+    out.write_all(&foot)?;
+    Ok(rep)
+}
+
 /// Stream-compress through the **path-label model** into the `MTZU`
 /// container. Fetches `candidates` rows up front (RowSource random access),
 /// picks H hubs by greedy facility location over pairs sampled from those
@@ -2238,6 +2477,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mtzu_external_hubs_roundtrip_and_exactness() {
+        // external "junction" candidates = the true gateway points (plus some
+        // fillers) supplied as ExternalHubs tables; with path labels over them
+        // the cross-region blocks must be index-exact and roundtrip lossless
+        let (d, n) = l1_gateway_world(4, 30, 17);
+        let per = 30;
+        let mut cand: Vec<usize> = Vec::new();
+        for r in 0..4 {
+            for k in 0..3 {
+                cand.push(r * per + k); // gateways
+            }
+        }
+        for f in 0..20 {
+            cand.push((f * 7 + 3) % n); // fillers
+        }
+        cand.sort();
+        cand.dedup();
+        let c = cand.len();
+        let mut rows = vec![0i32; c * n];
+        let mut cols = vec![0i32; n * c];
+        let mut hub_hub = vec![0i32; c * c];
+        for (a, &g) in cand.iter().enumerate() {
+            rows[a * n..a * n + n].copy_from_slice(&d[g * n..g * n + n]);
+            for i in 0..n {
+                cols[i * c + a] = d[i * n + g];
+            }
+            for (b, &g2) in cand.iter().enumerate() {
+                hub_hub[a * c + b] = d[g * n + g2];
+            }
+        }
+        let ext = ExternalHubs { ids: cand.clone(), rows, cols, hub_hub };
+        let mut src = SliceRows { d: &d, n };
+        let mut buf = Vec::new();
+        let opts = HubOpts { hubs: 24, k: 6, candidates: 0, samples_per_row: 128 };
+        compress_stream_hub_ext(&mut src, &opts, &ext, &mut buf).unwrap();
+        let (back, n2) = decompress(&buf).unwrap();
+        assert_eq!(n2, n);
+        assert_eq!(back, d, "ext-hub roundtrip failed");
+        let mut rd = MtzReader::open(buf, 4).unwrap();
+        for i in (0..n).step_by(3) {
+            for j in (0..n).step_by(3) {
+                assert_eq!(rd.cell(i, j).unwrap(), d[i * n + j], "ext cell({i},{j})");
+            }
+        }
+        assert!(
+            rd.exact_index_block_share() > 0.5,
+            "expected cross blocks exact with gateway hubs, got {:.2}",
+            rd.exact_index_block_share()
+        );
     }
 
     #[test]
