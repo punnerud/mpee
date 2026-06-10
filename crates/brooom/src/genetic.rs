@@ -928,6 +928,13 @@ pub fn solve_genetic(
     // Deadline-aware so islands honour the shared wall-clock. ──────────────────
     let init_passes = max_passes.min(2);
     let past_deadline = |d: &Option<Instant>| d.map_or(false, |dd| Instant::now() >= dd);
+    // Init must never eat the evolution budget: at larger n a full µ of
+    // educated constructions can consume the whole phase (measured: n=200 @
+    // 10s ran ZERO generations — all of SREX/OX never executed). Cap the fill
+    // at 25 % of the phase budget; offspring grow the population back.
+    let phase_start = Instant::now();
+    let init_deadline = deadline
+        .map(|d| phase_start + d.saturating_duration_since(phase_start).mul_f64(0.25));
     let mut pop: Vec<Indiv> = Vec::with_capacity(max_pop);
     let mut push_educated = |pop: &mut Vec<Indiv>, mut sol: Solution, passes: usize| {
         // Normalise through Split (optimal partition of this ordering) then educate.
@@ -944,7 +951,7 @@ pub fn solve_genetic(
         push_educated(&mut pop, s.clone(), init_passes);
     }
     let mut si = 0u64;
-    while pop.len() < mu && !past_deadline(&deadline) {
+    while pop.len() < mu && !past_deadline(&init_deadline) {
         let s = greedy_insertion_seeded(problem, matrix, seed.wrapping_add(si).wrapping_add(1));
         push_educated(&mut pop, s, init_passes);
         si += 1;
@@ -1017,11 +1024,28 @@ pub fn solve_genetic(
     let (lam_min, lam_max) = (lam_scale * 0.5, lam_scale * 1000.0);
     let mut soft_seen = 0u32;
     let mut soft_feasible = 0u32;
+    // Education depth, adapted in flight: when generations are starved
+    // relative to the elapsed budget, halve the depth — throughput beats
+    // depth on a short clock (measured n=200 @ 10s: 8 passes → 0 generations;
+    // 1–2 passes → 120+ generations and ~5 % lower cost). Untouched whenever
+    // generations flow normally (n≈100, or long budgets). If init could not
+    // even fill µ inside its budget window, education is demonstrably
+    // expensive here — start shallow instead of wasting the first
+    // generations discovering it.
+    let starved = pop.len() < mu;
+    let mut edu_passes = if starved { 1 } else { max_passes };
     for gen in 0..max_gens {
         gen_count = gen;
         if let Some(d) = deadline {
             if Instant::now() >= d {
                 break;
+            }
+            if edu_passes > 1 {
+                let total = d.saturating_duration_since(phase_start).as_secs_f64();
+                let frac = phase_start.elapsed().as_secs_f64() / total.max(1e-9);
+                if (frac > 0.35 && gen < 10) || (frac > 0.55 && gen < 30) {
+                    edu_passes = (edu_passes / 2).max(1);
+                }
             }
         }
         // Light island migration: occasionally adopt a foreign elite that is
@@ -1059,7 +1083,7 @@ pub fn solve_genetic(
             }));
             let child_opt = srex_crossover(&pop[pa].sol, &pb_sol, problem, matrix, &mut rng);
             let soft_child = child_opt.map(|mut c| {
-                local_search(problem, matrix, &mut c, max_passes, granular);
+                local_search(problem, matrix, &mut c, edu_passes, granular);
                 c
             });
             crate::solution::set_soft_penalties(None);
@@ -1138,7 +1162,7 @@ pub fn solve_genetic(
         let Some(mut child) = child_opt else {
             continue;
         };
-        local_search(problem, matrix, &mut child, max_passes, granular);
+        local_search(problem, matrix, &mut child, edu_passes, granular);
         if !child.unassigned.is_empty() {
             continue;
         }
