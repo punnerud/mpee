@@ -185,6 +185,44 @@ Naturlig fortsettelse: bytt `dil`-tabellen i MTZT med retningsdelte
 sti-labels (n×2k i stedet for n×L), og hent hub-kandidater fra veiklassene i
 dijeng-grafen for enda bedre dekning.
 
+## MTZU: sti-labels + varint implementert (2026-06-10)
+
+Begge lab-funnene er nå et formatformat: **`MTZU`** (skrives av
+`compress_stream_hub` / CLI `compress --stream`; `MTZT` beholdt som
+`--stream-mtzt` og dekodes fortsatt).
+
+- **Sti-labels i stedet for flat tabell**: hub-utvalg ved best-via-mining over
+  kandidatrader (hentet via `RowSource` random access — fungerer streamet,
+  aldri n² i minne), retningsdelte labels n×2k (hub-id u8 + avstand), tett
+  H×H hub-matrise. Basen er `min d(i,a) + d(a,b) + d(b,j)`, radevaluert med
+  reach-vektor-trikset (k×H + n×k, ikke n×k²).
+- **Varint-rammer**: residualene kodes zigzag-varint (+ celle-gruppert delta
+  når det vinner på første rad — flaggbyte) før deflate.
+- `MtzReader` åpner begge formater; samme API (`cell`/`cell_within`/
+  `cell_bounds`/`row`), samme blockmax-mekanikk (celler = hub-Voronoi).
+- Antall kandidatrader styrer hub-kvaliteten nesten alene: tol-5s-blokkandel
+  6 % ved 192 kandidater → 32 % ved 1024 (auto: `clamp(n/4, 256, 1024)`).
+
+**A/B målt (samme maskin, 200k tilfeldige oppslag):**
+
+| Verden | MTZT blob | MTZU blob | MTZU resident | `cell()` T→U | `within(5)` T→U |
+|---|--:|--:|--:|--:|--:|
+| London 2000² | 4,16 MB (3,9x) | **3,25 MB (4,9x)** | 0,65 MB | 18,7→16,2 µs | 14,9→12,7 µs |
+| London 4000² (L=64) | 13,07 MB (4,9x) | **10,71 MB (6,0x)** | 1,24 MB (mot 2,31) | 28,2→25,1 µs | 14,9→17,6 µs |
+| London 10k² (streamet fra CH) | 121,8 MB (3,3x) | **52,9 MB (7,6x)** | 3,0 MB | 82→50 µs | 79→31 µs |
+| Euklidsk verste fall 3000 | 17,49 MB (2,1x) | **12,86 MB (2,8x)** | 0,95 MB | 36,0→26,7 µs | — |
+| Gateway-syntetisk 3000 | **2,04 MB (17,6x)** | 3,22 MB (11,2x) | 0,95 MB | **1,4**→8,6 µs | — |
+
+Største enkeltresultat: 10k-skalaen — blob **halvert** (3,3x → 7,6x), eksakte
+oppslag 1,6x raskere, toleranseoppslag 2,5x raskere, og andelen blokker innen
+5 s hoppet fra 7 % til **43 %** (encode +6 % tid, 522 s). `cell_bounds` koster
+~180 ns (k² ledd mot L) — fortsatt langt under én ramme-inflate.
+
+Ærlig unntak: på den idealiserte gateway-syntetikken vinner fortsatt MTZT —
+full pivot-mining over hele matrisen finner de 24 ekte gateway-punktene, mens
+MTZU-mineren bare ser kandidatutvalget. Derfor beholdes begge formatene; på
+ekte veidata er MTZU bedre på alt unntatt ren bounds-latens.
+
 ## Hva dette IKKE gjør (ennå)
 
 - brooms local search bruker fortsatt en tett in-RAM-matrise — matcodec sitter
@@ -192,10 +230,10 @@ dijeng-grafen for enda bedre dekning.
   arbeidet. Spaken som konverterer oppslagsfart til søkefart er å la LS-pruning
   forkaste trekk via `cell_bounds`/`cell_within` (de fleste trekk forkastes, og
   et trekk som kan forkastes på en ~250 ns-grense trenger aldri eksakt verdi).
-- Pivot-utvalget trenger hele matrisen i RAM; streaming-stien bruker fortsatt
-  jevnt spredte landemerker. Pivot-mining over et streamet utvalg er mulig,
-  ikke gjort.
+- MTZU-hubmineren ser bare kandidatutvalget (auto n/4, maks 1024 rader) — på
+  sterkt strukturerte matriser finner full pivot-mining (MTZT, krever matrisen
+  i RAM) bedre ankerpunkter. Flere kandidater = bedre, mot en encodekostnad.
 - Blokk-eksakthet krever at gateway-punktene finnes blant matrisepunktene.
-  Graf-noder fra dijeng (ekte veikryss) som ekstra landemerker ville gjort
+  Graf-noder fra dijeng (ekte veikryss) som ekstra huber ville gjort
   ekte veidata like indeks-eksakte som syntetisk — formatet støtter det
-  allerede (landemerker er bare rader/kolonner).
+  allerede (huber er bare rader/kolonner).

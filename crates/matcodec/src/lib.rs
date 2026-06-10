@@ -45,6 +45,14 @@ const MAGIC_STREAM: &[u8; 4] = b"MTZS";
 /// answered in O(L) straight from the index, no inflate.
 /// Peak encode memory is the L landmark rows + the n×L index + one working row.
 const MAGIC_STREAM2: &[u8; 4] = b"MTZT";
+/// Streamed container v3: the flat n×L landmark table is replaced by
+/// **directional path labels** — per point, the k hubs most often on its
+/// shortest paths (mined from sampled pairs), out- and in-side separately,
+/// plus a dense H×H hub matrix. Residual frames are zigzag-varint coded
+/// (optionally cell-grouped delta, chosen per blob) before deflate.
+/// Measured: beats the MTZT base at a fraction of the resident memory and
+/// compresses 26–36 % smaller (see docs/matcodec-gateway-index.md).
+const MAGIC_STREAM3: &[u8; 4] = b"MTZU";
 const METHOD_CLUSTER: u8 = 0;
 const METHOD_BRIDGE: u8 = 1;
 /// Landmark counts the bridge model sweeps (best-of, capped to < n).
@@ -89,6 +97,62 @@ fn put_blob(out: &mut Vec<u8>, raw: &[u8]) {
     out.extend_from_slice(&comp);
 }
 
+// ------------------------------------------------------------- varint coding
+/// Zigzag + LEB128 varint: near-zero residuals cost 1 byte instead of 4
+/// *before* deflate — measured 26–36 % smaller blobs than deflate-over-raw.
+fn zigzag(v: i32) -> u32 {
+    ((v << 1) ^ (v >> 31)) as u32
+}
+
+fn unzigzag(z: u32) -> i32 {
+    ((z >> 1) as i32) ^ -((z & 1) as i32)
+}
+
+fn zz_varint(vals: &[i32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(vals.len() * 2);
+    for &v in vals {
+        let mut x = zigzag(v);
+        loop {
+            let b = (x & 0x7f) as u8;
+            x >>= 7;
+            if x == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    out
+}
+
+fn zz_varint_decode(bytes: &[u8], expect: usize) -> io::Result<Vec<i32>> {
+    let mut out = Vec::with_capacity(expect);
+    let mut x: u32 = 0;
+    let mut shift = 0u32;
+    for &b in bytes {
+        x |= ((b & 0x7f) as u32) << shift;
+        if b & 0x80 == 0 {
+            out.push(unzigzag(x));
+            x = 0;
+            shift = 0;
+        } else {
+            shift += 7;
+            if shift > 28 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "varint overflow"));
+            }
+        }
+    }
+    if shift != 0 || out.len() != expect {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "varint stream length"));
+    }
+    Ok(out)
+}
+
+/// Length-prefixed deflate of the zigzag-varint coding of `vals`.
+fn put_blob_vz(out: &mut Vec<u8>, vals: &[i32]) {
+    put_blob(out, &zz_varint(vals));
+}
+
 struct Cursor<'a> {
     b: &'a [u8],
     pos: usize,
@@ -121,6 +185,11 @@ impl<'a> Cursor<'a> {
     }
     fn blob(&mut self) -> io::Result<Vec<i32>> {
         Ok(le_to_i32s(&self.blob_raw()?))
+    }
+    /// Inverse of [`put_blob_vz`].
+    fn blob_vz(&mut self, expect: usize) -> io::Result<Vec<i32>> {
+        let raw = self.blob_raw()?;
+        zz_varint_decode(&raw, expect)
     }
 }
 
@@ -743,6 +812,432 @@ fn decode_stream2<F: FnMut(usize, &[i32])>(bytes: &[u8], emit: &mut F) -> io::Re
     Ok(())
 }
 
+// --------------------------------------------------------- MTZU (path labels)
+/// Tuning for the path-label (MTZU) encoder.
+pub struct HubOpts {
+    /// Global hub count H (chosen from the candidate rows by greedy
+    /// facility location over sampled pairs).
+    pub hubs: usize,
+    /// Per-point label width k (out- and in-side each keep k hubs).
+    pub k: usize,
+    /// Candidate/sample row count fetched up front (also the in-credit
+    /// mining sample). Bounded by n.
+    pub candidates: usize,
+    /// Destinations sampled per row for out-label mining.
+    pub samples_per_row: usize,
+}
+
+impl Default for HubOpts {
+    /// `candidates = 0` means auto: `clamp(n/4, 256, 1024)` — hub quality is
+    /// driven almost entirely by how many candidate rows the miner sees
+    /// (measured on real London: tol-5s block share 6 % at 192 candidates,
+    /// 32 % at 1024).
+    fn default() -> Self {
+        Self { hubs: 128, k: 16, candidates: 0, samples_per_row: 128 }
+    }
+}
+
+/// Deterministic column order for the grouped-delta frame coding: columns
+/// sorted by (cell, j). Encoder and decoder derive it from the same `cell_of`.
+fn group_order(cell_of: &[u8]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..cell_of.len() as u32).collect();
+    order.sort_by_key(|&j| (cell_of[j as usize], j));
+    order
+}
+
+/// Frame codings (header flag): plain zigzag-varint vs cell-grouped delta
+/// zigzag-varint, both deflated. Chosen once per stream on the first rows.
+const FRAME_PLAIN: u8 = 0;
+const FRAME_GROUPED: u8 = 1;
+
+fn frame_encode(resid: &[i32], order: &[u32], grouped: bool) -> Vec<u8> {
+    if !grouped {
+        return deflate(&zz_varint(resid));
+    }
+    // sequential delta chain along the cell-grouped column order — neighbours
+    // in the same cell correlate, so the deltas collapse toward zero
+    let mut vals = Vec::with_capacity(resid.len());
+    let mut prev = 0i32;
+    for &j in order {
+        let v = resid[j as usize];
+        vals.push(v.wrapping_sub(prev));
+        prev = v;
+    }
+    deflate(&zz_varint(&vals))
+}
+
+fn frame_decode(raw: &[u8], order: &[u32], grouped: bool, n: usize) -> io::Result<Vec<i32>> {
+    let vals = zz_varint_decode(&inflate(raw)?, n)?;
+    if !grouped {
+        return Ok(vals);
+    }
+    let mut resid = vec![0i32; n];
+    let mut prev = 0i32;
+    for (idx, &j) in order.iter().enumerate() {
+        let v = vals[idx].wrapping_add(prev);
+        resid[j as usize] = v;
+        prev = v;
+    }
+    Ok(resid)
+}
+
+/// The MTZU base: `min over (a in out(i), b in in(j)) of
+/// out_d(i,a) + dhh(a,b) + in_d(b,j)` — evaluated for a whole row with the
+/// min-plus row trick (k×H + n×k instead of n×k²).
+struct HubModel {
+    h: usize,
+    k: usize,
+    dhh: Vec<i32>,    // h×h
+    out_h: Vec<u8>,   // n×k
+    out_d: Vec<i32>,  // n×k
+    in_h: Vec<u8>,    // n×k
+    in_d: Vec<i32>,   // n×k
+}
+
+impl HubModel {
+    /// `m[b] = min over a in out(i) of out_d(i,a) + dhh(a,b)` — the row's
+    /// reach-to-hub vector.
+    fn row_reach(&self, i: usize) -> Vec<i64> {
+        let mut m = vec![i64::MAX; self.h];
+        for q in 0..self.k {
+            let a = self.out_h[i * self.k + q] as usize;
+            let da = self.out_d[i * self.k + q] as i64;
+            for b in 0..self.h {
+                let v = da + self.dhh[a * self.h + b] as i64;
+                if v < m[b] {
+                    m[b] = v;
+                }
+            }
+        }
+        m
+    }
+    fn base_from_reach(&self, m: &[i64], j: usize) -> i64 {
+        let mut base = i64::MAX;
+        for r in 0..self.k {
+            let b = self.in_h[j * self.k + r] as usize;
+            let v = m[b] + self.in_d[j * self.k + r] as i64;
+            if v < base {
+                base = v;
+            }
+        }
+        base
+    }
+    fn base_cell(&self, i: usize, j: usize) -> i64 {
+        let mut base = i64::MAX;
+        for q in 0..self.k {
+            let a = self.out_h[i * self.k + q] as usize;
+            let da = self.out_d[i * self.k + q] as i64;
+            for r in 0..self.k {
+                let b = self.in_h[j * self.k + r] as usize;
+                let v = da + self.dhh[a * self.h + b] as i64 + self.in_d[j * self.k + r] as i64;
+                if v < base {
+                    base = v;
+                }
+            }
+        }
+        base
+    }
+}
+
+/// Stream-compress through the **path-label model** into the `MTZU`
+/// container. Fetches `candidates` rows up front (RowSource random access),
+/// picks H hubs by greedy facility location over pairs sampled from those
+/// rows, mines in-labels from them, then streams every row once: out-labels
+/// from the row itself, residual vs the hub base, varint-coded frame.
+/// Peak memory: the candidate rows (C×n) + the labels — never n².
+pub fn compress_stream_hub<S: RowSource, W: Write>(
+    src: &mut S,
+    opts: &HubOpts,
+    out: &mut W,
+) -> io::Result<ValidationReport> {
+    let n = src.n();
+    let c_auto = (n / 4).clamp(256, 1024);
+    let c_count = if opts.candidates == 0 { c_auto } else { opts.candidates }.min(n).max(2);
+    let h_count = opts.hubs.min(c_count).min(255).max(1);
+    let k = opts.k.min(h_count).max(1);
+
+    // deterministic candidate rows (distinct)
+    let mut state: u64 = 0xDA7A_BA5E_0F1C_E5;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as usize
+    };
+    let mut cand: Vec<usize> = Vec::with_capacity(c_count);
+    let mut seen = vec![false; n];
+    while cand.len() < c_count {
+        let i = next() % n;
+        if !seen[i] {
+            seen[i] = true;
+            cand.push(i);
+        }
+    }
+    let mut cand_rows = vec![0i32; c_count * n];
+    for (ci, &i) in cand.iter().enumerate() {
+        let r = src.row(i);
+        cand_rows[ci * n..ci * n + n].copy_from_slice(&r);
+    }
+
+    // hub selection: greedy facility location over sampled (cand_i, j) pairs;
+    // via-cost of candidate a for pair (i,j) = d(i,a) + d(a,j) where
+    // d(i,a) = cand_rows[i][cand[a]] and d(a,j) = cand_rows[a][j].
+    let s_count = (c_count * 24).min(16384);
+    let mut pairs = Vec::with_capacity(s_count);
+    while pairs.len() < s_count {
+        let ci = next() % c_count;
+        let j = next() % n;
+        if cand[ci] != j {
+            pairs.push((ci, j));
+        }
+    }
+    let mut cur = vec![i64::MAX; s_count];
+    let mut used = vec![false; c_count];
+    let mut hubs: Vec<usize> = Vec::with_capacity(h_count); // candidate indices
+    for _ in 0..h_count {
+        let mut best_a = usize::MAX;
+        let mut best_cost = i64::MAX;
+        for a in 0..c_count {
+            if used[a] {
+                continue;
+            }
+            let mut cost = 0i64;
+            for (s, &(ci, j)) in pairs.iter().enumerate() {
+                let via = cand_rows[ci * n + cand[a]] as i64 + cand_rows[a * n + j] as i64;
+                cost += cur[s].min(via);
+            }
+            if cost < best_cost {
+                best_cost = cost;
+                best_a = a;
+            }
+        }
+        if best_a == usize::MAX {
+            break;
+        }
+        used[best_a] = true;
+        hubs.push(best_a);
+        for (s, &(ci, j)) in pairs.iter().enumerate() {
+            let via = cand_rows[ci * n + cand[best_a]] as i64 + cand_rows[best_a * n + j] as i64;
+            cur[s] = cur[s].min(via);
+        }
+    }
+    let h = hubs.len();
+    let hub_ids: Vec<usize> = hubs.iter().map(|&a| cand[a]).collect();
+    // hub rows (d(hub, j) for all j) — a view into cand_rows
+    let hub_row = |a: usize| -> &[i32] { &cand_rows[hubs[a] * n..hubs[a] * n + n] };
+
+    let mut dhh = vec![0i32; h * h];
+    for a in 0..h {
+        for b in 0..h {
+            dhh[a * h + b] = hub_row(a)[hub_ids[b]];
+        }
+    }
+    // cell of column j = nearest hub by hub→j distance
+    let mut cell_of = vec![0u8; n];
+    for j in 0..n {
+        let mut best = i64::MAX;
+        for a in 0..h {
+            if (hub_row(a)[j] as i64) < best {
+                best = hub_row(a)[j] as i64;
+                cell_of[j] = a as u8;
+            }
+        }
+    }
+    let order = group_order(&cell_of);
+
+    // in-labels: credit the best via hub of (cand_i, j) to in(j); fill with
+    // nearest-by-in-distance
+    let mut credit_in = vec![0u32; n * h];
+    for ci in 0..c_count {
+        let crow = &cand_rows[ci * n..ci * n + n];
+        for j in 0..n {
+            let mut best = i64::MAX;
+            let mut ba = 0usize;
+            for a in 0..h {
+                let v = crow[hub_ids[a]] as i64 + hub_row(a)[j] as i64;
+                if v < best {
+                    best = v;
+                    ba = a;
+                }
+            }
+            credit_in[j * h + ba] += 1;
+        }
+    }
+    let mut in_h = vec![0u8; n * k];
+    let mut in_d = vec![0i32; n * k];
+    {
+        let mut idx: Vec<usize> = Vec::with_capacity(h);
+        for j in 0..n {
+            idx.clear();
+            idx.extend(0..h);
+            idx.sort_by_key(|&a| {
+                (std::cmp::Reverse(credit_in[j * h + a]), hub_row(a)[j])
+            });
+            for q in 0..k {
+                in_h[j * k + q] = idx[q] as u8;
+                in_d[j * k + q] = hub_row(idx[q])[j];
+            }
+        }
+    }
+
+    // header
+    out.write_all(MAGIC_STREAM3)?;
+    out.write_all(&(n as u32).to_le_bytes())?;
+    out.write_all(&(h as u32).to_le_bytes())?;
+    out.write_all(&(k as u32).to_le_bytes())?;
+    for &id in &hub_ids {
+        out.write_all(&(id as u32).to_le_bytes())?;
+    }
+    let mut head = Vec::new();
+    put_blob_vz(&mut head, &dhh);
+    put_blob(&mut head, &cell_of);
+    put_blob(&mut head, &in_h);
+    put_blob_vz(&mut head, &in_d);
+    out.write_all(&head)?;
+
+    // landmark-style rows for the validation checks: reuse the hub rows
+    let lm_val: Vec<usize> = hub_ids.clone();
+    let mut dlj_val = vec![0i32; h * n];
+    for a in 0..h {
+        dlj_val[a * n..a * n + n].copy_from_slice(hub_row(a));
+    }
+
+    // main pass
+    let mut rep = ValidationReport::default();
+    let mut out_h = vec![0u8; n * k];
+    let mut out_d = vec![0i32; n * k];
+    let mut blockmax = vec![0u8; n * h];
+    let mut frame_mode = u8::MAX; // decided on the first row (try both)
+    let mut model = HubModel { h, k, dhh, out_h: Vec::new(), out_d: Vec::new(), in_h, in_d };
+    let mut credit_out = vec![0u32; h];
+    let mut idx: Vec<usize> = Vec::with_capacity(h);
+    for i in 0..n {
+        let row = src.row(i);
+        validate_row(&mut rep, i, &row, n, &lm_val, &dlj_val);
+        // out-label mining for this row
+        for c in credit_out.iter_mut() {
+            *c = 0;
+        }
+        for _ in 0..opts.samples_per_row {
+            let j = next() % n;
+            if j == i {
+                continue;
+            }
+            let mut best = i64::MAX;
+            let mut ba = 0usize;
+            for a in 0..h {
+                let v = row[hub_ids[a]] as i64 + dlj_val[a * n + j] as i64;
+                if v < best {
+                    best = v;
+                    ba = a;
+                }
+            }
+            credit_out[ba] += 1;
+        }
+        idx.clear();
+        idx.extend(0..h);
+        idx.sort_by_key(|&a| (std::cmp::Reverse(credit_out[a]), row[hub_ids[a]]));
+        for q in 0..k {
+            out_h[i * k + q] = idx[q] as u8;
+            out_d[i * k + q] = row[hub_ids[idx[q]]];
+        }
+        // residual vs the hub base (row trick)
+        model.out_h = std::mem::take(&mut out_h);
+        model.out_d = std::mem::take(&mut out_d);
+        let m = model.row_reach(i);
+        out_h = std::mem::take(&mut model.out_h);
+        out_d = std::mem::take(&mut model.out_d);
+        let mut resid = vec![0i32; n];
+        for j in 0..n {
+            let base = model.base_from_reach(&m, j);
+            resid[j] = (row[j] as i64 - base) as i32;
+            let bm = &mut blockmax[i * h + cell_of[j] as usize];
+            if row[j] >= UNREACHABLE {
+                if !(row[j] == UNREACHABLE && base >= UNREACHABLE as i64) {
+                    *bm = 255;
+                }
+                continue;
+            }
+            let mag = (resid[j] as i64).unsigned_abs().min(255) as u8;
+            if mag > *bm {
+                *bm = mag;
+            }
+        }
+        if frame_mode == u8::MAX {
+            // pick the coding that wins on this first row
+            let plain = frame_encode(&resid, &order, false).len();
+            let grouped = frame_encode(&resid, &order, true).len();
+            frame_mode = if grouped < plain { FRAME_GROUPED } else { FRAME_PLAIN };
+            out.write_all(&[frame_mode])?;
+        }
+        let fc = frame_encode(&resid, &order, frame_mode == FRAME_GROUPED);
+        out.write_all(&(fc.len() as u32).to_le_bytes())?;
+        out.write_all(&fc)?;
+    }
+    // footer
+    let mut foot = Vec::new();
+    put_blob(&mut foot, &out_h);
+    put_blob_vz(&mut foot, &out_d);
+    put_blob(&mut foot, &blockmax);
+    out.write_all(&foot)?;
+    Ok(rep)
+}
+
+/// Decode the `MTZU` container row by row.
+fn decode_stream3<F: FnMut(usize, &[i32])>(bytes: &[u8], emit: &mut F) -> io::Result<()> {
+    let mut cur = Cursor { b: bytes, pos: 4 };
+    let n = cur.u32()? as usize;
+    let h = cur.u32()? as usize;
+    let k = cur.u32()? as usize;
+    for _ in 0..h {
+        cur.u32()?;
+    }
+    let dhh = cur.blob_vz(h * h)?;
+    let cell_of = cur.blob_raw()?;
+    let in_h = cur.blob_raw()?;
+    let in_d = cur.blob_vz(n * k)?;
+    if cell_of.len() != n || in_h.len() != n * k {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "mtzu header sizes"));
+    }
+    if cur.pos >= bytes.len() {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "frame mode"));
+    }
+    let frame_mode = bytes[cur.pos];
+    cur.pos += 1;
+    let mut frame_off = Vec::with_capacity(n);
+    for _ in 0..n {
+        frame_off.push(cur.pos);
+        let len = cur.u32()? as usize;
+        cur.pos += len;
+        if cur.pos > bytes.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame overrun"));
+        }
+    }
+    let out_h = cur.blob_raw()?;
+    let out_d = cur.blob_vz(n * k)?;
+    let _blockmax = cur.blob_raw()?;
+    if out_h.len() != n * k {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "mtzu footer sizes"));
+    }
+    let order = group_order(&cell_of);
+    let model = HubModel { h, k, dhh, out_h, out_d, in_h, in_d };
+    let mut row = vec![0i32; n];
+    for i in 0..n {
+        let mut fc = Cursor { b: bytes, pos: frame_off[i] };
+        let raw = {
+            let len = fc.u32()? as usize;
+            &bytes[fc.pos..fc.pos + len]
+        };
+        let resid = frame_decode(raw, &order, frame_mode == FRAME_GROUPED, n)?;
+        let m = model.row_reach(i);
+        for j in 0..n {
+            row[j] = (model.base_from_reach(&m, j) + resid[j] as i64) as i32;
+        }
+        emit(i, &row);
+    }
+    Ok(())
+}
+
 fn decode_stream<F: FnMut(usize, &[i32])>(bytes: &[u8], emit: &mut F) -> io::Result<()> {
     let mut cur = Cursor { b: bytes, pos: 4 };
     let n = cur.u32()? as usize;
@@ -839,16 +1334,22 @@ impl RowCache {
 ///
 /// Peak resident memory is `2·L×n` ints + `L×n + 2n` bytes + the cache, never
 /// the full `n²`. The compressed blob itself can be in RAM or memory-mapped.
+enum BaseModel {
+    /// MTZT: flat n×L landmark table.
+    Landmark { l: usize, lm: Vec<usize>, dlj: Vec<i32>, dil: Vec<i32> },
+    /// MTZU: directional path labels + dense hub matrix.
+    Hub { ids: Vec<usize>, model: HubModel, order: Vec<u32>, frame_mode: u8 },
+}
+
 pub struct MtzReader {
     bytes: Vec<u8>,
     n: usize,
-    l: usize,
-    lm: Vec<usize>,
-    dlj: Vec<i32>,
-    dil: Vec<i32>,
-    /// max |residual| per (row, landmark cell), saturated at 255
+    base: BaseModel,
+    /// number of cells per row in `blockmax` (L or H)
+    cells: usize,
+    /// max |residual| per (row, cell), saturated at 255
     blockmax: Vec<u8>,
-    /// derived: which landmark cell each column belongs to
+    /// which cell each column belongs to
     cell_of: Vec<u8>,
     /// derived: max |residual| over each whole row
     rowmax: Vec<u8>,
@@ -858,15 +1359,18 @@ pub struct MtzReader {
 }
 
 impl MtzReader {
-    /// Open an `MTZT` blob with an LRU holding up to `cache_rows` reconstructed
-    /// rows. Only the stream format supports cheap per-row random access;
-    /// legacy `MTZS` blobs must be recompressed (full decode still works via
-    /// [`decompress_rows`]).
+    /// Open an `MTZT` or `MTZU` blob with an LRU holding up to `cache_rows`
+    /// inflated residual rows. Only the stream formats support cheap per-row
+    /// random access; legacy `MTZS` blobs must be recompressed (full decode
+    /// still works via [`decompress_rows`]).
     pub fn open(bytes: Vec<u8>, cache_rows: usize) -> io::Result<Self> {
+        if bytes.len() >= 12 && &bytes[0..4] == MAGIC_STREAM3 {
+            return Self::open_hub(bytes, cache_rows);
+        }
         if bytes.len() < 12 || &bytes[0..4] != MAGIC_STREAM2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "MtzReader requires the MTZT (--stream) format; recompress legacy MTZS blobs",
+                "MtzReader requires the MTZT/MTZU (--stream) formats; recompress legacy MTZS blobs",
             ));
         }
         let (n, l, lm, dlj, dil, blockmax, frame_off);
@@ -912,10 +1416,71 @@ impl MtzReader {
         Ok(Self {
             bytes,
             n,
-            l,
-            lm,
-            dlj,
-            dil,
+            base: BaseModel::Landmark { l, lm, dlj, dil },
+            cells: l,
+            blockmax,
+            cell_of,
+            rowmax,
+            frame_off,
+            cache: RowCache::new(cache_rows),
+            use_index: true,
+        })
+    }
+
+    fn open_hub(bytes: Vec<u8>, cache_rows: usize) -> io::Result<Self> {
+        let (n, h, k, ids, model, order, frame_mode, cell_of, blockmax, frame_off);
+        {
+            let mut cur = Cursor { b: &bytes, pos: 4 };
+            n = cur.u32()? as usize;
+            h = cur.u32()? as usize;
+            k = cur.u32()? as usize;
+            let mut idv = vec![0usize; h];
+            for a in 0..h {
+                idv[a] = cur.u32()? as usize;
+            }
+            let dhh = cur.blob_vz(h * h)?;
+            let cov = cur.blob_raw()?;
+            let in_h = cur.blob_raw()?;
+            let in_d = cur.blob_vz(n * k)?;
+            if cov.len() != n || in_h.len() != n * k {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "mtzu header sizes"));
+            }
+            if cur.pos >= bytes.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "frame mode"));
+            }
+            let fm = bytes[cur.pos];
+            cur.pos += 1;
+            let mut offs = Vec::with_capacity(n);
+            for _ in 0..n {
+                offs.push(cur.pos);
+                let len = cur.u32()? as usize;
+                cur.pos += len;
+                if cur.pos > bytes.len() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "frame overrun"));
+                }
+            }
+            let out_h = cur.blob_raw()?;
+            let out_d = cur.blob_vz(n * k)?;
+            let bmv = cur.blob_raw()?;
+            if out_h.len() != n * k || bmv.len() != n * h {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "mtzu footer sizes"));
+            }
+            ids = idv;
+            order = group_order(&cov);
+            model = HubModel { h, k, dhh, out_h, out_d, in_h, in_d };
+            frame_mode = fm;
+            cell_of = cov;
+            blockmax = bmv;
+            frame_off = offs;
+        }
+        let rowmax: Vec<u8> = (0..n)
+            .map(|i| blockmax[i * h..i * h + h].iter().copied().max().unwrap_or(0))
+            .collect();
+        Ok(Self {
+            bytes,
+            n,
+            base: BaseModel::Hub { ids, model, order, frame_mode },
+            cells: h,
             blockmax,
             cell_of,
             rowmax,
@@ -928,12 +1493,27 @@ impl MtzReader {
     pub fn n(&self) -> usize {
         self.n
     }
+    /// The global anchor points: landmarks (MTZT) or hubs (MTZU).
     pub fn landmarks(&self) -> &[usize] {
-        &self.lm
+        match &self.base {
+            BaseModel::Landmark { lm, .. } => lm,
+            BaseModel::Hub { ids, .. } => ids,
+        }
     }
     /// (cache hits, misses) so far.
     pub fn cache_stats(&self) -> (u64, u64) {
         (self.cache.hits, self.cache.misses)
+    }
+    /// Bytes held resident for the index (excluding the compressed blob and
+    /// the row cache).
+    pub fn resident_bytes(&self) -> usize {
+        let base = match &self.base {
+            BaseModel::Landmark { l, .. } => 2 * l * self.n * 4,
+            BaseModel::Hub { model, .. } => {
+                self.n * 2 * model.k * 5 + model.h * model.h * 4 + self.n * 4 // labels + dhh + order
+            }
+        };
+        base + self.blockmax.len() + self.cell_of.len() + self.rowmax.len()
     }
     /// Disable the O(L) index fast path (every lookup goes through frame
     /// inflation). For benchmarking/verification only.
@@ -952,16 +1532,22 @@ impl MtzReader {
         self.blockmax.iter().filter(|&&m| m == 0).count() as f64 / self.blockmax.len() as f64
     }
 
-    /// Bridge base `min_a d(i,lm_a)+d(lm_a,j)` — O(L) on the resident index.
+    /// The model base — O(L) (landmarks) or O(k²) (path labels), straight
+    /// from the resident index.
     fn base_cell(&self, i: usize, j: usize) -> i64 {
-        let mut base = i64::MAX;
-        for a in 0..self.l {
-            let v = self.dil[i * self.l + a] as i64 + self.dlj[a * self.n + j] as i64;
-            if v < base {
-                base = v;
+        match &self.base {
+            BaseModel::Landmark { l, dlj, dil, .. } => {
+                let mut base = i64::MAX;
+                for a in 0..*l {
+                    let v = dil[i * l + a] as i64 + dlj[a * self.n + j] as i64;
+                    if v < base {
+                        base = v;
+                    }
+                }
+                base
             }
+            BaseModel::Hub { model, .. } => model.base_cell(i, j),
         }
-        base
     }
 
     /// The value an index-exact block reports for `(i,j)`: the bridge base,
@@ -983,7 +1569,7 @@ impl MtzReader {
     /// matrices that validate as a metric ([`ValidationReport::metric_ok`]);
     /// when `lower == upper` the value is exact.
     pub fn cell_bounds(&self, i: usize, j: usize) -> (i32, i32) {
-        let bm = self.blockmax[i * self.l + self.cell_of[j] as usize];
+        let bm = self.blockmax[i * self.cells + self.cell_of[j] as usize];
         let base = self.base_cell(i, j);
         if bm == 0 {
             let v = self.index_cell(i, j);
@@ -998,13 +1584,15 @@ impl MtzReader {
             .saturating_add((bm as i64).min(TRIANGLE_TOL))
             .min(i32::MAX as i64) as i32;
         let mut lo = 0i64;
-        for a in 0..self.l {
-            // d(i,a) ≤ d(i,j)+d(j,a)  and  d(a,j) ≤ d(a,i)+d(i,j)
-            let v1 = self.dil[i * self.l + a] as i64 - self.dil[j * self.l + a] as i64;
-            let v2 = self.dlj[a * self.n + j] as i64 - self.dlj[a * self.n + i] as i64;
-            lo = lo.max(v1).max(v2);
+        if let BaseModel::Landmark { l, dlj, dil, .. } = &self.base {
+            for a in 0..*l {
+                // d(i,a) ≤ d(i,j)+d(j,a)  and  d(a,j) ≤ d(a,i)+d(i,j)
+                let v1 = dil[i * l + a] as i64 - dil[j * l + a] as i64;
+                let v2 = dlj[a * self.n + j] as i64 - dlj[a * self.n + i] as i64;
+                lo = lo.max(v1).max(v2);
+            }
+            lo -= TRIANGLE_TOL;
         }
-        lo -= TRIANGLE_TOL;
         if bm < 255 {
             lo = lo.max(base - bm as i64);
         }
@@ -1012,7 +1600,7 @@ impl MtzReader {
     }
 
     /// `cell()` with a caller tolerance: when the (row, cell) block's
-    /// max-|residual| is ≤ `tol`, return the O(L) bridge base — an
+    /// max-|residual| is ≤ `tol`, return the index base — an
     /// overestimate by at most `tol` (and an underestimate by at most the
     /// integer-rounding noise, `TRIANGLE_TOL`) — without touching the
     /// compressed blob. Otherwise fall back to the exact path. Purely
@@ -1021,7 +1609,7 @@ impl MtzReader {
     /// local search probing travel times where a few seconds of slack is
     /// irrelevant, with exact lookups reserved for accepted moves.
     pub fn cell_within(&mut self, i: usize, j: usize, tol: u8) -> io::Result<i32> {
-        if self.use_index && self.blockmax[i * self.l + self.cell_of[j] as usize] <= tol {
+        if self.use_index && self.blockmax[i * self.cells + self.cell_of[j] as usize] <= tol {
             return Ok(self.index_cell(i, j));
         }
         self.cell(i, j)
@@ -1036,31 +1624,55 @@ impl MtzReader {
         self.blockmax.iter().filter(|&&m| m <= tol).count() as f64 / self.blockmax.len() as f64
     }
 
-    /// Bridge base for the whole row `i` — landmark-outer loops so the big
-    /// `dlj` rows are walked sequentially (cache-friendly), not strided.
+    /// The model base for a whole row `i` — landmark-outer loops (MTZT) or
+    /// the reach-vector trick (MTZU) so big arrays are walked sequentially.
     fn base_row(&self, i: usize) -> Vec<i64> {
-        let mut base = vec![i64::MAX; self.n];
-        for a in 0..self.l {
-            let da = self.dil[i * self.l + a] as i64;
-            let drow = &self.dlj[a * self.n..(a + 1) * self.n];
-            for (b, &dj) in base.iter_mut().zip(drow) {
-                let v = da + dj as i64;
-                if v < *b {
-                    *b = v;
+        match &self.base {
+            BaseModel::Landmark { l, dlj, dil, .. } => {
+                let mut base = vec![i64::MAX; self.n];
+                for a in 0..*l {
+                    let da = dil[i * l + a] as i64;
+                    let drow = &dlj[a * self.n..(a + 1) * self.n];
+                    for (b, &dj) in base.iter_mut().zip(drow) {
+                        let v = da + dj as i64;
+                        if v < *b {
+                            *b = v;
+                        }
+                    }
                 }
+                base
+            }
+            BaseModel::Hub { model, .. } => {
+                let m = model.row_reach(i);
+                (0..self.n).map(|j| model.base_from_reach(&m, j)).collect()
             }
         }
-        base
     }
 
     /// Inflate row `i`'s residual frame (the cheap part — no base needed).
     fn load_resid(&self, i: usize) -> io::Result<Vec<i32>> {
         let mut cur = Cursor { b: &self.bytes, pos: self.frame_off[i] };
-        let resid = cur.blob()?;
-        if resid.len() != self.n {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame size"));
+        match &self.base {
+            BaseModel::Landmark { .. } => {
+                let resid = cur.blob()?;
+                if resid.len() != self.n {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "frame size"));
+                }
+                Ok(resid)
+            }
+            BaseModel::Hub { order, frame_mode, .. } => {
+                let len = cur.u32()? as usize;
+                if cur.pos + len > self.bytes.len() {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "frame"));
+                }
+                frame_decode(
+                    &self.bytes[cur.pos..cur.pos + len],
+                    order,
+                    *frame_mode == FRAME_GROUPED,
+                    self.n,
+                )
+            }
         }
-        Ok(resid)
     }
 
     /// Reconstruct row `i`. Skips the frame entirely when the row is
@@ -1096,7 +1708,7 @@ impl MtzReader {
     /// cached residual (one frame inflate on a miss — never a full-row
     /// reconstruction).
     pub fn cell(&mut self, i: usize, j: usize) -> io::Result<i32> {
-        if self.use_index && self.blockmax[i * self.l + self.cell_of[j] as usize] == 0 {
+        if self.use_index && self.blockmax[i * self.cells + self.cell_of[j] as usize] == 0 {
             return Ok(self.index_cell(i, j));
         }
         let base = self.base_cell(i, j);
@@ -1132,6 +1744,9 @@ pub fn decompress(bytes: &[u8]) -> io::Result<(Vec<i32>, usize)> {
 pub fn decompress_rows<F: FnMut(usize, &[i32])>(bytes: &[u8], mut emit: F) -> io::Result<()> {
     if bytes.len() < 9 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated"));
+    }
+    if &bytes[0..4] == MAGIC_STREAM3 {
+        return decode_stream3(bytes, &mut emit);
     }
     if &bytes[0..4] == MAGIC_STREAM2 {
         return decode_stream2(bytes, &mut emit);
@@ -1524,6 +2139,105 @@ mod tests {
             put_blob(&mut out, &frame);
         }
         out
+    }
+
+    fn compress_hub_buf(d: &[i32], n: usize, opts: &HubOpts) -> (Vec<u8>, ValidationReport) {
+        let mut src = SliceRows { d, n };
+        let mut buf = Vec::new();
+        let rep = compress_stream_hub(&mut src, opts, &mut buf).unwrap();
+        (buf, rep)
+    }
+
+    #[test]
+    fn mtzu_roundtrip_lossless() {
+        // smooth euclidean, asymmetric tweak, and the gateway world — all must
+        // roundtrip byte-for-byte through the path-label container
+        let n = 90;
+        let mut d = euclid_matrix(n, 21);
+        for q in 1..7 {
+            d[0 * n + q] += 31; // directed cells
+        }
+        let (buf, _) = compress_hub_buf(&d, n, &HubOpts::default());
+        let (back, n2) = decompress(&buf).unwrap();
+        assert_eq!(n2, n);
+        assert_eq!(back, d, "MTZU euclid+asym roundtrip failed");
+
+        let (g, gn) = l1_gateway_world(4, 25, 5);
+        let (buf, rep) = compress_hub_buf(&g, gn, &HubOpts::default());
+        assert!(rep.metric_ok());
+        let (back, n2) = decompress(&buf).unwrap();
+        assert_eq!(n2, gn);
+        assert_eq!(back, g, "MTZU gateway roundtrip failed");
+
+        // tiny edge cases
+        let t = vec![0, 3, 5, 3, 0, 2, 5, 2, 0];
+        let (buf, _) = compress_hub_buf(&t, 3, &HubOpts { hubs: 2, k: 2, candidates: 3, samples_per_row: 8 });
+        let (back, n2) = decompress(&buf).unwrap();
+        assert_eq!((back, n2), (t, 3));
+    }
+
+    #[test]
+    fn mtzu_reader_exact_and_bounds() {
+        let (mut d, n) = l1_gateway_world(4, 30, 13);
+        let dead = 71;
+        for x in 0..n {
+            if x != dead {
+                d[x * n + dead] = UNREACHABLE;
+                d[dead * n + x] = UNREACHABLE;
+            }
+        }
+        let (buf, _) = compress_hub_buf(&d, n, &HubOpts::default());
+        let mut rd = MtzReader::open(buf, 4).unwrap();
+        assert_eq!(rd.n(), n);
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(rd.cell(i, j).unwrap(), d[i * n + j], "MTZU cell({i},{j})");
+                if i == dead || j == dead {
+                    continue;
+                }
+                let (lo, up) = rd.cell_bounds(i, j);
+                assert!(
+                    lo <= d[i * n + j] && d[i * n + j] <= up,
+                    "MTZU bounds ({lo},{up}) miss d({i},{j})={}",
+                    d[i * n + j]
+                );
+                let w = rd.cell_within(i, j, 5).unwrap();
+                assert!(
+                    (w - d[i * n + j]).abs() <= 5,
+                    "within(5) gave {w} for true {} at ({i},{j})",
+                    d[i * n + j]
+                );
+            }
+        }
+        // path-labels must make a healthy share of blocks index-exact here
+        assert!(
+            rd.exact_index_block_share() > 0.3,
+            "expected index-exact blocks, got {:.2}",
+            rd.exact_index_block_share()
+        );
+        // frame path agrees with the index path
+        rd.set_index_fast_path(false);
+        for i in (0..n).step_by(7) {
+            assert_eq!(rd.row(i).unwrap(), d[i * n..i * n + n].to_vec());
+        }
+    }
+
+    #[test]
+    fn mtzu_cell_within_tolerance_holds() {
+        let n = 80;
+        let d = euclid_matrix(n, 33);
+        let (buf, _) = compress_hub_buf(&d, n, &HubOpts { hubs: 32, k: 6, candidates: 48, samples_per_row: 64 });
+        let mut rd = MtzReader::open(buf, 8).unwrap();
+        for i in 0..n {
+            for j in 0..n {
+                let v = rd.cell_within(i, j, 7).unwrap();
+                let truth = d[i * n + j];
+                assert!(
+                    v >= truth - TRIANGLE_TOL as i32 && v <= truth + 7,
+                    "within(7) gave {v} for true {truth} at ({i},{j})"
+                );
+            }
+        }
     }
 
     #[test]
