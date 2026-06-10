@@ -31,6 +31,45 @@ use std::time::Instant;
 /// more shortcuts. Higher → slower, fewer shortcuts.
 const WITNESS_HOPS_LIMIT: u32 = 5;
 
+/// Stall-on-demand master switch (A/B: set DIJENG_NO_STALL=1 to disable).
+/// Read once — an env lookup per query would cost more than the stall scan.
+#[inline]
+fn stall_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DIJENG_NO_STALL").is_err())
+}
+
+/// Stall-on-demand check for a node `u` popped at distance `d` in a search
+/// whose distance array is `dist`: if some already-reached HIGHER-ranked
+/// neighbour `x` with an edge x→u (in this search's direction) proves
+/// `dist[x] + w(x→u) < d`, then `d` is not the start of any shortest
+/// up-then-down path and u's expansion can be skipped entirely.
+///
+/// The edges "into u from higher rank" in the forward search are exactly u's
+/// UPWARD arcs in the *transposed* graph (and vice versa) — so the caller
+/// passes the opposite-direction graph. Untouched neighbours sit at INF and
+/// `INF + w` is never `< d`, so no touched-tracking is needed here. The
+/// pruning is exact (classic CH stall-on-demand, Geisberger et al. 2008):
+/// distances are unchanged, only provably non-tight expansions are skipped.
+#[inline]
+fn stalled(
+    opposite: &CsrGraph,
+    up_count_opp: &[u32],
+    dist: &[f32],
+    u: u32,
+    d: f32,
+) -> bool {
+    let s = opposite.head[u as usize] as usize;
+    let e = s + up_count_opp[u as usize] as usize;
+    for k in s..e {
+        let x = opposite.edge_to[k];
+        if dist[x as usize] + opposite.edge_w[k] < d {
+            return true;
+        }
+    }
+    false
+}
+
 /// The fully built Contraction Hierarchy.
 pub struct ContractionHierarchy {
     /// Augmented forward graph (originals + shortcuts), with every vertex's
@@ -98,27 +137,51 @@ pub fn build_with_dist(g: &CsrGraph, edge_dist: &[f32]) -> ContractionHierarchy 
 
     let mut wstate = WitnessState::new(n);
 
+    let edge_diff = use_edge_diff_order();
+    let mut deleted_neighbors: Vec<u32> = vec![0; n];
+
     let mut pq: BinaryHeap<(Reverse<i32>, u32)> = BinaryHeap::with_capacity(n);
     let t_init = Instant::now();
-    for v in 0..n {
-        let p = degree_priority(&fwd, &bwd, v as u32);
-        pq.push((Reverse(p), v as u32));
+    let mut current_priority = vec![0i32; n];
+    if edge_diff {
+        // The initial edge-difference pass runs one witness-limited simulation
+        // per vertex — embarrassingly parallel over the read-only base graph.
+        use rayon::prelude::*;
+        let contracted_ro = &contracted;
+        let fwd_ro = &fwd;
+        let bwd_ro = &bwd;
+        let dn_ro = &deleted_neighbors;
+        current_priority = (0..n)
+            .into_par_iter()
+            .map_init(
+                || WitnessState::new(n),
+                |ws, v| edge_diff_priority(fwd_ro, bwd_ro, contracted_ro, dn_ro, v as u32, ws),
+            )
+            .collect();
+        for v in 0..n {
+            pq.push((Reverse(current_priority[v]), v as u32));
+        }
+        println!(
+            "[ch] initial edge-difference priority (parallel): {:.2} s",
+            t_init.elapsed().as_secs_f64()
+        );
+    } else {
+        for v in 0..n {
+            let p = degree_priority(&fwd, &bwd, v as u32);
+            current_priority[v] = p;
+            pq.push((Reverse(p), v as u32));
+        }
+        println!(
+            "[ch] initial degree-priority: {:.2} s",
+            t_init.elapsed().as_secs_f64()
+        );
     }
-    println!(
-        "[ch] initial degree-priority: {:.2} s",
-        t_init.elapsed().as_secs_f64()
-    );
 
     let mut next_rank: u32 = 0;
     let mut total_shortcuts: u64 = 0;
     let mut last_progress = Instant::now();
     let mut last_progress_rank: u32 = 0;
     let mut neighbor_set: Vec<u32> = Vec::with_capacity(64);
-
-    let mut current_priority = vec![0i32; n];
-    for v in 0..n {
-        current_priority[v] = degree_priority(&fwd, &bwd, v as u32);
-    }
 
     while let Some((Reverse(p_old), v)) = pq.pop() {
         if contracted[v as usize] {
@@ -147,7 +210,12 @@ pub fn build_with_dist(g: &CsrGraph, edge_dist: &[f32]) -> ContractionHierarchy 
         neighbor_set.sort_unstable();
         neighbor_set.dedup();
         for &u in &neighbor_set {
-            let p_u = degree_priority(&fwd, &bwd, u);
+            deleted_neighbors[u as usize] += 1;
+            let p_u = if edge_diff {
+                edge_diff_priority(&fwd, &bwd, &contracted, &deleted_neighbors, u, &mut wstate)
+            } else {
+                degree_priority(&fwd, &bwd, u)
+            };
             current_priority[u as usize] = p_u;
             pq.push((Reverse(p_u), u));
         }
@@ -460,6 +528,7 @@ pub fn query_with_path_into(
 
         let mut best = INF;
         let mut meet: u32 = u32::MAX;
+        let stall = stall_enabled();
 
         loop {
             let tf = hf.first().map(|h| h.d).unwrap_or(INF);
@@ -482,6 +551,9 @@ pub fn query_with_path_into(
                     meet = u;
                 }
                 if d >= best {
+                    continue;
+                }
+                if stall && stalled(&ch.graph_bwd, &ch.up_count_bwd, dist_f, u, d) {
                     continue;
                 }
                 let s = ch.graph_fwd.head[u as usize] as usize;
@@ -509,6 +581,9 @@ pub fn query_with_path_into(
                     meet = u;
                 }
                 if d >= best {
+                    continue;
+                }
+                if stall && stalled(&ch.graph_fwd, &ch.up_count_fwd, dist_b, u, d) {
                     continue;
                 }
                 let s = ch.graph_bwd.head[u as usize] as usize;
@@ -1358,6 +1433,7 @@ pub fn query(ch: &ContractionHierarchy, src: u32, dst: u32) -> Option<f32> {
     push(&mut hb, 0.0, dst);
 
     let mut best = INF;
+    let stall = stall_enabled();
 
     loop {
         let tf = hf.first().map(|h| h.d).unwrap_or(INF);
@@ -1385,6 +1461,9 @@ pub fn query(ch: &ContractionHierarchy, src: u32, dst: u32) -> Option<f32> {
             if d >= best {
                 continue;
             }
+            if stall && stalled(&ch.graph_bwd, &ch.up_count_bwd, &dist_f, u, d) {
+                continue;
+            }
             // Relax only upward edges: the first up_count[u] edges.
             let s = ch.graph_fwd.head[u as usize] as usize;
             let up_end = s + ch.up_count_fwd[u as usize] as usize;
@@ -1408,6 +1487,9 @@ pub fn query(ch: &ContractionHierarchy, src: u32, dst: u32) -> Option<f32> {
             if d >= best {
                 continue;
             }
+            if stall && stalled(&ch.graph_fwd, &ch.up_count_fwd, &dist_b, u, d) {
+                continue;
+            }
             let s = ch.graph_bwd.head[u as usize] as usize;
             let up_end = s + ch.up_count_bwd[u as usize] as usize;
             for k in s..up_end {
@@ -1416,6 +1498,117 @@ pub fn query(ch: &ContractionHierarchy, src: u32, dst: u32) -> Option<f32> {
                 if nd < dist_b[v as usize] {
                     dist_b[v as usize] = nd;
                     push(&mut hb, nd, v);
+                }
+            }
+        } else {
+            break;
+        }
+    }
+
+    if best.is_finite() {
+        Some(best)
+    } else {
+        None
+    }
+}
+
+/// Distance-only p2p query on reused scratch: the same bidirectional upward
+/// search as `query_with_path_into` (incl. stall-on-demand) but with no
+/// parent tracking and no path unpacking — the cheapest exact point-to-point
+/// call for consumers that only need the cost (the VRP solver, the matrix
+/// broker's probe path, the HTTP API's `?dist_only`). Uses the same
+/// `PathScratch` so callers can mix the two per query.
+pub fn query_dist_into(
+    ch: &ContractionHierarchy,
+    src: u32,
+    dst: u32,
+    scratch: &mut PathScratch,
+) -> Option<f32> {
+    scratch.reset();
+    if src == dst {
+        return Some(0.0);
+    }
+    let dist_f = &mut scratch.dist_f;
+    let dist_b = &mut scratch.dist_b;
+    let touched_f = &mut scratch.touched_f;
+    let touched_b = &mut scratch.touched_b;
+    let hf = &mut scratch.hf;
+    let hb = &mut scratch.hb;
+
+    dist_f[src as usize] = 0.0;
+    touched_f.push(src);
+    dist_b[dst as usize] = 0.0;
+    touched_b.push(dst);
+    push(hf, 0.0, src);
+    push(hb, 0.0, dst);
+
+    let mut best = INF;
+    let stall = stall_enabled();
+
+    loop {
+        let tf = hf.first().map(|h| h.d).unwrap_or(INF);
+        let tb = hb.first().map(|h| h.d).unwrap_or(INF);
+        if tf >= best && tb >= best {
+            break;
+        }
+        if hf.is_empty() && hb.is_empty() {
+            break;
+        }
+
+        if tf <= tb && !hf.is_empty() {
+            let HItem { d, v: u } = pop(hf).unwrap();
+            if d > dist_f[u as usize] {
+                continue;
+            }
+            let total = d + dist_b[u as usize];
+            if total < best {
+                best = total;
+            }
+            if d >= best {
+                continue;
+            }
+            if stall && stalled(&ch.graph_bwd, &ch.up_count_bwd, dist_f, u, d) {
+                continue;
+            }
+            let s = ch.graph_fwd.head[u as usize] as usize;
+            let up_end = s + ch.up_count_fwd[u as usize] as usize;
+            for k in s..up_end {
+                let v = ch.graph_fwd.edge_to[k];
+                let nd = d + ch.graph_fwd.edge_w[k];
+                if nd < dist_f[v as usize] {
+                    if dist_f[v as usize] == INF {
+                        touched_f.push(v);
+                    }
+                    dist_f[v as usize] = nd;
+                    push(hf, nd, v);
+                }
+            }
+        } else if !hb.is_empty() {
+            let HItem { d, v: u } = pop(hb).unwrap();
+            if d > dist_b[u as usize] {
+                continue;
+            }
+            let total = d + dist_f[u as usize];
+            if total < best {
+                best = total;
+            }
+            if d >= best {
+                continue;
+            }
+            if stall && stalled(&ch.graph_fwd, &ch.up_count_fwd, dist_b, u, d) {
+                continue;
+            }
+            let s = ch.graph_bwd.head[u as usize] as usize;
+            let up_end = s + ch.up_count_bwd[u as usize] as usize;
+            for k in s..up_end {
+                let v = ch.graph_bwd.edge_to[k];
+                let nd = d + ch.graph_bwd.edge_w[k];
+                if nd < dist_b[v as usize] {
+                    if dist_b[v as usize] == INF {
+                        touched_b.push(v);
+                    }
+                    dist_b[v as usize] = nd;
+                    push(hb, nd, v);
                 }
             }
         } else {
@@ -1600,6 +1793,87 @@ fn pop_h3(h: &mut Vec<HItem3>) -> Option<HItem3> {
 /// Contract v: for hvert par (u, w) av in/out-naboer, sjekk om vi trenger
 /// shortcut. Legg til shortcuts in-place i `fwd`/`bwd`. Returnerer antall
 /// nye shortcuts.
+/// Dry-run of `contract_vertex`: count the shortcuts contraction of `v` would
+/// add, without mutating the graph. Used by the edge-difference ordering.
+/// (May differ marginally from the real count because shortcuts added mid-
+/// contraction are invisible to later witness searches here — fine for a
+/// priority heuristic.)
+fn simulate_contract(
+    fwd: &[Vec<(u32, f32, f32, u32)>],
+    bwd: &[Vec<(u32, f32, f32, u32)>],
+    contracted: &[bool],
+    v: u32,
+    wstate: &mut WitnessState,
+) -> usize {
+    let v_us = v as usize;
+    let mut added = 0usize;
+    for &(u, wuv, _, _) in &bwd[v_us] {
+        if u == v || contracted[u as usize] {
+            continue;
+        }
+        for &(w, wvw, _, _) in &fwd[v_us] {
+            if w == v || w == u || contracted[w as usize] {
+                continue;
+            }
+            let shortcut_w = wuv + wvw;
+            let mut existing_better = false;
+            for &(t, ew, _, _) in &fwd[u as usize] {
+                if t == w && ew <= shortcut_w {
+                    existing_better = true;
+                    break;
+                }
+            }
+            if existing_better {
+                continue;
+            }
+            if wstate.search(fwd, contracted, u, w, v, shortcut_w, WITNESS_HOPS_LIMIT) {
+                continue;
+            }
+            added += 1;
+        }
+    }
+    added
+}
+
+/// Edge-difference ordering priority (RoutingKit/OSRM-style): how much does
+/// contracting `v` grow the graph, weighted, plus a spatial-uniformity term.
+///   ED        = simulated shortcuts − active degree (edges removed)
+///   deleted   = #already-contracted neighbours (spreads contraction evenly,
+///               avoiding deep "towers" in one region)
+/// Lower = contract earlier. The witness-limited simulation makes this far
+/// more accurate than the degree product, at the cost of running a small
+/// witness search per (re-)evaluation — the lazy-update loop keeps the total
+/// number of evaluations near-linear.
+fn edge_diff_priority(
+    fwd: &[Vec<(u32, f32, f32, u32)>],
+    bwd: &[Vec<(u32, f32, f32, u32)>],
+    contracted: &[bool],
+    deleted_neighbors: &[u32],
+    v: u32,
+    wstate: &mut WitnessState,
+) -> i32 {
+    let shortcuts = simulate_contract(fwd, bwd, contracted, v, wstate) as i32;
+    let din = bwd[v as usize]
+        .iter()
+        .filter(|&&(u, _, _, _)| !contracted[u as usize])
+        .count() as i32;
+    let dout = fwd[v as usize]
+        .iter()
+        .filter(|&&(u, _, _, _)| !contracted[u as usize])
+        .count() as i32;
+    4 * (2 * shortcuts - (din + dout)) + deleted_neighbors[v as usize] as i32
+}
+
+/// Which node-ordering heuristic the CH build uses. Default is the
+/// edge-difference ordering (measured: fewer shortcuts, smaller query search
+/// space); `DIJENG_CH_ORDER=degree` restores the old degree product.
+fn use_edge_diff_order() -> bool {
+    match std::env::var("DIJENG_CH_ORDER") {
+        Ok(s) => s != "degree",
+        Err(_) => true,
+    }
+}
+
 fn contract_vertex(
     fwd: &mut Vec<Vec<(u32, f32, f32, u32)>>,
     bwd: &mut Vec<Vec<(u32, f32, f32, u32)>>,

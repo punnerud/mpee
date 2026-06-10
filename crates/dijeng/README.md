@@ -16,12 +16,13 @@ alongside a solver (e.g. brooom — a Rust implementation of VROOM) and a
 GUI, so routing data flows via direct `&Vec` references in the same
 address space instead of IPC or file exchange.
 
-## TL;DR — measured numbers, Apple M3 Pro, Greater London CH (n=1.16M, m_aug=3.9M)
+## TL;DR — measured numbers, Apple M3 Pro, Greater London CH (n=1.16M, m_aug=3.5M)
 
 | Operation | Time | Throughput / note |
 |---|---:|---:|
-| Single p2p `ch::query_with_path_into` | 88-93 µs/call | 11 k calls/s (1 thread) |
-| Single p2p in parallel (11 threads, reused scratch) | 17 µs effective | **59 k calls/s** |
+| **Single p2p distance `ch::query_dist_into`** | **19.9 µs/call** | **50 k calls/s (1 thread)** — beats OSRM's ~30 µs |
+| Single p2p with full path `ch::query_with_path_into` | 62 µs/call | 16 k calls/s (1 thread) |
+| Single p2p in parallel (11 threads, reused scratch) | 14.6 µs effective | 68.6 k calls/s |
 | Matrix 5k × 5k dur+dist | 1.13 s | 22 M cells/s |
 | Matrix 10k × 10k dur+dist | 4.3 s | 23 M cells/s |
 | Matrix 30k × 30k dur+dist | 159 s | 5.7 M cells/s |
@@ -29,8 +30,17 @@ address space instead of IPC or file exchange.
 | Matrix 100k × 100k dur+dist | 1098 s | 9.1 M cells/s |
 | **K-NN 50k × K=160 (granular)** | **1.22 s** | 41 k srcs/s, 92 MB output |
 | FF-ordering 50k coords | 8.0 s | row permutation for streaming |
-| CH build (one-off, caches to disk) | 3-4 min | 150 MB cache |
+| CH build (one-off, caches to disk) | **4.0 s** | 140 MB cache (edge-difference ordering; was 3–4 min) |
 | Cache mmap-load | ~0.02 ms | regardless of size |
+
+Query-side: classic stall-on-demand (Geisberger et al.) prunes provably
+non-tight expansions — verified exact (identical checksums with/without,
+`DIJENG_NO_STALL=1` to A/B). Build-side: lazy edge-difference ordering with a
+parallel initial pass replaces the degree product (`DIJENG_CH_ORDER=degree`
+restores it) — fewer shortcuts, smaller search space, AND a ~50× faster build.
+Ground-truth check: `cargo run --release --bin ch_verify london` compares the
+CH against full bidirectional Dijkstra on random pairs (0 mismatches).
+Existing `.ch` caches stay valid; rebuild one to get the query speedup.
 
 Correctness verified against full Dijeng on every benchmark (ε = 1e-3 relative).
 
@@ -65,7 +75,7 @@ Correctness verified against full Dijeng on every benchmark (ε = 1e-3 relative)
                   └─┬──────────────┬───────────────┬───┘
                     │              │               │
         ch::query   │              │ knn_matrix    │ matrix_with_dist_chunked
-        (88 µs)     │              │ (1.22 s/50k)  │ (94 s/50k×50k)
+        (19.9 µs)   │              │ (1.22 s/50k)  │ (94 s/50k×50k)
                     ▼              ▼               ▼
               ┌─────────┐    ┌────────────┐  ┌─────────────────┐
               │ Single  │    │ Granular   │  │  Streaming      │
@@ -100,7 +110,7 @@ path in microseconds. Our implementation:
 ### Why bucket-MMM (Many-to-Many)
 
 Naive approach: call `ch::query(src, dst)` for every (s,t) pair. For
-50k×50k = 2.5 billion calls × 88 µs = 60 hours. Unworkable.
+50k×50k = 2.5 billion calls × ~20 µs = 14 hours. Unworkable.
 
 Bucket-MMM (Knopp et al.) is O(forward_per_src + backward_per_dst +
 bucket_scans). For 50k×50k on London = **94 s in parallel**, ~3000×
@@ -200,15 +210,18 @@ The saturation knee at chunk≈1500 reflects the SLC size on Apple
 Silicon (~24-48 MB). On Intel/AMD parts with larger L3 (~70 MB+) the
 knee may land at 3000-5000.
 
-### Single-pair latency (`ch::query`)
+### Single-pair latency (`ch::query*`, edge-difference CH + stall-on-demand)
 
 | Variant | Time/call | Throughput |
 |---|---:|---:|
-| 1 thread, alloc-per-call (`ch::query`) | 119 µs | 8.4 k calls/s |
-| 1 thread, reused scratch | **88 µs** | 11.4 k calls/s |
-| 11 threads, alloc-per-call | 70 µs effective | 14 k calls/s (allocator contention) |
-| 11 threads, reused scratch (`map_init`) | **17 µs effective** | **59 k calls/s** |
-| Path-unpacking, 1 thread, reused scratch | 166 µs (~1100 nodes/path) | 6.0 k calls/s |
+| 1 thread, alloc-per-call (`ch::query`) | 101 µs | 9.9 k calls/s |
+| **1 thread, distance-only reused scratch (`query_dist_into`)** | **19.9 µs** | **50 k calls/s** |
+| 1 thread, with-path reused scratch (`query_with_path_into`) | 62 µs (~1100 nodes/path) | 16 k calls/s |
+| 11 threads, reused scratch (`map_init`) | **14.6 µs effective** | **68.6 k calls/s** |
+
+(Historical: before stall-on-demand + the ordering change these were 88 µs
+reused-scratch / 17 µs parallel — the OSRM “3× faster on single queries”
+caveat dated from then.)
 
 Lesson: per-thread `PathScratch::new(n)` is essential. Without it you
 lose 4× to allocator contention in parallel workloads.
@@ -246,17 +259,19 @@ Same machine (M3 Pro), London road network:
 
 | Metric | dijeng | OSRM |
 |---|---:|---:|
-| Preprocessing time | 3-4 min | ~37 s |
-| CH cache size | 150 MB | ~140 MB |
-| p2p query (internal) | 88 µs | ~30 µs |
+| Preprocessing time | **4.0 s** | ~37 s |
+| CH cache size | 140 MB | ~140 MB |
+| p2p distance query (internal) | **19.9 µs** | ~30 µs |
+| p2p query with full path (internal) | 62 µs | — |
 | p2p query (over HTTP) | n/a | ~780 µs |
 | /table 1000×1000 over HTTP | ~0.4 s (local, internal) | ~0.8 s |
 | /table 10k×10k dur+dist | 4.3 s | impractical (M-by-N matrix mode, no chunking) |
 | /table 50k×50k dur+dist | 94 s (chunked, 500 MB) | n/a (RAM OOM) |
 
-OSRM is ~3× faster per p2p query, but has no chunked many-to-many for
-matrices larger than ~5k×5k without external orchestration. For VRP
-fleets of 50k–100k customers, dijeng is the only practical option.
+dijeng now wins the single-query race too (19.9 µs vs ~30 µs internal,
+stall-on-demand + edge-difference ordering — was 88 µs, 3× *slower*),
+preprocesses ~9× faster, and remains the only practical option for
+fleet-sized matrices (50k–100k customers) thanks to chunked many-to-many.
 
 ## Files / modules
 

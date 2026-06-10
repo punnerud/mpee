@@ -60,7 +60,7 @@ it**, which is where the speed and memory wins come from.
 | 200k × 200k | 500 MB | 150 | 2,441 s (~41 min) | 469 MB | 16.4M cells/s | 1.00× |
 | **200k × 200k** | **1 GB** | **352** | **1,940 s (~32 min)** | **891 MB** | **20.6M cells/s** | **1.26×** |
 
-<sub>†Speedup vs same N at 500 MB budget. 98 % finite cells; ~76 GB streamed to disk for 100k. Raw logs: [`benchmarks/london-scale/`](benchmarks/london-scale/). Honest caveat: OSRM is ~3× faster on a *single* point-to-point query (≈30 µs vs ≈88 µs). MPEE wins decisively the moment you need a fleet-sized matrix — the case VRP actually requires. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
+<sub>†Speedup vs same N at 500 MB budget. 98 % finite cells; ~76 GB streamed to disk for 100k. Raw logs: [`benchmarks/london-scale/`](benchmarks/london-scale/). Single point-to-point queries: MPEE ≈20 µs vs OSRM ≈30 µs internal (stall-on-demand + edge-difference CH closed what used to be a 3× OSRM lead), and the CH preprocesses in 4 s vs OSRM's ~37 s. ([full table](crates/dijeng/README.md#comparison-with-osrm))</sub>
 
 **Optimisation — VRP solver** · brooom vs PyVRP / VROOM / OR-Tools, Solomon-style
 
@@ -556,7 +556,7 @@ Both dijeng and brooom were recently optimised to compute distances
 
 - **dijeng** has bucket-based many-to-many MMM that streams rows,
   granular K-NN (K=160 → 92 MB instead of 20 GB for 50k customers), and
-  88 µs single-pair CH queries.
+  20 µs single-pair CH distance queries.
 - **brooom**'s local-search loop reads only K-nearest neighbours on the
   hot path and falls back to single-pair queries for route evaluation —
   so the full matrix is never required.

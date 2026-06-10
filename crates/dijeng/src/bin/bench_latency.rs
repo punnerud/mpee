@@ -128,6 +128,49 @@ fn main() -> std::io::Result<()> {
         n_queries
     );
 
+    // ───── Warm sequential, DISTANCE-ONLY (no parents, no unpack) ─────
+    for &(s, d) in &pairs[..1024.min(n_queries)] {
+        let _ = ch::query_dist_into(&h, s, d, &mut scratch);
+    }
+    let t = Instant::now();
+    let mut donly_finite = 0usize;
+    let mut donly_sum = 0.0f64; // checksum: must be identical with/without stall
+    for &(s, d) in &pairs {
+        if let Some(v) = ch::query_dist_into(&h, s, d, &mut scratch) {
+            donly_finite += 1;
+            donly_sum += v as f64;
+        }
+    }
+    let donly_ns = t.elapsed().as_nanos() as f64;
+    let donly_per = donly_ns / n_queries as f64;
+    println!(
+        "\n── warm sequential, DISTANCE-ONLY reused scratch ({n_queries} calls, 1 thread) ──\n  \
+         total: {:.2} s   mean: {:.0} ns/call ({:.2} µs)   throughput: {:.1} k calls/s   \
+         finite: {}/{}   checksum: {:.3}",
+        donly_ns / 1e9,
+        donly_per,
+        donly_per / 1000.0,
+        calls_per_s(donly_per) / 1000.0,
+        donly_finite,
+        n_queries,
+        donly_sum
+    );
+
+    // ───── Correctness: dist-only vs path query agree pairwise ─────
+    let chk_n = 5_000usize.min(n_queries);
+    let mut chk_scratch = PathScratch::new(n);
+    let mut mismatches = 0usize;
+    for &(s, d) in &pairs[..chk_n] {
+        let a = ch::query_dist_into(&h, s, d, &mut scratch);
+        let b = ch::query_with_path_into(&h, s, d, &mut chk_scratch);
+        match (a, b) {
+            (Some(x), Some(y)) if (x - y).abs() <= 1e-3 * x.abs().max(1.0) => {}
+            (None, None) => {}
+            _ => mismatches += 1,
+        }
+    }
+    println!("  correctness: dist-only vs with-path on {chk_n} pairs — {mismatches} mismatches");
+
     // ───── Parallel, alloc-per-call ─────
     let t = Instant::now();
     let par_finite: usize = pairs
