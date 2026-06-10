@@ -17,6 +17,16 @@
 //! degrades gracefully to roughly plain deflate. Measured: ~6.4× on a real OSRM
 //! road matrix across 8 Norwegian cities, ~10× on single-gateway synthetic worlds,
 //! ~1.8× on structureless uniform points.
+//!
+//! The streamed `MTZT` container additionally doubles as an **in-memory query
+//! index**: the per-point landmark distances (the "which of the few roads out
+//! of each region do I use" table) plus a per-(row, landmark-cell)
+//! max-|residual| byte stay resident in [`MtzReader`], so blocks the min-plus
+//! base reproduces exactly are answered in O(L) with zero decompression, and
+//! every cell gets O(L) lower/upper bounds ([`MtzReader::cell_bounds`]) or
+//! tolerance-bounded values ([`MtzReader::cell_within`]) for solver pruning.
+//! Landmarks are picked by greedy pivot mining ([`pick_landmarks`]), which
+//! converges on the actual gateways when they exist.
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -24,10 +34,17 @@ use flate2::Compression;
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 4] = b"MTZ2";
-/// Streamed container: framed per-row, bridge model only. Peak memory is the L
-/// landmark rows plus one working row — never the full n². Fed by any
-/// [`RowSource`] (e.g. dijeng's chunked many-to-many) and decoded row-by-row.
+/// Legacy streamed container (decode only): framed per-row with the landmark
+/// distances embedded in each frame, so even one cell needs a frame inflated.
 const MAGIC_STREAM: &[u8; 4] = b"MTZS";
+/// Streamed container v2: frames hold only the residual row; the per-point
+/// landmark distances (`dil`, the "gateway index") and a per-(row,
+/// landmark-cell) max-|residual| byte table live in a footer that
+/// [`MtzReader`] keeps resident. Blocks whose residual is all-zero — the
+/// cross-region blocks when real bottleneck structure exists — are then
+/// answered in O(L) straight from the index, no inflate.
+/// Peak encode memory is the L landmark rows + the n×L index + one working row.
+const MAGIC_STREAM2: &[u8; 4] = b"MTZT";
 const METHOD_CLUSTER: u8 = 0;
 const METHOD_BRIDGE: u8 = 1;
 /// Landmark counts the bridge model sweeps (best-of, capped to < n).
@@ -93,14 +110,17 @@ impl<'a> Cursor<'a> {
     fn i32(&mut self) -> io::Result<i32> {
         Ok(self.u32()? as i32)
     }
-    fn blob(&mut self) -> io::Result<Vec<i32>> {
+    fn blob_raw(&mut self) -> io::Result<Vec<u8>> {
         let len = self.u32()? as usize;
         if self.pos + len > self.b.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "blob"));
         }
         let raw = inflate(&self.b[self.pos..self.pos + len])?;
         self.pos += len;
-        Ok(le_to_i32s(&raw))
+        Ok(raw)
+    }
+    fn blob(&mut self) -> io::Result<Vec<i32>> {
+        Ok(le_to_i32s(&self.blob_raw()?))
     }
 }
 
@@ -211,10 +231,66 @@ pub fn default_k(n: usize) -> usize {
     (n / 40).clamp(2, 64)
 }
 
-/// Pick `l` landmarks by farthest-point sampling (for streaming compression /
-/// the bridge model). Public wrapper over the internal sampler.
+/// Pick `l` landmarks for streaming compression / the bridge model by **pivot
+/// mining**: greedily choose the points that minimise the min-plus residual
+/// over a deterministic sample of (i,j) pairs. On gateway-structured data this
+/// converges on the actual gateways (the "3 roads" joining regions), which is
+/// what makes whole blocks index-exact; on structureless data it degrades to a
+/// k-medians-like spread. O(l·n·S) with S = sample size.
 pub fn pick_landmarks(d: &[i32], n: usize, l: usize) -> Vec<usize> {
-    farthest_landmarks(d, n, l)
+    let l = l.min(n);
+    if n < 3 || l == 0 {
+        return (0..l.max(1).min(n)).collect();
+    }
+    let s_count = (n * 4).clamp(512, 4096);
+    let mut state: u64 = 0xA5A5_5A5A_DEAD_BEEF;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as usize
+    };
+    let mut pairs = Vec::with_capacity(s_count);
+    while pairs.len() < s_count {
+        let i = next() % n;
+        let j = next() % n;
+        if i != j {
+            pairs.push((i, j));
+        }
+    }
+    // greedy facility location: each new landmark x minimises
+    // Σ_s min(cur[s], d(i,x)+d(x,j)) over the sampled pairs
+    let mut cur = vec![i64::MAX; s_count];
+    let mut chosen: Vec<usize> = Vec::with_capacity(l);
+    let mut used = vec![false; n];
+    for _ in 0..l {
+        let mut best_x = usize::MAX;
+        let mut best_cost = i64::MAX;
+        for x in 0..n {
+            if used[x] {
+                continue;
+            }
+            let mut cost = 0i64;
+            for (s, &(i, j)) in pairs.iter().enumerate() {
+                let via = d[i * n + x] as i64 + d[x * n + j] as i64;
+                cost += cur[s].min(via);
+            }
+            if cost < best_cost {
+                best_cost = cost;
+                best_x = x;
+            }
+        }
+        if best_x == usize::MAX {
+            break;
+        }
+        used[best_x] = true;
+        chosen.push(best_x);
+        for (s, &(i, j)) in pairs.iter().enumerate() {
+            let via = d[i * n + best_x] as i64 + d[best_x * n + j] as i64;
+            cur[s] = cur[s].min(via);
+        }
+    }
+    chosen
 }
 
 // ---------------------------------------------------------------- landmarks
@@ -502,6 +578,24 @@ pub fn validate(d: &[i32], n: usize) -> ValidationReport {
 }
 
 // ---------------------------------------------------------------- streaming
+/// Voronoi cell of each column: the landmark nearest to `j` (by landmark→j
+/// distance, ties to the lowest index). Encoder and reader derive this from
+/// the same resident `dlj`, so the block layout never has to be stored.
+fn assign_cells(dlj: &[i32], n: usize, l: usize) -> Vec<u8> {
+    let mut cell_of = vec![0u8; n];
+    for j in 0..n {
+        let mut best = i64::MAX;
+        for a in 0..l {
+            let v = dlj[a * n + j] as i64;
+            if v < best {
+                best = v;
+                cell_of[j] = a as u8;
+            }
+        }
+    }
+    cell_of
+}
+
 /// A source of matrix rows in `0..n` order. Implement this over dijeng's chunked
 /// many-to-many (or any generator) to compress a matrix that never fully
 /// materialises in RAM.
@@ -527,10 +621,11 @@ impl RowSource for SliceRows<'_> {
 }
 
 /// Stream-compress a matrix to `out` using the bridge model, validating each row
-/// as it passes. Peak memory is `L×n` (resident landmark rows) plus a working
-/// row — independent of the full matrix size. Writes the `MTZS` framed
-/// container, which [`decompress_rows`] decodes row-by-row. Returns the
-/// validation report gathered during the single forward pass.
+/// as it passes. Peak memory is `L×n` (resident landmark rows) + `n×L` (the
+/// gateway index accumulated for the footer) plus a working row — independent
+/// of the full `n²`. Writes the `MTZT` framed container, which
+/// [`decompress_rows`] decodes row-by-row and [`MtzReader`] random-accesses.
+/// Returns the validation report gathered during the single forward pass.
 pub fn compress_stream<S: RowSource, W: Write>(
     src: &mut S,
     lm: &[usize],
@@ -544,7 +639,7 @@ pub fn compress_stream<S: RowSource, W: Write>(
         let r = src.row(la);
         dlj[a * n..a * n + n].copy_from_slice(&r);
     }
-    out.write_all(MAGIC_STREAM)?;
+    out.write_all(MAGIC_STREAM2)?;
     out.write_all(&(n as u32).to_le_bytes())?;
     out.write_all(&(l as u32).to_le_bytes())?;
     for &id in lm {
@@ -554,18 +649,98 @@ pub fn compress_stream<S: RowSource, W: Write>(
     out.write_all(&(dljc.len() as u32).to_le_bytes())?;
     out.write_all(&dljc)?;
 
+    assert!(l <= 255, "MTZT block index supports at most 255 landmarks");
+    let cell_of = assign_cells(&dlj, n, l);
+
     let mut rep = ValidationReport::default();
+    // gateway index + per-(row, landmark-cell) residual bound, for the footer
+    let mut dil = vec![0i32; n * l];
+    let mut blockmax = vec![0u8; n * l];
     for i in 0..n {
         let row = src.row(i);
         let resid = validate_row(&mut rep, i, &row, n, lm, &dlj);
-        let dil: Vec<i32> = lm.iter().map(|&a| row[a]).collect();
-        let mut frame = i32s_to_le(&dil);
-        frame.extend_from_slice(&i32s_to_le(&resid));
-        let fc = deflate(&frame);
+        for (a, &la) in lm.iter().enumerate() {
+            dil[i * l + a] = row[la];
+        }
+        for j in 0..n {
+            let b = &mut blockmax[i * l + cell_of[j] as usize];
+            if row[j] >= UNREACHABLE {
+                // The index fast path answers `base >= UNREACHABLE` cells as
+                // exactly UNREACHABLE; that is verified here cell by cell, and
+                // any cell it would get wrong poisons the block (255).
+                let base = row[j] as i64 - resid[j] as i64;
+                if !(row[j] == UNREACHABLE && base >= UNREACHABLE as i64) {
+                    *b = 255;
+                }
+                continue;
+            }
+            let m = (resid[j] as i64).unsigned_abs().min(255) as u8;
+            if m > *b {
+                *b = m;
+            }
+        }
+        let fc = deflate(&i32s_to_le(&resid));
         out.write_all(&(fc.len() as u32).to_le_bytes())?;
         out.write_all(&fc)?;
     }
+    // footer: kept resident by MtzReader so blocks with all-zero residual are
+    // answered from the index alone, without touching any frame
+    let dilc = deflate(&i32s_to_le(&dil));
+    out.write_all(&(dilc.len() as u32).to_le_bytes())?;
+    out.write_all(&dilc)?;
+    let bmc = deflate(&blockmax);
+    out.write_all(&(bmc.len() as u32).to_le_bytes())?;
+    out.write_all(&bmc)?;
     Ok(rep)
+}
+
+/// Decode the `MTZT` container: header + resident tables, then resid-only
+/// frames. `dil` lives in the footer (after the frames), so the frames are
+/// skip-walked once to reach it before any row is reconstructed.
+fn decode_stream2<F: FnMut(usize, &[i32])>(bytes: &[u8], emit: &mut F) -> io::Result<()> {
+    let mut cur = Cursor { b: bytes, pos: 4 };
+    let n = cur.u32()? as usize;
+    let l = cur.u32()? as usize;
+    for _ in 0..l {
+        cur.u32()?; // landmark ids: not needed to reconstruct values
+    }
+    let dlj = cur.blob()?;
+    if dlj.len() != l * n {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "stream dlj size"));
+    }
+    let mut frame_off = Vec::with_capacity(n);
+    for _ in 0..n {
+        frame_off.push(cur.pos);
+        let len = cur.u32()? as usize;
+        cur.pos += len;
+        if cur.pos > bytes.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame overrun"));
+        }
+    }
+    let dil = cur.blob()?;
+    if dil.len() != n * l {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "stream dil size"));
+    }
+    let mut row = vec![0i32; n];
+    for i in 0..n {
+        let mut fc = Cursor { b: bytes, pos: frame_off[i] };
+        let resid = fc.blob()?;
+        if resid.len() != n {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "stream frame size"));
+        }
+        for j in 0..n {
+            let mut base = i64::MAX;
+            for a in 0..l {
+                let v = dil[i * l + a] as i64 + dlj[a * n + j] as i64;
+                if v < base {
+                    base = v;
+                }
+            }
+            row[j] = (base + resid[j] as i64) as i32;
+        }
+        emit(i, &row);
+    }
+    Ok(())
 }
 
 fn decode_stream<F: FnMut(usize, &[i32])>(bytes: &[u8], emit: &mut F) -> io::Result<()> {
@@ -603,7 +778,7 @@ fn decode_stream<F: FnMut(usize, &[i32])>(bytes: &[u8], emit: &mut F) -> io::Res
 }
 
 // ------------------------------------------------------- compressed random access
-/// Tiny capacity-bounded LRU of reconstructed rows (approximate, tick-based).
+/// Tiny capacity-bounded LRU of inflated residual rows (approximate, tick-based).
 struct RowCache {
     cap: usize,
     map: std::collections::HashMap<usize, (Vec<i32>, u64)>,
@@ -621,17 +796,21 @@ impl RowCache {
             misses: 0,
         }
     }
-    fn get(&mut self, i: usize) -> Option<Vec<i32>> {
+    /// Refresh row `i` and borrow it without cloning (cell lookups).
+    fn touch(&mut self, i: usize) -> Option<&[i32]> {
         self.tick += 1;
         let t = self.tick;
         if let Some(e) = self.map.get_mut(&i) {
             e.1 = t;
             self.hits += 1;
-            Some(e.0.clone())
+            Some(&e.0)
         } else {
             self.misses += 1;
             None
         }
+    }
+    fn get(&mut self, i: usize) -> Option<Vec<i32>> {
+        self.touch(i).map(|r| r.to_vec())
     }
     fn put(&mut self, i: usize, row: Vec<i32>) {
         self.tick += 1;
@@ -645,33 +824,52 @@ impl RowCache {
     }
 }
 
-/// Random-access reader over an `MTZS` (streamed) blob: keeps the compressed
-/// bytes + the resident `L×n` landmark rows, indexes each row's frame, and
-/// reconstructs a row on demand (inflate one small frame), caching hot rows in
-/// an LRU. This turns the compressed matrix into a true in-RAM random-access
-/// store — peak resident memory is `L×n` + the cache, never the full `n²`. The
-/// compressed blob itself can be held in RAM or memory-mapped from disk.
+/// Random-access reader over an `MTZT` (streamed) blob: keeps the compressed
+/// bytes + the resident landmark rows (`dlj`, `L×n`), the gateway index
+/// (`dil`, `n×L`) and the per-row max-|residual| bytes, indexes each row's
+/// frame, and reconstructs rows on demand, caching hot rows in an LRU.
+///
+/// The resident index makes two things O(L) with **zero decompression**:
+/// - exact `cell(i,j)` whenever the (row, landmark-cell-of-`j`) block has an
+///   all-zero residual — under real gateway structure that covers the
+///   cross-region blocks, i.e. most random lookups, and
+/// - `cell_bounds(i,j)` — bridge upper bound + ALT lower bound, tightened by
+///   the block's max-|residual| — for every cell, usable to prune before
+///   paying for an exact lookup.
+///
+/// Peak resident memory is `2·L×n` ints + `L×n + 2n` bytes + the cache, never
+/// the full `n²`. The compressed blob itself can be in RAM or memory-mapped.
 pub struct MtzReader {
     bytes: Vec<u8>,
     n: usize,
     l: usize,
     lm: Vec<usize>,
     dlj: Vec<i32>,
+    dil: Vec<i32>,
+    /// max |residual| per (row, landmark cell), saturated at 255
+    blockmax: Vec<u8>,
+    /// derived: which landmark cell each column belongs to
+    cell_of: Vec<u8>,
+    /// derived: max |residual| over each whole row
+    rowmax: Vec<u8>,
     frame_off: Vec<usize>,
     cache: RowCache,
+    use_index: bool,
 }
 
 impl MtzReader {
-    /// Open an `MTZS` blob with an LRU holding up to `cache_rows` reconstructed
-    /// rows. Only the stream format supports cheap per-row random access.
+    /// Open an `MTZT` blob with an LRU holding up to `cache_rows` reconstructed
+    /// rows. Only the stream format supports cheap per-row random access;
+    /// legacy `MTZS` blobs must be recompressed (full decode still works via
+    /// [`decompress_rows`]).
     pub fn open(bytes: Vec<u8>, cache_rows: usize) -> io::Result<Self> {
-        if bytes.len() < 12 || &bytes[0..4] != MAGIC_STREAM {
+        if bytes.len() < 12 || &bytes[0..4] != MAGIC_STREAM2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "MtzReader requires the MTZS (--stream) format",
+                "MtzReader requires the MTZT (--stream) format; recompress legacy MTZS blobs",
             ));
         }
-        let (n, l, lm, dlj, frame_off);
+        let (n, l, lm, dlj, dil, blockmax, frame_off);
         {
             let mut cur = Cursor { b: &bytes, pos: 4 };
             n = cur.u32()? as usize;
@@ -693,18 +891,37 @@ impl MtzReader {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "frame overrun"));
                 }
             }
+            let dilv = cur.blob()?;
+            if dilv.len() != n * l {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "dil size"));
+            }
+            let bmv = cur.blob_raw()?;
+            if bmv.len() != n * l {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "blockmax size"));
+            }
             lm = lmv;
             dlj = dljv;
+            dil = dilv;
+            blockmax = bmv;
             frame_off = offs;
         }
+        let cell_of = assign_cells(&dlj, n, l);
+        let rowmax: Vec<u8> = (0..n)
+            .map(|i| blockmax[i * l..i * l + l].iter().copied().max().unwrap_or(0))
+            .collect();
         Ok(Self {
             bytes,
             n,
             l,
             lm,
             dlj,
+            dil,
+            blockmax,
+            cell_of,
+            rowmax,
             frame_off,
             cache: RowCache::new(cache_rows),
+            use_index: true,
         })
     }
 
@@ -718,43 +935,178 @@ impl MtzReader {
     pub fn cache_stats(&self) -> (u64, u64) {
         (self.cache.hits, self.cache.misses)
     }
-
-    /// Reconstruct row `i` (cached). Inflates one frame on a miss.
-    pub fn row(&mut self, i: usize) -> io::Result<Vec<i32>> {
-        if let Some(r) = self.cache.get(i) {
-            return Ok(r);
+    /// Disable the O(L) index fast path (every lookup goes through frame
+    /// inflation). For benchmarking/verification only.
+    pub fn set_index_fast_path(&mut self, on: bool) {
+        self.use_index = on;
+    }
+    /// Number of rows answerable from the resident index alone (residual 0).
+    pub fn exact_index_rows(&self) -> usize {
+        self.rowmax.iter().filter(|&&m| m == 0).count()
+    }
+    /// Fraction of (row, landmark-cell) blocks answerable from the index alone.
+    pub fn exact_index_block_share(&self) -> f64 {
+        if self.blockmax.is_empty() {
+            return 0.0;
         }
-        let off = self.frame_off[i];
-        let len = u32::from_le_bytes([
-            self.bytes[off],
-            self.bytes[off + 1],
-            self.bytes[off + 2],
-            self.bytes[off + 3],
-        ]) as usize;
-        let raw = inflate(&self.bytes[off + 4..off + 4 + len])?;
-        let frame = le_to_i32s(&raw);
-        if frame.len() != self.l + self.n {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame size"));
-        }
-        let (dil, resid) = frame.split_at(self.l);
-        let mut row = vec![0i32; self.n];
-        for j in 0..self.n {
-            let mut base = i64::MAX;
-            for a in 0..self.l {
-                let v = dil[a] as i64 + self.dlj[a * self.n + j] as i64;
-                if v < base {
-                    base = v;
-                }
-            }
-            row[j] = (base + resid[j] as i64) as i32;
-        }
-        self.cache.put(i, row.clone());
-        Ok(row)
+        self.blockmax.iter().filter(|&&m| m == 0).count() as f64 / self.blockmax.len() as f64
     }
 
-    /// Single cell `d(i,j)` via the row cache.
+    /// Bridge base `min_a d(i,lm_a)+d(lm_a,j)` — O(L) on the resident index.
+    fn base_cell(&self, i: usize, j: usize) -> i64 {
+        let mut base = i64::MAX;
+        for a in 0..self.l {
+            let v = self.dil[i * self.l + a] as i64 + self.dlj[a * self.n + j] as i64;
+            if v < base {
+                base = v;
+            }
+        }
+        base
+    }
+
+    /// The value an index-exact block reports for `(i,j)`: the bridge base,
+    /// with `base >= UNREACHABLE` collapsed to exactly UNREACHABLE (the
+    /// encoder verified that collapse cell by cell before marking the block).
+    fn index_cell(&self, i: usize, j: usize) -> i32 {
+        let base = self.base_cell(i, j);
+        if base >= UNREACHABLE as i64 {
+            UNREACHABLE
+        } else {
+            base as i32
+        }
+    }
+
+    /// `(lower, upper)` bounds on `d(i,j)` from the resident index alone —
+    /// O(L), no decompression. Upper is the bridge base, lower is the directed
+    /// ALT bound tightened by the block's max-|residual|; both widened by
+    /// `TRIANGLE_TOL` to absorb integer-rounding noise. Only meaningful for
+    /// matrices that validate as a metric ([`ValidationReport::metric_ok`]);
+    /// when `lower == upper` the value is exact.
+    pub fn cell_bounds(&self, i: usize, j: usize) -> (i32, i32) {
+        let bm = self.blockmax[i * self.l + self.cell_of[j] as usize];
+        let base = self.base_cell(i, j);
+        if bm == 0 {
+            let v = self.index_cell(i, j);
+            return (v, v);
+        }
+        if base >= UNREACHABLE as i64 {
+            // unreachable territory is outside the metric contract — stay safe
+            return (0, i32::MAX);
+        }
+        // residual ∈ [-bm, +min(bm, TRIANGLE_TOL)] (positive side is only noise)
+        let up = base
+            .saturating_add((bm as i64).min(TRIANGLE_TOL))
+            .min(i32::MAX as i64) as i32;
+        let mut lo = 0i64;
+        for a in 0..self.l {
+            // d(i,a) ≤ d(i,j)+d(j,a)  and  d(a,j) ≤ d(a,i)+d(i,j)
+            let v1 = self.dil[i * self.l + a] as i64 - self.dil[j * self.l + a] as i64;
+            let v2 = self.dlj[a * self.n + j] as i64 - self.dlj[a * self.n + i] as i64;
+            lo = lo.max(v1).max(v2);
+        }
+        lo -= TRIANGLE_TOL;
+        if bm < 255 {
+            lo = lo.max(base - bm as i64);
+        }
+        (lo.clamp(0, i32::MAX as i64) as i32, up)
+    }
+
+    /// `cell()` with a caller tolerance: when the (row, cell) block's
+    /// max-|residual| is ≤ `tol`, return the O(L) bridge base — an
+    /// overestimate by at most `tol` (and an underestimate by at most the
+    /// integer-rounding noise, `TRIANGLE_TOL`) — without touching the
+    /// compressed blob. Otherwise fall back to the exact path. Purely
+    /// value-based (no metric assumption), so safe on asymmetric road
+    /// matrices; `tol = 0` is exactly [`MtzReader::cell`]. Typical use: a VRP
+    /// local search probing travel times where a few seconds of slack is
+    /// irrelevant, with exact lookups reserved for accepted moves.
+    pub fn cell_within(&mut self, i: usize, j: usize, tol: u8) -> io::Result<i32> {
+        if self.use_index && self.blockmax[i * self.l + self.cell_of[j] as usize] <= tol {
+            return Ok(self.index_cell(i, j));
+        }
+        self.cell(i, j)
+    }
+
+    /// Share of (row, landmark-cell) blocks whose max-|residual| is ≤ `tol`,
+    /// i.e. the fraction of lookups [`MtzReader::cell_within`] answers in O(L).
+    pub fn index_share_within(&self, tol: u8) -> f64 {
+        if self.blockmax.is_empty() {
+            return 0.0;
+        }
+        self.blockmax.iter().filter(|&&m| m <= tol).count() as f64 / self.blockmax.len() as f64
+    }
+
+    /// Bridge base for the whole row `i` — landmark-outer loops so the big
+    /// `dlj` rows are walked sequentially (cache-friendly), not strided.
+    fn base_row(&self, i: usize) -> Vec<i64> {
+        let mut base = vec![i64::MAX; self.n];
+        for a in 0..self.l {
+            let da = self.dil[i * self.l + a] as i64;
+            let drow = &self.dlj[a * self.n..(a + 1) * self.n];
+            for (b, &dj) in base.iter_mut().zip(drow) {
+                let v = da + dj as i64;
+                if v < *b {
+                    *b = v;
+                }
+            }
+        }
+        base
+    }
+
+    /// Inflate row `i`'s residual frame (the cheap part — no base needed).
+    fn load_resid(&self, i: usize) -> io::Result<Vec<i32>> {
+        let mut cur = Cursor { b: &self.bytes, pos: self.frame_off[i] };
+        let resid = cur.blob()?;
+        if resid.len() != self.n {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame size"));
+        }
+        Ok(resid)
+    }
+
+    /// Reconstruct row `i`. Skips the frame entirely when the row is
+    /// index-exact; otherwise one frame inflate (residuals LRU-cached) plus an
+    /// O(L·n) base sweep.
+    pub fn row(&mut self, i: usize) -> io::Result<Vec<i32>> {
+        if self.use_index && self.rowmax[i] == 0 {
+            // residual all-zero: the bridge base IS the row, skip the frame
+            return Ok(self
+                .base_row(i)
+                .iter()
+                .map(|&b| if b >= UNREACHABLE as i64 { UNREACHABLE } else { b as i32 })
+                .collect());
+        }
+        let base = self.base_row(i);
+        let resid = match self.cache.get(i) {
+            Some(r) => r,
+            None => {
+                let r = self.load_resid(i)?;
+                self.cache.put(i, r.clone());
+                r
+            }
+        };
+        Ok(base
+            .iter()
+            .zip(&resid)
+            .map(|(&b, &r)| (b + r as i64) as i32)
+            .collect())
+    }
+
+    /// Single cell `d(i,j)`. O(L) straight from the resident index when the
+    /// (row, landmark-cell-of-`j`) block is index-exact; otherwise O(L) + the
+    /// cached residual (one frame inflate on a miss — never a full-row
+    /// reconstruction).
     pub fn cell(&mut self, i: usize, j: usize) -> io::Result<i32> {
-        Ok(self.row(i)?[j])
+        if self.use_index && self.blockmax[i * self.l + self.cell_of[j] as usize] == 0 {
+            return Ok(self.index_cell(i, j));
+        }
+        let base = self.base_cell(i, j);
+        if let Some(r) = self.cache.touch(i).map(|r| r[j]) {
+            return Ok((base + r as i64) as i32);
+        }
+        let resid = self.load_resid(i)?;
+        let v = (base + resid[j] as i64) as i32;
+        self.cache.put(i, resid);
+        Ok(v)
     }
 }
 
@@ -780,6 +1132,9 @@ pub fn decompress(bytes: &[u8]) -> io::Result<(Vec<i32>, usize)> {
 pub fn decompress_rows<F: FnMut(usize, &[i32])>(bytes: &[u8], mut emit: F) -> io::Result<()> {
     if bytes.len() < 9 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated"));
+    }
+    if &bytes[0..4] == MAGIC_STREAM2 {
+        return decode_stream2(bytes, &mut emit);
     }
     if &bytes[0..4] == MAGIC_STREAM {
         return decode_stream(bytes, &mut emit);
@@ -1036,9 +1391,152 @@ mod tests {
         for i in 0..n {
             assert_eq!(rd.row(i).unwrap(), d[i * n..i * n + n].to_vec());
         }
+        // frame path (fast path disabled) must agree cell-for-cell and hit the cache
+        rd.set_index_fast_path(false);
+        for &(i, j) in &probes {
+            assert_eq!(rd.cell(i, j).unwrap(), d[i * n + j], "frame cell({i},{j}) mismatch");
+        }
+        for i in 0..n {
+            assert_eq!(rd.row(i).unwrap(), d[i * n..i * n + n].to_vec());
+        }
         let (hits, misses) = rd.cache_stats();
         assert!(hits > 0, "cache never hit on repeated probes");
         assert!(misses > 0);
+    }
+
+    /// Exact integer gateway world (L1 metric, no rounding noise): regions
+    /// joined pairwise by 3 distinct roads, each road k running gateway
+    /// `gw[ra][k] ↔ gw[rb][k]`. Cross-region distances are min-plus exact
+    /// through the gateway points, so with pivot-mined landmarks the
+    /// cross-region blocks must be answerable from the resident index alone.
+    fn l1_gateway_world(regions: usize, per: usize, seed: u64) -> (Vec<i32>, usize) {
+        let n = regions * per;
+        let mut s = seed;
+        let mut rnd = |range: i64| {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((s >> 33) as i64) % range
+        };
+        let mut pts = vec![(0i64, 0i64); n];
+        for r in 0..regions {
+            let c = ((r % 4) as i64 * 100_000, (r / 4) as i64 * 100_000);
+            for i in 0..per {
+                pts[r * per + i] = (c.0 + rnd(4000), c.1 + rnd(4000));
+            }
+        }
+        let l1 = |a: (i64, i64), b: (i64, i64)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
+        let gw = |r: usize, k: usize| r * per + k; // 3 gateways = first 3 points
+        let road = 30_000i64;
+        let mut d = vec![0i32; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let (ri, rj) = (i / per, j / per);
+                let v = if ri == rj {
+                    l1(pts[i], pts[j])
+                } else {
+                    (0..3)
+                        .map(|k| l1(pts[i], pts[gw(ri, k)]) + road + l1(pts[gw(rj, k)], pts[j]))
+                        .min()
+                        .unwrap()
+                };
+                d[i * n + j] = v as i32;
+            }
+        }
+        (d, n)
+    }
+
+    #[test]
+    fn reader_index_fast_path_and_bounds() {
+        let (mut d, n) = l1_gateway_world(4, 30, 9);
+        // a dead point (snapping failure): unreachable from/to everywhere.
+        // Its base goes >= UNREACHABLE too, so it must NOT poison its blocks.
+        let dead = 47;
+        for x in 0..n {
+            if x != dead {
+                d[x * n + dead] = UNREACHABLE;
+                d[dead * n + x] = UNREACHABLE;
+            }
+        }
+        let lm = pick_landmarks(&d, n, 16);
+        let mut src = SliceRows { d: &d, n };
+        let mut buf = Vec::new();
+        let rep = compress_stream(&mut src, &lm, &mut buf).unwrap();
+        assert!(rep.metric_ok(), "L1 gateway world should be a clean metric");
+        let mut rd = MtzReader::open(buf, 4).unwrap();
+        // every cell exact via cell(), regardless of path; bounds bracket all
+        // metric cells (the dead point is a hard data error, outside the
+        // bounds contract — but cell() must stay lossless even there)
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(rd.cell(i, j).unwrap(), d[i * n + j], "cell({i},{j})");
+                if i == dead || j == dead {
+                    continue;
+                }
+                let (lo, up) = rd.cell_bounds(i, j);
+                assert!(
+                    lo <= d[i * n + j] && d[i * n + j] <= up,
+                    "bounds ({lo},{up}) miss d({i},{j})={}",
+                    d[i * n + j]
+                );
+            }
+        }
+        // pivot-mined landmarks must capture the gateways: the bulk of the
+        // (row, cell) blocks — all cross-region ones — become index-exact
+        assert!(
+            rd.exact_index_block_share() > 0.5,
+            "expected most blocks index-exact, got {:.2}",
+            rd.exact_index_block_share()
+        );
+        // landmark rows are always index-exact (their residual is identically 0)
+        assert!(rd.exact_index_rows() >= lm.len(), "no index-exact rows found");
+    }
+
+    /// Legacy MTZS layout (dil embedded per frame) replicated byte-for-byte so
+    /// blobs written by the previous version stay decodable.
+    fn encode_stream_v1(d: &[i32], n: usize, lm: &[usize]) -> Vec<u8> {
+        let l = lm.len();
+        let mut dlj = vec![0i32; l * n];
+        for (a, &la) in lm.iter().enumerate() {
+            dlj[a * n..a * n + n].copy_from_slice(&d[la * n..la * n + n]);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC_STREAM);
+        out.extend_from_slice(&(n as u32).to_le_bytes());
+        out.extend_from_slice(&(l as u32).to_le_bytes());
+        for &id in lm {
+            out.extend_from_slice(&(id as u32).to_le_bytes());
+        }
+        put_blob(&mut out, &i32s_to_le(&dlj));
+        for i in 0..n {
+            let dil: Vec<i32> = lm.iter().map(|&a| d[i * n + a]).collect();
+            let mut resid = vec![0i32; n];
+            for j in 0..n {
+                let mut base = i64::MAX;
+                for a in 0..l {
+                    let v = dil[a] as i64 + dlj[a * n + j] as i64;
+                    if v < base {
+                        base = v;
+                    }
+                }
+                resid[j] = (d[i * n + j] as i64 - base) as i32;
+            }
+            let mut frame = i32s_to_le(&dil);
+            frame.extend_from_slice(&i32s_to_le(&resid));
+            put_blob(&mut out, &frame);
+        }
+        out
+    }
+
+    #[test]
+    fn legacy_mtzs_still_decodes() {
+        let n = 60;
+        let d = euclid_matrix(n, 13);
+        let lm = farthest_landmarks(&d, n, 8);
+        let v1 = encode_stream_v1(&d, n, &lm);
+        let (back, n2) = decompress(&v1).unwrap();
+        assert_eq!(n2, n);
+        assert_eq!(back, d, "legacy MTZS roundtrip failed");
+        // random access requires the new format
+        assert!(MtzReader::open(v1, 4).is_err());
     }
 
     #[test]
