@@ -511,6 +511,20 @@ impl RoutingService {
         Some(TripResponse { order, legs, duration_s: total_dur, distance_m: total_dist })
     }
 
+    /// Route between two ROAD NODES (CSR ids): duration + the unpacked CSR
+    /// node path. The node-level primitive behind the live layer's
+    /// per-stretch delay attribution.
+    pub fn route_nodes(&self, src_csr: u32, dst_csr: u32) -> Option<(f32, Vec<u32>)> {
+        let ch = self.ch.as_ref()?;
+        let (dur, path_internal) =
+            ch::query_with_path(ch, ch.perm[src_csr as usize], ch.perm[dst_csr as usize])?;
+        let path = path_internal
+            .iter()
+            .map(|&iid| self.inv_perm[iid as usize])
+            .collect();
+        Some((dur, path))
+    }
+
     /// Map matching (Newson-Krumm HMM): reconstruct the road path a noisy GPS
     /// trace was driven on. `sigma_m` is the GPS noise (≈15 m urban). Returns
     /// one matched road point per input ping plus a confidence in [0, 1].
