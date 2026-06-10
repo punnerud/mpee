@@ -193,10 +193,77 @@ fn load_json_matrix(path: &str) -> (Vec<i32>, usize) {
     (d, n)
 }
 
+/// Reader-only scale mode: open an existing `.mtz` (MTZT) blob and measure
+/// random access + resident memory. No ground-truth matrix needed.
+fn bench_mtz(path: &str, probes: usize) {
+    let blob = std::fs::read(path).expect("read .mtz");
+    let blob_len = blob.len();
+    let t = Instant::now();
+    let mut rd = MtzReader::open(blob, 64).expect("open MTZT");
+    let open_t = t.elapsed();
+    let n = rd.n();
+    let l = rd.landmarks().len();
+    let resident = 2 * l * n * 4 + l * n + 2 * n;
+    println!("\n== reader-only {path}  n={n} L={l} ==");
+    println!(
+        "  blob {:.1} MB (raw would be {:.1} MB, {:.2}x)   open {:.2}s   resident index {:.1} MB",
+        blob_len as f64 / 1e6,
+        (n * n * 4) as f64 / 1e6,
+        (n * n * 4) as f64 / blob_len as f64,
+        open_t.as_secs_f64(),
+        resident as f64 / 1e6
+    );
+    println!(
+        "  index-exact: {:.0}% of blocks   within tol 2/5/15/60: {:.0}%/{:.0}%/{:.0}%/{:.0}%",
+        100.0 * rd.exact_index_block_share(),
+        100.0 * rd.index_share_within(2),
+        100.0 * rd.index_share_within(5),
+        100.0 * rd.index_share_within(15),
+        100.0 * rd.index_share_within(60),
+    );
+    let mut s: u64 = 1234567;
+    let mut next = move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((s >> 33) as usize) % n
+    };
+    let mut sink = 0i64;
+    let t = Instant::now();
+    for _ in 0..probes {
+        let (i, j) = (next(), next());
+        sink += rd.cell(i, j).expect("cell") as i64;
+    }
+    let exact_t = t.elapsed();
+    let t = Instant::now();
+    for _ in 0..probes {
+        let (i, j) = (next(), next());
+        sink += rd.cell_within(i, j, 5).expect("cell_within") as i64;
+    }
+    let within_t = t.elapsed();
+    let t = Instant::now();
+    for _ in 0..probes {
+        let (i, j) = (next(), next());
+        let (lo, up) = rd.cell_bounds(i, j);
+        sink += (lo as i64) ^ (up as i64);
+    }
+    let bounds_t = t.elapsed();
+    std::hint::black_box(sink);
+    let per = |d: std::time::Duration| d.as_nanos() as f64 / probes as f64;
+    println!(
+        "  cell() {:.0} ns/op   cell_within(5) {:.0} ns/op   cell_bounds() {:.0} ns/op  (random, cache 64 rows)",
+        per(exact_t),
+        per(within_t),
+        per(bounds_t)
+    );
+}
+
 fn main() {
     let arg = std::env::args().nth(1);
     let l: usize = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(32);
     let probes = 200_000;
+    if let Some(path) = arg.as_deref().filter(|a| a.ends_with(".mtz")) {
+        bench_mtz(path, probes);
+        return;
+    }
     if let Some(path) = arg.as_deref().filter(|a| a.ends_with(".json")) {
         let (d, n) = load_json_matrix(path);
         bench(&format!("real matrix {path}"), &d, n, l, probes);
