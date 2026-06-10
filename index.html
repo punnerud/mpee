@@ -611,9 +611,9 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       yourself: <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom/benchmarks">crates/brooom/benchmarks</a>
       (raw 4-way numbers in
       <a href="https://github.com/punnerud/mpee/blob/main/crates/brooom/benchmarks/results/competitor_comparison.md">competitor_comparison.md</a>).
-      PyVRP (HGS) is the small-CVRPTW reference; brooom now <b>matches</b> it on
-      R2/RC2 (mean +0.06%) and beats the field at n≥1000 — with the added edge of
-      an integrated single-engine stack, speed-to-good-answer, and scale.
+      PyVRP (HGS) is the small-CVRPTW reference; brooom now <b>edges ahead</b> of it on
+      R2/RC2 (mean −0.14%, at-or-below on 15/19) and beats the field at n≥1000 — with
+      the added edge of an integrated single-engine stack, speed-to-good-answer, and scale.
     </p>
 
     <h3>Where MPEE fits</h3>
@@ -631,10 +631,11 @@ plan = Router("london.pp", "london.ch").solve(open("problem.json").read())</code
       materialising n²</b> — compute → stream → compress → solve.
     </p>
     <ul style="line-height:1.55">
-      <li><b>Matches SOTA quality.</b> Same-harness 10&nbsp;s on Solomon R2/RC2,
-        MPEE ties PyVRP (HGS-class SOTA) at <b>mean +0.06%</b> and beats it on
-        several. Of the open solvers we benchmarked it's the one that reaches
-        PyVRP — VROOM and OR-Tools trail it.</li>
+      <li><b>SOTA quality, now slightly ahead.</b> Same-harness 10&nbsp;s on Solomon
+        R2/RC2, MPEE edges ahead of PyVRP (HGS-class SOTA) at <b>mean −0.14%</b> —
+        at-or-below it on 15/19 (7 wins, 8 exact ties, worst loss +0.29%). Of the
+        open solvers we benchmarked it's the only one that reaches PyVRP — VROOM
+        and OR-Tools trail it.</li>
       <li><b>Wins on total time &amp; scale.</b> One process does routing
         <em>and</em> optimization, streaming the matrix instead of materialising
         ~10&nbsp;GB — so total wall-clock (matrix + solve) beats the OSRM+VROOM
@@ -788,11 +789,12 @@ python3 crates/brooom/benchmarks/gen_realmap.py --region sf --seed 11 --n 80 \
     --matrix osrm --osrm-host &lt;host&gt;
 .bench-venv/bin/python crates/brooom/benchmarks/run_multi_bench.py instances_realmap/sf_s11_n80_osrm.json</code></pre>
     <p class="muted" style="font-size:.88rem">
-      Where we stand, honestly: on raw solution quality we now <strong>match</strong>
-      PyVRP's HGS-class ILS on wide-window small-N (R2/RC2 mean Δ +0.06 % same-harness,
-      beating it on several), tie on tight-window C1/R1, and beat OR-Tools + the field
-      at N≥1000. Where we add edge: the integrated single-engine stack, memory/scale
-      (50k on a laptop), and end-to-end speed. Raw results + the analysis live in
+      Where we stand, honestly: on raw solution quality we are now <strong>slightly
+      ahead</strong> of PyVRP's HGS-class ILS on wide-window small-N (R2/RC2 mean Δ
+      −0.14 % same-harness, at-or-below on 15/19; single-rep noise is ±~0.3 %), beat
+      it on tight-window rc101 and tie the rest of C1/R1, and beat OR-Tools + the
+      field at N≥1000. Where we add edge: the integrated single-engine stack,
+      memory/scale (50k on a laptop), and end-to-end speed. Raw results + the analysis live in
       <a href="https://github.com/punnerud/mpee/tree/main/crates/brooom/benchmarks/results">benchmarks/results/</a>
       (<code>competitor_comparison.md</code>, <code>beat_pyvrp.md</code>).
       Independent benchmarks welcome — open an issue with your numbers.

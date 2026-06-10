@@ -163,3 +163,32 @@ r101/c101 identical, full lib+integration test suite green. Honest reading:
 −0.02% on single 10s reps is within run noise — call it "matches PyVRP, now
 with the coin-flip in our favour"; the decisive wins are rc101 (−0.36%), r208
 (−1.22%), r209 (−0.70%), r206 (−0.56%) and exact-tie parity on 5 instances.
+
+## 2026-06-10 round 2 — mean −0.14%, at-or-below PyVRP on 15/19
+
+Second lever batch on `feat/beat-pyvrp` (eval: `pyvrp_eval_2026_v3.txt`):
+
+4. **Fast-path 2-opt* + cross-exchange** — the last slow-path operators get the
+   O(1)-cost-delta treatment (2-opt*: four boundary arcs + same-depot gate per
+   pair; cross-exchange: six arcs). Cold LS 4–22×; HGS generations ~2×.
+   Gated to matrix.n < 500 so the large-N polish stays byte-identical.
+5. **HGS mechanics** — biased-fitness parent selection, Vidal 25/40 population,
+   light island migration (publish-best / pull-rarely elite pool). r211 75645→
+   75523 (=PyVRP) with a 75382 run (−0.19%).
+6. **Education passes 4→8** (now affordable): rc208 78504→78007 consistent.
+7. **Infeasible subpopulation (Vidal twin-population)** — implemented and
+   MEASURED NEGATIVE at q=0.2 (+0.3–1.5% everywhere: soft education runs the
+   slow LS path and the generation count collapses). Default off
+   (`BROOOM_HGS_INFEAS`); third penalty-bridge loss on this codebase.
+
+| metric | round 1 | round 2 |
+|--------|---------|---------|
+| mean gap vs PyVRP | −0.02% | **−0.14%** |
+| win / exact-tie / lose | 7 / 5 / 7 | **7 / 8 / 4** |
+| worst loss | +0.75% (r205) | **+0.29% (rc202)** |
+
+Non-regression: N=1000 oslo s6/s7/s8 byte-identical after the matrix.n<500
+gate on the new fast ops (ungated they tie-break differently: +0.13% on s6,
+0.00% on s7/s8); r101/c101 unchanged, rc101 −0.36% better; 150 lib+integration
+tests green. Remaining losses are within single-rep noise: r205 +0.27,
+rc202 +0.29, rc208 +0.15, r211 +0.08.
