@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::osm_profile::Profile;
+use crate::osm_profile::{Profile, ProfileSpec};
 
 /// Paths written (or reused) and graph size, returned by [`build_cache`].
 pub struct BuildResult {
@@ -87,14 +87,15 @@ impl Drop for StdoutSilencer {
 ///   default to save disk (e.g. ~540 MB for Norway).
 pub fn build_cache(
     pbf: &Path,
-    profile: Profile,
+    profile: impl Into<ProfileSpec>,
     progress: bool,
     force: bool,
     keep_csr: bool,
 ) -> Result<BuildResult, String> {
     use crate::{cache, cache_ch, cache_pp, ch, names, osm, preprocess::preprocess};
 
-    let suffix = if profile == Profile::Car {
+    let profile: ProfileSpec = profile.into();
+    let suffix = if matches!(profile, ProfileSpec::Builtin(Profile::Car)) {
         String::new()
     } else {
         format!(".{}", profile.name())

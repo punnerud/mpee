@@ -428,10 +428,10 @@ impl Router {
         force: bool,
         keep_csr: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
-        use dijeng::osm_profile::Profile;
-        let prof = Profile::from_name(profile).ok_or_else(|| {
-            PyRuntimeError::new_err(format!("unknown profile {profile:?} (use car|bicycle|foot)"))
-        })?;
+        // Builtin name or a path to a custom `.profile` file (per-class
+        // speeds, allow/block, penalties — the Lua-profile equivalent).
+        let prof = dijeng::osm_profile::ProfileSpec::from_arg(profile)
+            .map_err(PyRuntimeError::new_err)?;
         let pbf_owned = pbf.to_string();
         // The whole pipeline (parse → preprocess → CH) runs in-process in the
         // shared `dijeng::build` helper; release the GIL for it. The .csr
