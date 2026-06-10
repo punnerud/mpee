@@ -630,18 +630,41 @@ fn srex_crossover(
     // fresh route when nothing fits.
     let mut missing: Vec<usize> = (0..problem.jobs.len()).filter(|&j| !seen[j]).collect();
     missing.sort_by_key(|&j| -(problem.jobs[j].delivery.first().copied().unwrap_or(0)));
+    // The O(1) insertion probe is hard-mode only; under soft penalties (the
+    // infeasible-track offspring) scan positions with the full evaluator so a
+    // penalised-late insertion is still representable.
+    let soft = crate::solution::soft_is_active();
     for j in missing {
         let task = TaskRef::Job(j);
         let mut best: Option<(usize, usize, f64)> = None; // (route, pos, delta)
-        for (ri, route) in sol.routes.iter().enumerate() {
-            let veh = &problem.vehicles[route.vehicle_idx];
-            let Some(pre) = crate::eval::precompute(problem, matrix, veh, route.vehicle_idx, &route.steps) else {
-                continue;
-            };
-            for pos in 1..=route.steps.len() + 1 {
-                if let Some(d) = crate::eval::try_insert_single(&pre, problem, matrix, veh, pos, task) {
-                    if best.map_or(true, |(_, _, bd)| d < bd) {
-                        best = Some((ri, pos - 1, d));
+        if soft {
+            let mut cand: Vec<TaskRef> = Vec::new();
+            for (ri, route) in sol.routes.iter().enumerate() {
+                let veh = &problem.vehicles[route.vehicle_idx];
+                for pos in 0..=route.steps.len() {
+                    cand.clear();
+                    cand.extend_from_slice(&route.steps[..pos]);
+                    cand.push(task);
+                    cand.extend_from_slice(&route.steps[pos..]);
+                    if let Ok(m) = evaluate_route(problem, matrix, veh, &cand) {
+                        let d = m.cost - route.metrics.cost;
+                        if best.map_or(true, |(_, _, bd)| d < bd) {
+                            best = Some((ri, pos, d));
+                        }
+                    }
+                }
+            }
+        } else {
+            for (ri, route) in sol.routes.iter().enumerate() {
+                let veh = &problem.vehicles[route.vehicle_idx];
+                let Some(pre) = crate::eval::precompute(problem, matrix, veh, route.vehicle_idx, &route.steps) else {
+                    continue;
+                };
+                for pos in 1..=route.steps.len() + 1 {
+                    if let Some(d) = crate::eval::try_insert_single(&pre, problem, matrix, veh, pos, task) {
+                        if best.map_or(true, |(_, _, bd)| d < bd) {
+                            best = Some((ri, pos - 1, d));
+                        }
                     }
                 }
             }
@@ -672,6 +695,24 @@ fn srex_crossover(
     }
     sol.recompute_summary(problem);
     Some(sol)
+}
+
+/// Re-evaluate a (possibly soft-mode-built) solution in HARD mode. Returns the
+/// hard-metric solution when every route is feasible, `None` when any route
+/// carries a real violation. Must be called with soft penalties DISARMED.
+fn reevaluate_hard(problem: &Problem, matrix: &Matrix, sol: &Solution) -> Option<Solution> {
+    let mut out = Solution::default();
+    for r in &sol.routes {
+        if r.steps.is_empty() {
+            continue;
+        }
+        let veh = &problem.vehicles[r.vehicle_idx];
+        let metrics = evaluate_route(problem, matrix, veh, &r.steps).ok()?;
+        out.routes.push(Route { vehicle_idx: r.vehicle_idx, steps: r.steps.clone(), metrics });
+    }
+    out.unassigned = sol.unassigned.clone();
+    out.recompute_summary(problem);
+    Some(out)
 }
 
 // ── Population HGS ──────────────────────────────────────────────────────────
@@ -941,6 +982,41 @@ pub fn solve_genetic(
     // the migration pool. Fitness staleness between culls is acceptable; full
     // recomputes every generation measured ~equal and cost time.
     const MIGRATE_EVERY: usize = 150;
+
+    // ── Infeasible subpopulation (Vidal) ────────────────────────────────────
+    // A share of offspring is produced and educated under MODERATE soft
+    // penalties: SREX may inherit a time-warped route, education optimises the
+    // penalised objective and can cross infeasible territory between partition
+    // basins. The result is re-judged in hard mode: feasible → normal
+    // population (and may become best); infeasible → a small penalised
+    // subpopulation that keeps breeding as parent B. λ adapts toward a target
+    // feasibility share of the soft track. BROOOM_HGS_INFEAS sets the share.
+    //
+    // DEFAULT 0 (off): measured at q=0.2 this REGRESSED every R2/RC2 laggard
+    // by +0.3–1.5% — soft education runs the slow LS path (penalties are not
+    // arc-linear), so each soft offspring costs ~10–20 educations' worth of
+    // wall-clock and the generation count collapses. Third penalty-bridge
+    // technique to lose on this codebase; it cannot pay until there is an
+    // O(1) soft-delta evaluation (PyVRP-style time-warp segment concatenation).
+    // Kept behind the env knob for future re-testing.
+    let infeas_q: f64 = std::env::var("BROOOM_HGS_INFEAS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|p: &f64| (0.0..=1.0).contains(p))
+        .unwrap_or(0.0);
+    let mu_inf = (mu / 2).max(2);
+    let mut pop_inf: Vec<Indiv> = Vec::new();
+    // λ scale: cost per second of travel+service of the current best — the
+    // same normalisation the solver's fixed-λ soft mode uses, but starting
+    // moderate (×5) so violations are genuinely traversable.
+    let lam_scale = {
+        let s = &best.summary;
+        (s.cost / ((s.travel_time + s.service_time).max(1) as f64)).max(1e-6)
+    };
+    let mut lam = lam_scale * 5.0;
+    let (lam_min, lam_max) = (lam_scale * 0.5, lam_scale * 1000.0);
+    let mut soft_seen = 0u32;
+    let mut soft_feasible = 0u32;
     for gen in 0..max_gens {
         gen_count = gen;
         if let Some(d) = deadline {
@@ -960,6 +1036,91 @@ pub fn solve_genetic(
                 }
             }
         }
+        // ── Infeasible track: SREX + soft education, hard re-judgement. ──
+        if infeas_q > 0.0 && rng.gen_bool(infeas_q) {
+            let pa = tournament(&pop, &mut rng);
+            // Parent B: the infeasible subpopulation when it has members
+            // (that's the whole point — its genes re-enter circulation),
+            // otherwise a second feasible parent.
+            let pb_sol = if !pop_inf.is_empty() && rng.gen_bool(0.5) {
+                let pb = tournament(&pop_inf, &mut rng);
+                pop_inf[pb].sol.clone()
+            } else {
+                let mut pb = tournament(&pop, &mut rng);
+                if pb == pa {
+                    pb = (pb + 1) % pop.len();
+                }
+                pop[pb].sol.clone()
+            };
+            crate::solution::set_soft_penalties(Some(crate::solution::SoftWeights {
+                tw: lam,
+                load: lam,
+                dur: lam,
+            }));
+            let child_opt = srex_crossover(&pop[pa].sol, &pb_sol, problem, matrix, &mut rng);
+            let soft_child = child_opt.map(|mut c| {
+                local_search(problem, matrix, &mut c, max_passes, granular);
+                c
+            });
+            crate::solution::set_soft_penalties(None);
+            let Some(soft_child) = soft_child else {
+                continue;
+            };
+            if !soft_child.unassigned.is_empty() {
+                continue;
+            }
+            soft_seen += 1;
+            match reevaluate_hard(problem, matrix, &soft_child) {
+                Some(hard_child) => {
+                    soft_feasible += 1;
+                    let cost = hard_child.summary.cost;
+                    if cost < best_cost - 1e-9 {
+                        let mut polished = hard_child.clone();
+                        local_search_full(problem, matrix, &mut polished, max_passes, granular);
+                        let winner = if polished.unassigned.is_empty()
+                            && polished.summary.cost < cost - 1e-9
+                        {
+                            polished
+                        } else {
+                            hard_child.clone()
+                        };
+                        best_cost = winner.summary.cost;
+                        best = winner;
+                        gens_since_improve = 0;
+                        if let Some(pool) = migration {
+                            pool.publish(&best);
+                        }
+                    }
+                    let mut ind = make_indiv(hard_child, problem);
+                    ind.fitness = pop.iter().filter(|p| p.cost < ind.cost).count() as f64;
+                    pop.push(ind);
+                    if pop.len() >= max_pop {
+                        cull(&mut pop, mu);
+                    }
+                }
+                None => {
+                    // Penalised member: cost is the soft objective at the
+                    // CURRENT λ (frozen at insertion — good enough for ranking).
+                    pop_inf.push(make_indiv(soft_child, problem));
+                    if pop_inf.len() >= mu_inf * 2 {
+                        cull(&mut pop_inf, mu_inf);
+                    }
+                }
+            }
+            // Adapt λ toward ~40% of the soft track landing feasible.
+            if soft_seen >= 20 {
+                let f = soft_feasible as f64 / soft_seen as f64;
+                if f < 0.35 {
+                    lam = (lam * 1.3).min(lam_max);
+                } else if f > 0.45 {
+                    lam = (lam / 1.3).max(lam_min);
+                }
+                soft_seen = 0;
+                soft_feasible = 0;
+            }
+            continue;
+        }
+
         // Produce one offspring: crossover(parent_a, parent_b) → educate.
         let pa = tournament(&pop, &mut rng);
         let mut pb = tournament(&pop, &mut rng);
