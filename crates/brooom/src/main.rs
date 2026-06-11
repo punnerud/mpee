@@ -781,8 +781,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if cli.verbose {
                 eprintln!("brooom: cluster-decompose into K={}", eff_decompose);
             }
+            // Charge the time already spent (parse + matrix build) against
+            // the budget so the decomposed flow honours the user's limit as
+            // total wall clock, not per-phase.
+            let mut dec_cfg = config.clone();
+            if let Some(ms) = dec_cfg.time_limit_ms {
+                let elapsed = t_main_start.elapsed().as_millis() as u64;
+                dec_cfg.time_limit_ms = Some(ms.saturating_sub(elapsed).max(1000));
+            }
             brooom::cluster_decompose::solve_decomposed(
-                &problem, &matrix, &config, eff_decompose,
+                &problem, &matrix, &dec_cfg, eff_decompose,
             )
         } else {
             brooom::solver::solve_with_matrix(&problem, &matrix, &config)
@@ -874,13 +882,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let margin = std::time::Duration::from_secs(2);
         let mut rounds = 0u32;
         let mut consecutive_no_improvement = 0u32;
+        // The CPU polish below respects the thread-local LS deadline, so a
+        // round that starts near the limit is cut at it rather than running
+        // to convergence past it.
+        if let Some(d) = deadline {
+            brooom::local_search::set_ls_deadline(Some(d));
+        }
         loop {
-            if rounds > 0 {
-                match deadline {
-                    Some(d) if std::time::Instant::now() + margin < d => {}
-                    Some(_) => break,
-                    None => break,
-                }
+            // Round 0 runs whenever any budget remains (the decomposed flow
+            // reserves its own polish slice, so there is usually little left);
+            // later rounds need `margin` of headroom to be worth starting.
+            match deadline {
+                Some(d) if rounds == 0 && std::time::Instant::now() < d => {}
+                Some(d) if rounds > 0 && std::time::Instant::now() + margin < d => {}
+                Some(_) => break,
+                None if rounds == 0 => {}
+                None => break,
             }
             // GPU batch polish — only when --gpu (skipped on the CPU-only
             // large-N path).
@@ -928,6 +945,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 consecutive_no_improvement = 0;
             }
         }
+        brooom::local_search::set_ls_deadline(None);
         if cli.verbose && rounds > 0 {
             eprintln!("brooom: top-level alternating polish ran {rounds} round(s)");
         }
