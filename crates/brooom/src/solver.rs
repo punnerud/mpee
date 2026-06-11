@@ -527,15 +527,21 @@ fn solve_scalar_with_extra_global(
     let ils_iters = config.ils_iters;
     let ils_kick = config.ils_kick_size.max(0.0).min(1.0);
 
-    // Small-N quality boost (gated to top-level N≤300 via `allow_lahc`; cluster
-    // sub-solves disable it, so the large-N path stays byte-identical). When on,
-    // we run K EXTRA variants that use Late-Acceptance Hill-Climbing acceptance +
-    // a TW-aware (Vidal) granular neighbourhood, ALONGSIDE the K greedy variants,
+    // Small/mid-N quality boost (gated via `allow_lahc`; cluster sub-solves
+    // disable it, so the large-N path stays byte-identical). When on, we run K
+    // EXTRA variants that use Late-Acceptance Hill-Climbing acceptance + a
+    // TW-aware (Vidal) granular neighbourhood, ALONGSIDE the K greedy variants,
     // and take best-of-all. Because the greedy variants are untouched, the result
-    // is ≥ the greedy-only result — additive, provably non-regressing — and we
-    // have the time headroom (we finish small-N in ~2s vs PyVRP's ~10s, so 2×
-    // variants is ~4s, still well inside budget).
-    let lahc_on = config.allow_lahc && problem.jobs.len() <= 300 && ils_iters > 0 && ils_kick > 0.0;
+    // is ≥ the greedy-only result — additive, provably non-regressing.
+    // The N-gate also gates the HGS phase: at 300 it cut HGS off at G&H n=400,
+    // where the route-count basin needs Split/SREX (measured R2 +12–14% vs
+    // PyVRP with HGS off, brooom stuck at 12 routes vs 19). 500 covers n=400
+    // while leaving the protected N=1000 path untouched. Override via
+    // BROOOM_LAHC_MAX_N.
+    let lahc_max_n: usize = std::env::var("BROOOM_LAHC_MAX_N")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(500);
+    let lahc_on =
+        config.allow_lahc && problem.jobs.len() <= lahc_max_n && ils_iters > 0 && ils_kick > 0.0;
     let granular_tw = if lahc_on && problem_has_time_windows(problem) {
         config.granular_k.map(|k| Granular::build_tw(matrix, k, problem))
     } else {
@@ -681,6 +687,17 @@ fn solve_scalar_with_extra_global(
         // Construction runs in HARD mode so each seed starts from a clean
         // feasible base (rayon may reuse a worker thread that left soft armed).
         crate::solution::set_soft_penalties(None);
+        // Arm the LS wall-clock for this variant: construction (greedy + full
+        // LS to convergence) had no deadline checks of its own, and at n≥400 it
+        // alone overshoots the ILS window by seconds — both blowing the user's
+        // time limit and starving the HGS phase that is budgeted to follow.
+        // seed 0 arms AFTER construction so at least one variant is always a
+        // complete solution regardless of budget. Cleared before returning
+        // (pooled thread).
+        if seed != 0 {
+            crate::local_search::set_ls_deadline(deadline);
+        }
+        let t_var = Instant::now();
         // Variants [0, k) are the proven greedy ones (distance granular, greedy
         // acceptance — byte-identical to before). Variants [k, 2k) are the LAHC
         // boost (TW granular + late-acceptance). best-of-all ⇒ never worse.
@@ -698,6 +715,7 @@ fn solve_scalar_with_extra_global(
         // depot tasks first), which gives LS access to local optima the
         // greedy variants can't reach. Verified on N=1000 to close ~1-2% gap
         // vs Vroom by complementing the greedy seeds.
+        let dbg_phase = std::env::var("BROOOM_ILS_DEBUG").is_ok();
         let mut sol = if seed == 0 {
             // Warm-start (if any) replaces the deterministic greedy baseline
             // for seed=0. Other seeds keep their normal diversifying starts —
@@ -711,10 +729,13 @@ fn solve_scalar_with_extra_global(
         } else {
             greedy_insertion_seeded(problem, matrix, seed)
         };
+        let t_constr = t_var.elapsed();
+        crate::local_search::set_ls_deadline(deadline); // seed 0 arms here
         local_search(
             problem, matrix, &mut sol,
             config.max_local_search_passes, gran,
         );
+        let t_ls = t_var.elapsed();
 
         // RouteSplit on every seed with a per-seed revert guard: snapshot the
         // cost, try split + re-LS, and keep it only if it strictly improves —
@@ -727,7 +748,13 @@ fn solve_scalar_with_extra_global(
         // at this size, and the revert guard makes a per-seed regression
         // impossible). Larger instances keep the original seed==7-only behaviour
         // so the extra split + re-LS never eats into the ILS time budget at scale.
-        let split_this_seed = if problem.jobs.len() <= 400 { true } else { seed == 7 };
+        // Deadline guard: at n=400 the construction (greedy + full LS) above can
+        // already exhaust the phase budget; the split + re-LS below would then
+        // push wall-clock 1.1–2× past the user's time limit (measured 10.9–19.4 s
+        // at -l 10 on G&H 400). The split is a quality bonus, never required for
+        // validity — skip it when the phase deadline has passed.
+        let split_this_seed = (if problem.jobs.len() <= 400 { true } else { seed == 7 })
+            && deadline.map_or(true, |d| Instant::now() < d);
         if split_this_seed {
             let before_cost = sol.summary.cost;
             let snapshot = sol.clone();
@@ -739,6 +766,15 @@ fn solve_scalar_with_extra_global(
             if sol.summary.cost >= before_cost - 1e-9 {
                 sol = snapshot; // split didn't help this seed — revert.
             }
+        }
+        if dbg_phase {
+            eprintln!(
+                "variant seed={seed}: start={:.2}s constr={:.2}s ls={:.2}s split-block={:.2}s",
+                t_var.duration_since(now).as_secs_f64(),
+                t_constr.as_secs_f64(),
+                (t_ls - t_constr).as_secs_f64(),
+                (t_var.elapsed() - t_ls).as_secs_f64()
+            );
         }
 
         // Arm soft penalties for the ILS (construction above stayed hard). With a
@@ -874,6 +910,7 @@ fn solve_scalar_with_extra_global(
             }
             sol = best_sol;
         }
+        crate::local_search::set_ls_deadline(None);
         sol
     };
 
@@ -927,8 +964,19 @@ fn solve_scalar_with_extra_global(
             .map(|n| n.get())
             .unwrap_or(8)
             .clamp(2, 16);
+        // Reserve a small slice of the budget for the final polish below: the
+        // islands' LS is deadline-cut, so the HGS winner arrives UNCONVERGED at
+        // larger n and the polish needs real time — unbudgeted, it ran seconds
+        // past the user's limit on the main thread (n=400: 14–18 s at -l 10).
+        let hgs_deadline = config.time_limit_ms.map(|ms| {
+            let reserve = (ms / 20).max(200).min(ms / 2);
+            now + std::time::Duration::from_millis(ms - reserve)
+        });
+        if std::env::var("BROOOM_HGS_DEBUG").is_ok() {
+            eprintln!("HGS phase start at {:.2}s", now.elapsed().as_secs_f64());
+        }
         if let Some(hgs_sol) = crate::genetic::solve_genetic_parallel(
-            problem, matrix, gran_hgs, hgs_passes, 0x00C0_FFEE, full_deadline, n_islands,
+            problem, matrix, gran_hgs, hgs_passes, 0x00C0_FFEE, hgs_deadline, n_islands,
             std::slice::from_ref(&best),
         ) {
             if hgs_sol.summary.cost + 1e-9 < best.summary.cost {
@@ -992,6 +1040,10 @@ fn solve_scalar_with_extra_global(
     // Don't-look-LS converges fast but can prematurely settle tasks that
     // a later move could free up. This finishing pass picks up those
     // missed moves once.
+    // The polish runs on the main thread with the FULL deadline armed: it gets
+    // the reserve the HGS phase set aside, and is hard-cut at the user's limit
+    // (an unconverged polish result is still valid — moves apply atomically).
+    crate::local_search::set_ls_deadline(full_deadline);
     let pre_polish_cost = best.summary.cost;
     local_search_full(
         problem, matrix, &mut best,
@@ -1018,6 +1070,10 @@ fn solve_scalar_with_extra_global(
             pre_spread, best.summary.cost, pre_spread - best.summary.cost
         );
     }
+
+    // Validity work below (repair) must never be deadline-cut — clear the LS
+    // wall-clock armed for the polish above.
+    crate::local_search::set_ls_deadline(None);
 
     // Final guaranteed-assignment pass. The ILS `kick` drops empty routes and
     // only reinserts into surviving ones, so when vehicles outnumber demand a

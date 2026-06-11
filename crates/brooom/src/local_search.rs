@@ -155,6 +155,30 @@ fn nmark_has(l: usize) -> bool {
     })
 }
 
+// Thread-local wall-clock deadline for local search. Construction-time LS runs
+// to convergence, which at n≥400 takes whole seconds per variant — unchecked,
+// the multi-start construction alone blows past the user's time limit (measured
+// 1.1–2× overshoot at G&H 400 @ -l 10) and starves the HGS phase that follows.
+// A deadline here caps every pass loop; an interrupted solution is merely
+// unconverged, never invalid (moves apply atomically). `None` (the default, and
+// always the case without a time limit) changes nothing.
+thread_local! {
+    static LS_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+/// Arm (or clear) the wall-clock deadline LS honours on this thread. Callers
+/// that run on pooled threads (rayon) must set it on entry — workers are reused
+/// and may carry a previous phase's value.
+pub fn set_ls_deadline(d: Option<std::time::Instant>) {
+    LS_DEADLINE.with(|c| c.set(d));
+}
+/// True once the armed deadline (if any) has passed. Public so other
+/// construction-time loops (greedy insertion) can honour the same wall-clock.
+#[inline]
+pub fn ls_deadline_hit() -> bool {
+    LS_DEADLINE.with(|c| c.get().is_some_and(|d| std::time::Instant::now() >= d))
+}
+
 /// The depot index a vehicle starts/ends at (for arc endpoints).
 #[inline]
 fn depot_start(v: &crate::problem::Vehicle) -> Option<usize> {
@@ -225,11 +249,15 @@ fn local_search_with_settled(
     mut settled: HashSet<TaskRef>,
 ) {
     'outer: for _ in 0..max_passes {
+        if ls_deadline_hit() { break 'outer; }
         let task_seq: Vec<TaskRef> = sol.routes.iter().flat_map(|r| r.steps.iter().copied()).collect();
 
         let mut any_change = false;
 
-        for task in task_seq {
+        for (ti, task) in task_seq.into_iter().enumerate() {
+            // A single pass at n≥400 costs hundreds of ms — too coarse for a
+            // 10 s budget — so also poll the deadline inside the pass.
+            if ti % 64 == 0 && ls_deadline_hit() { break 'outer; }
             if settled.contains(&task) { continue; }
 
             let Some((r1, i)) = locate(sol, task) else { continue; };
@@ -286,10 +314,12 @@ pub fn local_search_full(
     granular: Option<&Granular>,
 ) {
     'outer: for _ in 0..max_passes {
+        if ls_deadline_hit() { break 'outer; }
         let task_seq: Vec<TaskRef> = sol.routes.iter().flat_map(|r| r.steps.iter().copied()).collect();
         let mut any_change = false;
 
-        for task in task_seq {
+        for (ti, task) in task_seq.into_iter().enumerate() {
+            if ti % 64 == 0 && ls_deadline_hit() { break 'outer; }
             let Some((r1, i)) = locate(sol, task) else { continue; };
 
             let mut best: Option<Move> = None;
