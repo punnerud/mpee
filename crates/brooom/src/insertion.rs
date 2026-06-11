@@ -28,6 +28,25 @@ use crate::solution::{evaluate_route, Route, RouteMetrics, Solution, TaskRef};
 const VALIDATE_TOP_K: usize = 8;
 const PARALLEL_PROBE_THRESHOLD: usize = 1024;
 
+thread_local! {
+    /// Force the serial probe path on this thread. Callers that are
+    /// themselves one rayon task among many (HGS islands, multi-start
+    /// variants) must arm this: a nested probe `par_iter` on a saturated
+    /// pool makes the blocked thread steal *other* tasks' work while it
+    /// waits — measured as islands stuck seconds inside one construction.
+    /// Same reuse caveat as the LS deadline: pooled threads must set it on
+    /// entry and clear it before returning.
+    static SERIAL_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn set_serial_probe(on: bool) {
+    SERIAL_PROBE.with(|c| c.set(on));
+}
+
+fn serial_probe_on() -> bool {
+    SERIAL_PROBE.with(|c| c.get())
+}
+
 /// Bounded top-K min-keep: tracks the K *cheapest* probes seen so far
 /// without ever growing past K.
 struct TopK<T> {
@@ -247,7 +266,7 @@ pub fn greedy_insertion_seeded(problem: &Problem, matrix: &Matrix, seed: u64) ->
         let alive_count = alive.iter().filter(|&&a| a).count();
         let avg_route_len: usize = routes_steps.iter().map(|r| r.len() + 2).sum::<usize>() / routes_steps.len().max(1);
         let work_estimate = alive_count * routes_steps.len() * avg_route_len;
-        let go_parallel = work_estimate >= PARALLEL_PROBE_THRESHOLD;
+        let go_parallel = work_estimate >= PARALLEL_PROBE_THRESHOLD && !serial_probe_on();
 
         let live_slots: Vec<usize> = (0..pending.len())
             .filter(|&s| alive[s] && !(matches!(pending[s], TaskRef::Delivery(_)) && s > 0 && is_pair_head[s - 1]))
