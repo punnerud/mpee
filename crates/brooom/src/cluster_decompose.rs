@@ -149,6 +149,7 @@ pub fn solve_decomposed(
     if k <= 1 {
         return solve_with_matrix(problem, matrix, config);
     }
+    let t0 = std::time::Instant::now();
 
     // Customer-side location indices (skip the depot at 0 if it's the only
     // shared start; we take all jobs' locations).
@@ -209,6 +210,19 @@ pub fn solve_decomposed(
     // so clusters use the greedy path exactly as before.
     let mut sub_cfg = config.clone();
     sub_cfg.allow_lahc = false;
+    // Budget split: the sub-solves and the merged cross-cluster polish share
+    // ONE wall clock anchored at entry. Each sub-solve measures its own
+    // deadline from its own start, so handing them the full budget makes the
+    // cluster phase alone consume ~time_limit; the merged polish (which
+    // recovers 1-20% on assembled large-N solutions) then runs PAST the
+    // user's limit. Reserve a polish slice up front and shrink the sub-solve
+    // budget by it (plus the k-medoids time already spent).
+    let polish_deadline = config.time_limit_ms.map(|ms| {
+        let reserve = (ms / 8).clamp(500, 3000);
+        let elapsed = t0.elapsed().as_millis() as u64;
+        sub_cfg.time_limit_ms = Some(ms.saturating_sub(reserve + elapsed).max(500));
+        t0 + std::time::Duration::from_millis(ms)
+    });
     // Keep the decomposed large-N path byte-identical to the pre-fast-LS engine:
     // turn the fast O(1) LS off for the duration of the cluster sub-solves (it
     // gives no benefit here and would only perturb tie-breaks). Restored after.
@@ -301,11 +315,22 @@ pub fn solve_decomposed(
     // GPU LS). The alternation can be repeated by callers via the
     // top-level loop until the time budget exhausts.
     let pre_polish_cost = combined.summary.cost;
+    if config.verbose {
+        eprintln!(
+            "brooom: cluster phase done at {:.2}s; polish until {:.2}s",
+            t0.elapsed().as_secs_f64(),
+            polish_deadline.map_or(f64::NAN, |d| d.duration_since(t0).as_secs_f64()),
+        );
+    }
     let granular = config.granular_k.map(|k| crate::granular::Granular::build(matrix, k));
+    // Hard-cut the polish at the user's limit: LS only applies atomic
+    // improving moves, so a mid-pass cut is always a valid solution.
+    crate::local_search::set_ls_deadline(polish_deadline);
     crate::local_search::local_search_full(
         problem, matrix, &mut combined,
         config.max_local_search_passes, granular.as_ref(),
     );
+    crate::local_search::set_ls_deadline(None);
     if config.verbose && combined.summary.cost + 1e-9 < pre_polish_cost {
         eprintln!(
             "brooom: cluster-decompose polish: {:.2} → {:.2} (Δ={:.2})",
