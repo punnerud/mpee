@@ -941,6 +941,11 @@ pub fn solve_genetic(
     // education that starts just before the phase deadline would otherwise run
     // seconds past the user's time limit. Cleared at every return below.
     crate::local_search::set_ls_deadline(deadline);
+    // An island is ONE rayon task among n_islands: its constructions must
+    // probe serially, or the nested par_iter makes this thread steal other
+    // islands' work while blocked in join (measured: islands stuck 5+ s
+    // inside a single greedy construction). Cleared at every return below.
+    crate::insertion::set_serial_probe(true);
     // Population sizing: Vidal's 25/40 now that incremental Split + the full
     // fast-LS operator set made education cheap (was 12/25 when cold education
     // was the budget). Overridable for A/B via BROOOM_HGS_MU / BROOOM_HGS_LAMBDA.
@@ -1020,14 +1025,84 @@ pub fn solve_genetic(
     // contributes nothing (measured as the bad tail of the run distribution —
     // the worst runs land exactly on the no-HGS baseline). The floor may
     // breach the init window but never the phase deadline.
+    //
+    // Greedy construction is the only *diverse* fill source but costs whole
+    // seconds at n≥400 (one measured seed: 11 s) — an island can burn its
+    // entire phase in this loop and still sit at pop=1. The moment one greedy
+    // fill costs more than its fair share of the remaining init window,
+    // switch permanently to perturbation fills: clone a random member, shake
+    // it (perturb_small), educate only the touched tasks. Orders of magnitude
+    // cheaper, and offspring evolution restores the diversity a perturbed
+    // clone lacks — an island that evolves shallow members beats one that
+    // never leaves init (the n=400 starvation signature).
+    let mut perturb_fill = false;
     while pop.len() < mu
         && !past_deadline(&deadline)
         && (pop.len() < 4 || !past_deadline(&init_deadline))
     {
         let t0 = Instant::now();
-        let s = greedy_insertion_seeded(problem, matrix, seed.wrapping_add(si).wrapping_add(1));
-        push_educated(&mut pop, s, init_passes);
-        adapt_depth(pop.len(), t0, &mut init_passes);
+        // Bootstrap a seedless island from the migration pool: islands ≥1
+        // start with NO anchor, and when no greedy construction fits the init
+        // window they would otherwise spin at pop=0 until the phase deadline
+        // (measured: 7.8s of one core per starved island at n=400). Any
+        // published elite is a valid anchor; perturbation fills the rest.
+        if pop.is_empty() && past_deadline(&init_deadline) {
+            if let Some(pool) = migration {
+                if let Some(s) = pool.pull(f64::MAX, &mut rng) {
+                    if std::env::var("BROOOM_HGS_DEBUG").is_ok() {
+                        eprintln!(
+                            "HGS: island bootstrap from pool at {:.2}s",
+                            phase_start.elapsed().as_secs_f64()
+                        );
+                    }
+                    pop.push(make_indiv(s, problem));
+                    perturb_fill = true;
+                    continue;
+                }
+            }
+            // Pool still empty — nap briefly instead of burning the core on
+            // greedy constructions that the armed LS deadline cuts instantly.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            continue;
+        }
+        if perturb_fill && !pop.is_empty() {
+            // Perturbation only rescues the island up to the evolvability
+            // floor — clones of one greedy seed carry no new genetic
+            // material, and filling µ with them homogenises the island
+            // (measured on c2 n=400: every island converged to the same
+            // basin, +1–2% vs the diverse-greedy init). Beyond the floor,
+            // crossover + education generate real diversity cheaper.
+            if pop.len() >= 4 {
+                break;
+            }
+            let mut s = pop[rng.gen_range(0..pop.len())].sol.clone();
+            let touched = crate::solver::perturb_small(
+                &mut s,
+                (problem.jobs.len() / 25).max(3),
+                0.3,
+                &mut rng,
+                problem,
+                matrix,
+            );
+            crate::local_search::local_search_seeded(
+                problem, matrix, &mut s, init_passes.max(1), granular, &touched,
+            );
+            if s.unassigned.is_empty() {
+                pop.push(make_indiv(s, problem));
+            }
+        } else {
+            let s =
+                greedy_insertion_seeded(problem, matrix, seed.wrapping_add(si).wrapping_add(1));
+            push_educated(&mut pop, s, init_passes);
+            adapt_depth(pop.len(), t0, &mut init_passes);
+            if let Some(idl) = init_deadline {
+                let room = idl.saturating_duration_since(Instant::now()).as_secs_f64();
+                let need = mu.saturating_sub(pop.len()).max(1) as f64;
+                if t0.elapsed().as_secs_f64() > (room / need).max(0.05) {
+                    perturb_fill = true;
+                }
+            }
+        }
         si += 1;
         if si > mu as u64 * 4 {
             break; // safety: construction can't fill the population
@@ -1044,10 +1119,12 @@ pub fn solve_genetic(
             );
         }
         crate::local_search::set_ls_deadline(None);
+        crate::insertion::set_serial_probe(false);
         return pop.into_iter().min_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap()).map(|i| i.sol);
     }
     if pop.is_empty() {
         crate::local_search::set_ls_deadline(None);
+        crate::insertion::set_serial_probe(false);
         return None;
     }
 
@@ -1057,6 +1134,12 @@ pub fn solve_genetic(
         .map(|i| i.sol.clone())
         .unwrap();
     let mut best_cost = best.summary.cost;
+    // Publish the init best right away so seedless islands that could not
+    // afford a single greedy construction can bootstrap from the pool
+    // instead of idling to the phase deadline.
+    if let Some(pool) = migration {
+        pool.publish(&best);
+    }
 
     let max_gens = if deadline.is_some() { usize::MAX } else { 2000 };
     let mut gens_since_improve = 0usize;
@@ -1123,6 +1206,8 @@ pub fn solve_genetic(
     // pressure up when each education is expensive.
     let lambda = if starved { lambda.min(20) } else { lambda };
     let max_pop = mu + lambda;
+    // Wall-clock breakdown per component, reported under BROOOM_HGS_DEBUG.
+    let (mut t_xover, mut t_edu, mut t_full) = (0f64, 0f64, 0f64);
     for gen in 0..max_gens {
         gen_count = gen;
         if let Some(d) = deadline {
@@ -1244,6 +1329,7 @@ pub fn solve_genetic(
             pb = (pb + 1) % pop.len();
         }
         let used_srex = rng.gen_bool(srex_p);
+        let t_x = Instant::now();
         let child_opt = if used_srex {
             // SREX keeps whole routes from both parents (no Split — the
             // partition IS the inherited structure).
@@ -1252,10 +1338,12 @@ pub fn solve_genetic(
             let child_tour = order_crossover(&pop[pa].tour, &pop[pb].tour, &mut rng);
             split(&child_tour, problem, matrix)
         };
+        t_xover += t_x.elapsed().as_secs_f64();
         let Some(mut child) = child_opt else {
             continue;
         };
         {
+            let t_e = Instant::now();
             // Route-identity seeding for both crossovers: any child route that
             // matches a parent route verbatim was LS-converged there. SREX
             // children inherit most routes; OX+Split children occasionally
@@ -1265,6 +1353,7 @@ pub fn solve_genetic(
             crate::local_search::local_search_seeded(
                 problem, matrix, &mut child, edu_passes, granular, &uns,
             );
+            t_edu += t_e.elapsed().as_secs_f64();
         }
         let _ = used_srex;
         if !child.unassigned.is_empty() {
@@ -1273,8 +1362,10 @@ pub fn solve_genetic(
         let child_cost = child.summary.cost;
         if child_cost < best_cost - 1e-9 {
             // exhaustive-on-best polish
+            let t_f = Instant::now();
             let mut polished = child.clone();
             local_search_full(problem, matrix, &mut polished, max_passes, granular);
+            t_full += t_f.elapsed().as_secs_f64();
             if polished.unassigned.is_empty() && polished.summary.cost < child_cost - 1e-9 {
                 child = polished;
             }
@@ -1317,16 +1408,20 @@ pub fn solve_genetic(
 
     if std::env::var("BROOOM_HGS_DEBUG").is_ok() {
         eprintln!(
-            "HGS: gens={} pop={} best={:.0} routes={} init_passes={} edu_passes={}",
+            "HGS: gens={} pop={} best={:.0} routes={} init_passes={} edu_passes={} txo={:.2}s tedu={:.2}s tfull={:.2}s",
             gen_count,
             pop.len(),
             best_cost,
             best.routes.iter().filter(|r| !r.steps.is_empty()).count(),
             init_passes,
-            edu_passes
+            edu_passes,
+            t_xover,
+            t_edu,
+            t_full
         );
     }
     crate::local_search::set_ls_deadline(None);
+    crate::insertion::set_serial_probe(false);
     Some(best)
 }
 
