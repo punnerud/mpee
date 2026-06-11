@@ -38,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time_limit_ms: None,
         verbose: false,
         warm_start: None,
+            ..Default::default()
     };
     println!("Solving with brooom CPU...");
     let t0 = Instant::now();

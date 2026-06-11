@@ -44,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time_limit_ms: None,
         verbose: false,
         warm_start: None,
+            ..Default::default()
     };
     let solved = solve_full(&mut problem, None, cfg)?;
     let initial_travel: i64 = solved.solution.routes.iter().map(|r| r.metrics.travel_time).sum();

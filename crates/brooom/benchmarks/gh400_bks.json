@@ -1,0 +1,242 @@
+{
+ "c1_4_1": {
+  "vehicles": 40,
+  "distance": 7152.02
+ },
+ "c1_4_2": {
+  "vehicles": 36,
+  "distance": 7686.38
+ },
+ "c1_4_3": {
+  "vehicles": 36,
+  "distance": 7060.67
+ },
+ "c1_4_4": {
+  "vehicles": 36,
+  "distance": 6803.24
+ },
+ "c1_4_5": {
+  "vehicles": 40,
+  "distance": 7152.02
+ },
+ "c1_4_6": {
+  "vehicles": 40,
+  "distance": 7153.41
+ },
+ "c1_4_7": {
+  "vehicles": 39,
+  "distance": 7417.92
+ },
+ "c1_4_8": {
+  "vehicles": 37,
+  "distance": 7347.23
+ },
+ "c1_4_9": {
+  "vehicles": 36,
+  "distance": 7042.53
+ },
+ "c1_4_10": {
+  "vehicles": 36,
+  "distance": 6860.63
+ },
+ "c2_4_1": {
+  "vehicles": 12,
+  "distance": 4116.05
+ },
+ "c2_4_2": {
+  "vehicles": 12,
+  "distance": 3929.89
+ },
+ "c2_4_3": {
+  "vehicles": 11,
+  "distance": 4018.02
+ },
+ "c2_4_4": {
+  "vehicles": 11,
+  "distance": 3702.49
+ },
+ "c2_4_5": {
+  "vehicles": 12,
+  "distance": 3938.69
+ },
+ "c2_4_6": {
+  "vehicles": 12,
+  "distance": 3875.94
+ },
+ "c2_4_7": {
+  "vehicles": 12,
+  "distance": 3894.13
+ },
+ "c2_4_8": {
+  "vehicles": 11,
+  "distance": 4233.2
+ },
+ "c2_4_9": {
+  "vehicles": 12,
+  "distance": 3864.68
+ },
+ "c2_4_10": {
+  "vehicles": 11,
+  "distance": 3825.67
+ },
+ "r1_4_1": {
+  "vehicles": 40,
+  "distance": 10372.31
+ },
+ "r1_4_2": {
+  "vehicles": 36,
+  "distance": 8898.15
+ },
+ "r1_4_3": {
+  "vehicles": 36,
+  "distance": 7808.34
+ },
+ "r1_4_4": {
+  "vehicles": 36,
+  "distance": 7282.78
+ },
+ "r1_4_5": {
+  "vehicles": 36,
+  "distance": 9222.96
+ },
+ "r1_4_6": {
+  "vehicles": 36,
+  "distance": 8358.69
+ },
+ "r1_4_7": {
+  "vehicles": 36,
+  "distance": 7616.15
+ },
+ "r1_4_8": {
+  "vehicles": 36,
+  "distance": 7257.28
+ },
+ "r1_4_9": {
+  "vehicles": 36,
+  "distance": 8694.78
+ },
+ "r1_4_10": {
+  "vehicles": 36,
+  "distance": 8094.1
+ },
+ "r2_4_1": {
+  "vehicles": 8,
+  "distance": 9210.15
+ },
+ "r2_4_2": {
+  "vehicles": 8,
+  "distance": 7606.75
+ },
+ "r2_4_3": {
+  "vehicles": 8,
+  "distance": 5911.07
+ },
+ "r2_4_4": {
+  "vehicles": 8,
+  "distance": 4241.47
+ },
+ "r2_4_5": {
+  "vehicles": 8,
+  "distance": 7127.83
+ },
+ "r2_4_6": {
+  "vehicles": 8,
+  "distance": 6122.6
+ },
+ "r2_4_7": {
+  "vehicles": 8,
+  "distance": 5018.53
+ },
+ "r2_4_8": {
+  "vehicles": 8,
+  "distance": 4015.6
+ },
+ "r2_4_9": {
+  "vehicles": 8,
+  "distance": 6400.1
+ },
+ "r2_4_10": {
+  "vehicles": 8,
+  "distance": 5773.17
+ },
+ "rc1_4_1": {
+  "vehicles": 36,
+  "distance": 8571.32
+ },
+ "rc1_4_2": {
+  "vehicles": 36,
+  "distance": 7892.52
+ },
+ "rc1_4_3": {
+  "vehicles": 36,
+  "distance": 7533.05
+ },
+ "rc1_4_4": {
+  "vehicles": 36,
+  "distance": 7308.55
+ },
+ "rc1_4_5": {
+  "vehicles": 36,
+  "distance": 8172.64
+ },
+ "rc1_4_6": {
+  "vehicles": 36,
+  "distance": 8164.98
+ },
+ "rc1_4_7": {
+  "vehicles": 36,
+  "distance": 7948.51
+ },
+ "rc1_4_8": {
+  "vehicles": 36,
+  "distance": 7772.57
+ },
+ "rc1_4_9": {
+  "vehicles": 36,
+  "distance": 7733.35
+ },
+ "rc1_4_10": {
+  "vehicles": 36,
+  "distance": 7596.04
+ },
+ "rc2_4_1": {
+  "vehicles": 11,
+  "distance": 6682.37
+ },
+ "rc2_4_2": {
+  "vehicles": 9,
+  "distance": 6180.62
+ },
+ "rc2_4_3": {
+  "vehicles": 8,
+  "distance": 4930.84
+ },
+ "rc2_4_4": {
+  "vehicles": 8,
+  "distance": 3631.01
+ },
+ "rc2_4_5": {
+  "vehicles": 8,
+  "distance": 6706.44
+ },
+ "rc2_4_6": {
+  "vehicles": 8,
+  "distance": 5766.61
+ },
+ "rc2_4_7": {
+  "vehicles": 8,
+  "distance": 5334.72
+ },
+ "rc2_4_8": {
+  "vehicles": 8,
+  "distance": 4790.14
+ },
+ "rc2_4_9": {
+  "vehicles": 8,
+  "distance": 4551.11
+ },
+ "rc2_4_10": {
+  "vehicles": 8,
+  "distance": 4278.61
+ }
+}
