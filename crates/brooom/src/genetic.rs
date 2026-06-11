@@ -937,6 +937,10 @@ pub fn solve_genetic(
     // left soft penalties armed on this thread — clear them or `evaluate_route`
     // would accept penalised-infeasible routes into the population.
     crate::solution::set_soft_penalties(None);
+    // Arm the LS wall-clock: one education at n≥400 costs whole seconds, so an
+    // education that starts just before the phase deadline would otherwise run
+    // seconds past the user's time limit. Cleared at every return below.
+    crate::local_search::set_ls_deadline(deadline);
     // Population sizing: Vidal's 25/40 now that incremental Split + the full
     // fast-LS operator set made education cheap (was 12/25 when cold education
     // was the budget). Overridable for A/B via BROOOM_HGS_MU / BROOOM_HGS_LAMBDA.
@@ -952,7 +956,7 @@ pub fn solve_genetic(
     // each Split-normalised then educated. Init uses a CHEAP education (2 passes)
     // so it doesn't eat the whole budget — offspring get the full `max_passes`.
     // Deadline-aware so islands honour the shared wall-clock. ──────────────────
-    let init_passes = max_passes.min(2);
+    let mut init_passes = max_passes.min(2);
     let past_deadline = |d: &Option<Instant>| d.map_or(false, |dd| Instant::now() >= dd);
     // Init must never eat the evolution budget: at larger n a full µ of
     // educated constructions can consume the whole phase (measured: n=200 @
@@ -973,8 +977,43 @@ pub fn solve_genetic(
             pop.push(make_indiv(sol, problem));
         }
     };
+    // Scale-continuous init depth: measure what each push (Split + educate)
+    // actually costs HERE instead of assuming the n≈100–200 economics the
+    // constants were tuned on, and drop to Split-only construction (0 LS
+    // passes) the moment the init window measurably cannot fit µ at the
+    // current depth. A populated island with shallow members evolves; a deep
+    // pair does not (measured n=400 @ 10 s: gens=0 pop=2, the exact
+    // starvation signature the n=200 fix removed one scale down).
+    let mut adapt_depth = |pop_len: usize, t0: Instant, init_passes: &mut usize| {
+        if *init_passes == 0 {
+            return;
+        }
+        if let Some(idl) = init_deadline {
+            let per = t0.elapsed().as_secs_f64().max(1e-9);
+            let room = idl.saturating_duration_since(Instant::now()).as_secs_f64();
+            if pop_len + ((room / per) as usize) < mu {
+                *init_passes = 0;
+            }
+        }
+    };
+    // The init window is also enforced as a HARD wall-clock on the education
+    // itself: one Split + LS at n≥400 costs seconds, so a single seed push
+    // could otherwise swallow the whole window before any measurement bites
+    // (observed as a bimodal run distribution — islands at pop=1 after the
+    // seed education alone). The phase deadline is re-armed for evolution.
+    crate::local_search::set_ls_deadline(init_deadline.min(deadline));
     for s in seeds {
+        // Keep the ILS seed VERBATIM as the island's anchor first: it is
+        // already LS-converged, so the island's best can never fall below the
+        // ILS result even when the Split+educate variant below gets
+        // deadline-cut mid-education (a cut Split re-partition is damage
+        // without repair, measurably worse than the seed it came from).
+        if s.unassigned.is_empty() {
+            pop.push(make_indiv(s.clone(), problem));
+        }
+        let t0 = Instant::now();
         push_educated(&mut pop, s.clone(), init_passes);
+        adapt_depth(pop.len(), t0, &mut init_passes);
     }
     let mut si = 0u64;
     // Floor of 4: an island below it cannot evolve meaningfully and silently
@@ -985,17 +1024,30 @@ pub fn solve_genetic(
         && !past_deadline(&deadline)
         && (pop.len() < 4 || !past_deadline(&init_deadline))
     {
+        let t0 = Instant::now();
         let s = greedy_insertion_seeded(problem, matrix, seed.wrapping_add(si).wrapping_add(1));
         push_educated(&mut pop, s, init_passes);
+        adapt_depth(pop.len(), t0, &mut init_passes);
         si += 1;
         if si > mu as u64 * 4 {
             break; // safety: construction can't fill the population
         }
     }
+    crate::local_search::set_ls_deadline(deadline);
     if pop.len() < 2 {
+        if std::env::var("BROOOM_HGS_DEBUG").is_ok() {
+            eprintln!(
+                "HGS: island starved at init — pop={} after {:.2}s (init_passes={})",
+                pop.len(),
+                phase_start.elapsed().as_secs_f64(),
+                init_passes
+            );
+        }
+        crate::local_search::set_ls_deadline(None);
         return pop.into_iter().min_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap()).map(|i| i.sol);
     }
     if pop.is_empty() {
+        crate::local_search::set_ls_deadline(None);
         return None;
     }
 
@@ -1265,13 +1317,16 @@ pub fn solve_genetic(
 
     if std::env::var("BROOOM_HGS_DEBUG").is_ok() {
         eprintln!(
-            "HGS: gens={} pop={} best={:.0} routes={}",
+            "HGS: gens={} pop={} best={:.0} routes={} init_passes={} edu_passes={}",
             gen_count,
             pop.len(),
             best_cost,
-            best.routes.iter().filter(|r| !r.steps.is_empty()).count()
+            best.routes.iter().filter(|r| !r.steps.is_empty()).count(),
+            init_passes,
+            edu_passes
         );
     }
+    crate::local_search::set_ls_deadline(None);
     Some(best)
 }
 

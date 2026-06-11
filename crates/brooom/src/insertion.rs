@@ -235,6 +235,15 @@ pub fn greedy_insertion_seeded(problem: &Problem, matrix: &Matrix, seed: u64) ->
     let mut alive = vec![true; pending.len()];
 
     loop {
+        // Honour the thread's LS wall-clock: one full probe round at n≥400 is
+        // expensive and the whole construction is O(n) rounds — an unlucky
+        // insertion order measured 11 s for ONE multi-start variant. Breaking
+        // here leaves the remaining tasks unassigned; their drop prize makes
+        // such a variant lose best-of-K to any complete one, and the final
+        // repair pass guarantees validity even if every variant got cut.
+        if crate::local_search::ls_deadline_hit() {
+            break;
+        }
         let alive_count = alive.iter().filter(|&&a| a).count();
         let avg_route_len: usize = routes_steps.iter().map(|r| r.len() + 2).sum::<usize>() / routes_steps.len().max(1);
         let work_estimate = alive_count * routes_steps.len() * avg_route_len;
