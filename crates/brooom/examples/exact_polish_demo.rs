@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time_limit_ms: None,
         verbose: false,
         warm_start: None,
+            ..Default::default()
     };
     println!("Solving with brooom CPU (max_ls={max_ls}) ...");
     let t0 = Instant::now();
@@ -109,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    solved.solution.recompute_summary();
+    solved.solution.recompute_summary(&problem);
     let final_cost = solved.solution.summary.cost;
     let final_distance: i64 = solved.solution.routes.iter().map(|r| r.metrics.distance).sum();
     let final_travel: i64 = solved.solution.routes.iter().map(|r| r.metrics.travel_time).sum();

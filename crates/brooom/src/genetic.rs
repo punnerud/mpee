@@ -977,7 +977,14 @@ pub fn solve_genetic(
         push_educated(&mut pop, s.clone(), init_passes);
     }
     let mut si = 0u64;
-    while pop.len() < mu && !past_deadline(&init_deadline) {
+    // Floor of 4: an island below it cannot evolve meaningfully and silently
+    // contributes nothing (measured as the bad tail of the run distribution —
+    // the worst runs land exactly on the no-HGS baseline). The floor may
+    // breach the init window but never the phase deadline.
+    while pop.len() < mu
+        && !past_deadline(&deadline)
+        && (pop.len() < 4 || !past_deadline(&init_deadline))
+    {
         let s = greedy_insertion_seeded(problem, matrix, seed.wrapping_add(si).wrapping_add(1));
         push_educated(&mut pop, s, init_passes);
         si += 1;

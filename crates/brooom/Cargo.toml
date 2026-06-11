@@ -89,3 +89,18 @@ approx = "0.5"
 lto = "thin"
 codegen-units = 1
 opt-level = 3
+
+# Neural examples need the (heavy, optional) neural feature — without these
+# declarations cargo tries to build them in default example builds and fails
+# on the gated `brooom::neural` module.
+[[example]]
+name = "neural_test"
+required-features = ["neural"]
+
+[[example]]
+name = "cvrptw_test"
+required-features = ["neural"]
+
+[[example]]
+name = "solomon_neural_test"
+required-features = ["neural"]
