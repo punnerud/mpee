@@ -62,6 +62,14 @@ pub fn slack_eligible(problem: &Problem) -> bool {
     if !slack_ls_enabled() {
         return false;
     }
+    tw_load_envelope(problem)
+}
+
+/// The structural TW/load envelope shared by the slack (hard) and warp (soft)
+/// math — see [`slack_eligible`] for the per-condition rationale. Split out so
+/// `crate::warp::warp_eligible` reuses it without coupling to the slack
+/// kill-switch.
+pub(crate) fn tw_load_envelope(problem: &Problem) -> bool {
     if !problem.shipments.is_empty() || !problem.precedence.is_empty() {
         return false;
     }

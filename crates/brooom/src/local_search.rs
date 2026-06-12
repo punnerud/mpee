@@ -88,7 +88,10 @@ fn fast_cost_eligible(problem: &Problem) -> bool {
     if crate::dimension::has_dimensions() {
         return false;
     }
-    if crate::solution::soft_is_active() {
+    // Soft penalties fold violation terms into the cost, which the arc-sum
+    // model doesn't see — EXCEPT in warp mode, where crate::warp supplies the
+    // penalty deltas exactly and the confirm evaluator agrees (SoftMode::Warp).
+    if crate::solution::soft_is_active() && !crate::solution::warp_soft_active() {
         return false;
     }
     if problem.any_multi_trip() {
@@ -119,6 +122,54 @@ fn homogeneous_cost(problem: &Problem) -> bool {
 #[inline]
 fn step_loc(problem: &Problem, t: TaskRef) -> Option<usize> {
     t.description(problem).location.index
+}
+
+/// Per-route candidate judge for the fast operators.
+///
+/// `Slack` (hard mode): O(1) FEASIBILITY verdicts — candidates the arrays
+/// reject are provably infeasible and skipped; rank == exact arc delta.
+///
+/// `Warp` (SoftMode::Warp only): O(seg) PENALTY deltas — there is nothing to
+/// reject (soft accepts any TW/load violation), instead the move's penalty
+/// change is folded into the candidate delta at enumeration time so the rank
+/// equals the true penalised delta and repair moves (penalty down, arc cost
+/// up) become visible. The winner is still confirmed by `evaluate_route`,
+/// whose warp-mode accumulators agree exactly with these deltas.
+///
+/// Operators not yet warp-converted treat `Warp` as "no judge": they rank by
+/// arc delta only (blind to penalties) — sound, because every confirm
+/// computes the real delta from penalised metrics and `consider` filters,
+/// but they can miss repair moves and may break early on a false first
+/// winner. Convert them when measurements say they matter.
+pub(crate) enum Judge {
+    Slack(crate::slack::SlackCache),
+    Warp(crate::warp::WarpCache, crate::solution::SoftWeights),
+}
+
+impl Judge {
+    /// Arm the right judge for this problem/mode, or `None` when neither
+    /// math is exact. Mirrors the old slack_cache arming.
+    fn arm(problem: &Problem, n_routes: usize, granular_on: bool) -> Option<Judge> {
+        if !(granular_on && fast_ls_enabled() && fast_cost_eligible(problem)) {
+            return None;
+        }
+        if crate::solution::warp_soft_active() {
+            crate::warp::warp_eligible(problem).then(|| {
+                Judge::Warp(crate::warp::WarpCache::new(n_routes), crate::solution::soft_weights())
+            })
+        } else {
+            crate::slack::slack_eligible(problem)
+                .then(|| Judge::Slack(crate::slack::SlackCache::new(n_routes)))
+        }
+    }
+
+    /// Mirror an applied move into whichever cache is armed.
+    fn on_apply(&mut self, route_updates: &[(usize, Option<(Vec<TaskRef>, RouteMetrics)>)]) {
+        match self {
+            Judge::Slack(c) => c.on_apply(route_updates),
+            Judge::Warp(c, _) => c.on_apply(route_updates),
+        }
+    }
 }
 
 // ── env-gated per-operator statistics (BROOOM_LS_STATS=1) ────────────────────
@@ -332,14 +383,10 @@ fn local_search_with_settled(
     granular: Option<&Granular>,
     mut settled: HashSet<TaskRef>,
 ) {
-    // O(1) feasibility prefilter for the fast operators (see slack.rs). Only
-    // armed when both the fast cost model and the slack math are exact; the
-    // cache stays index-aligned with sol.routes via on_apply below.
-    let mut slack_cache: Option<crate::slack::SlackCache> = (granular.is_some()
-        && fast_ls_enabled()
-        && fast_cost_eligible(problem)
-        && crate::slack::slack_eligible(problem))
-    .then(|| crate::slack::SlackCache::new(sol.routes.len()));
+    // O(1) candidate judge for the fast operators (see slack.rs / warp.rs).
+    // Only armed when both the fast cost model and the per-mode math are
+    // exact; the cache stays index-aligned with sol.routes via on_apply below.
+    let mut judge = Judge::arm(problem, sol.routes.len(), granular.is_some());
 
     'outer: for _ in 0..max_passes {
         if ls_deadline_hit() { break 'outer; }
@@ -358,13 +405,20 @@ fn local_search_with_settled(
             let mut best: Option<Move> = None;
 
             let stats = crate::solution::ls_stats_on();
-            let sc = &mut slack_cache;
+            let use_slack = matches!(&judge, Some(Judge::Slack(_)));
+            let warp_mode = matches!(&judge, Some(Judge::Warp(..)));
+            let sc = &mut judge;
             op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
             op_timed(OP_TWO_OPT, stats, || try_two_opt_through(problem, matrix, sol, r1, i, sc.as_mut(), &mut best));
             op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
             op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
             op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
-            op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, sc.is_some(), &mut best));
+            // swap* has no warp conversion yet: its slack arrays are
+            // meaningless on violating routes and its eval fallback is the
+            // per-pair full-evaluation bomb — skip it under warp mode.
+            if !warp_mode {
+                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, &mut best));
+            }
 
             match best {
                 Some(mv) if mv.delta < -1e-9 => {
@@ -380,8 +434,8 @@ fn local_search_with_settled(
                         }
                     }
                     for t in &mv.touched { settled.remove(t); }
-                    if let Some(c) = slack_cache.as_mut() {
-                        c.on_apply(&mv.route_updates);
+                    if let Some(j) = judge.as_mut() {
+                        j.on_apply(&mv.route_updates);
                     }
                     apply_move(sol, mv);
                     any_change = true;
@@ -411,11 +465,7 @@ pub fn local_search_full(
     max_passes: usize,
     granular: Option<&Granular>,
 ) {
-    let mut slack_cache: Option<crate::slack::SlackCache> = (granular.is_some()
-        && fast_ls_enabled()
-        && fast_cost_eligible(problem)
-        && crate::slack::slack_eligible(problem))
-    .then(|| crate::slack::SlackCache::new(sol.routes.len()));
+    let mut judge = Judge::arm(problem, sol.routes.len(), granular.is_some());
 
     'outer: for _ in 0..max_passes {
         if ls_deadline_hit() { break 'outer; }
@@ -428,18 +478,23 @@ pub fn local_search_full(
 
             let mut best: Option<Move> = None;
             let stats = crate::solution::ls_stats_on();
-            let sc = &mut slack_cache;
+            let use_slack = matches!(&judge, Some(Judge::Slack(_)));
+            let warp_mode = matches!(&judge, Some(Judge::Warp(..)));
+            let sc = &mut judge;
             op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
             op_timed(OP_TWO_OPT, stats, || try_two_opt_through(problem, matrix, sol, r1, i, sc.as_mut(), &mut best));
             op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
             op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
             op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
-            op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, sc.is_some(), &mut best));
+            // See local_search_with_settled: swap* is skipped in warp mode.
+            if !warp_mode {
+                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, &mut best));
+            }
 
             if let Some(mv) = best {
                 if mv.delta < -1e-9 {
-                    if let Some(c) = slack_cache.as_mut() {
-                        c.on_apply(&mv.route_updates);
+                    if let Some(j) = judge.as_mut() {
+                        j.on_apply(&mv.route_updates);
                     }
                     apply_move(sol, mv);
                     any_change = true;
@@ -496,14 +551,14 @@ fn try_relocate_task(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
     // Fast O(1) cost-delta path: enumerate candidates by exact edge-delta cost,
     // then confirm feasibility lazily best-first (the first feasible candidate is
     // the best feasible move). Only when the arc-cost model is exact.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) {
-        try_relocate_task_fast(problem, matrix, sol, r1, i, granular.unwrap(), slack, best);
+        try_relocate_task_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, best);
         return;
     }
     try_relocate_task_slow(problem, matrix, sol, r1, i, granular, best);
@@ -717,7 +772,7 @@ fn try_relocate_task_fast(
     r1: usize,
     i: usize,
     granular: &Granular,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
     let route1 = &sol.routes[r1];
@@ -725,13 +780,22 @@ fn try_relocate_task_fast(
     let veh1 = &problem.vehicles[route1.vehicle_idx];
     let c1 = cost_coef(veh1);
 
-    // Slack prefilter: with arrays for route1 the removal check is O(1) and
-    // the route1-after-removal evaluation is deferred to the confirm loop.
-    let mut slack = slack;
+    // Judge for route1: slack gives an O(1) removal feasibility check (the
+    // route1-after-removal evaluation is deferred to the confirm loop); warp
+    // gives the removal's exact penalty term folded into delta_r1.
+    let mut judge = judge;
     let mut have_s1 = false;
-    if let Some(cache) = slack.as_deref_mut() {
-        cache.ensure(r1, problem, matrix, sol);
-        have_s1 = cache.get(r1).is_some();
+    let mut warp_sw: Option<crate::solution::SoftWeights> = None;
+    match judge.as_deref_mut() {
+        Some(Judge::Slack(cache)) => {
+            cache.ensure(r1, problem, matrix, sol);
+            have_s1 = cache.get(r1).is_some();
+        }
+        Some(Judge::Warp(cache, sw)) => {
+            cache.ensure(r1, problem, matrix, sol);
+            warp_sw = Some(*sw);
+        }
+        None => {}
     }
 
     struct Cand {
@@ -754,6 +818,14 @@ fn try_relocate_task_fast(
     // yet (deferred until a candidate of this seg_len survives the slack
     // check), Some(None) = removal infeasible, Some(Some(m)) = metrics.
     let mut m1_eval: [Option<Option<RouteMetrics>>; 4] = [None, None, None, None];
+    // Warp mode: transient warp arrays for the intra-route base (route1 minus
+    // the segment), built lazily per seg_len AT ENUMERATION time — intra
+    // candidates need the combined route's ABSOLUTE penalty in their rank.
+    let mut intra_warp: [Option<Option<Box<crate::warp::RouteWarp>>>; 4] =
+        [None, None, None, None];
+    // Warp mode: reversed segment per seg_len (the enumeration otherwise
+    // never materialises it).
+    let mut seg_rev_v: Vec<TaskRef> = Vec::new();
 
     for &seg_len in &SEGMENT_LENS {
         if i + seg_len > n1 {
@@ -784,12 +856,13 @@ fn try_relocate_task_fast(
         if have_s1 {
             // O(1) removal check; route1-after metrics are evaluated lazily in
             // the confirm loop, only when a candidate of this seg_len survives.
-            let s1 = slack.as_deref().unwrap().get(r1).unwrap();
+            let Some(Judge::Slack(cache)) = judge.as_deref() else { unreachable!() };
+            let s1 = cache.get(r1).unwrap();
             if !s1.replace_seg_ok(problem, matrix, veh1, i, i + seg_len, &[]) {
                 op_slack_skip(OP_RELOC);
                 continue; // removal provably infeasible — skip seg_len
             }
-        } else {
+        } else if warp_sw.is_none() {
             let m1_after = if route1_after.is_empty() {
                 Some(RouteMetrics::default())
             } else {
@@ -802,6 +875,17 @@ fn try_relocate_task_fast(
             }
             m1_eval[seg_len] = Some(m1_after);
         }
+        // Warp mode: removal never fails — instead its penalty term enters the
+        // rank. ABSOLUTE penalty of route1-after (route1.metrics.cost below
+        // already carries the CURRENT penalty, so subtracting it and adding
+        // the candidate's absolute penalty yields the true penalised delta).
+        let pen_r1_after: f64 = match (warp_sw, judge.as_deref()) {
+            (Some(sw), Some(Judge::Warp(cache, _))) if !route1_after.is_empty() => cache
+                .get(r1)
+                .and_then(|w1| w1.replace_seg_viol(problem, matrix, i, i + seg_len, &[]))
+                .map_or(0.0, |v| v.penalty(sw)),
+            _ => 0.0,
+        };
         let delta_r1 = if route1_after.is_empty() {
             0.0 - route1.metrics.cost
         } else {
@@ -824,6 +908,10 @@ fn try_relocate_task_fast(
         };
         r1_after_cache[seg_len] = Some((route1_after, delta_r1));
         let route1_after: &[TaskRef] = &r1_after_cache[seg_len].as_ref().unwrap().0;
+        if warp_sw.is_some() {
+            seg_rev_v.clear();
+            seg_rev_v.extend(segment.iter().rev().copied());
+        }
 
         nmark_set(granular, seg0, matrix.n);
 
@@ -838,6 +926,28 @@ fn try_relocate_task_fast(
             let nb = base.len();
             let ds2 = depot_start(veh2);
             let de2 = depot_end(veh2);
+
+            // Warp mode: penalty source for this destination — the combined
+            // intra base (absolute penalty) or route2 (relative delta).
+            let intra_w: Option<&crate::warp::RouteWarp> = if warp_sw.is_some() && r1 == r2 {
+                intra_warp[seg_len]
+                    .get_or_insert_with(|| {
+                        crate::warp::RouteWarp::build(problem, matrix, veh1, route1_after)
+                            .map(Box::new)
+                    })
+                    .as_deref()
+            } else {
+                None
+            };
+            if r1 != r2 {
+                if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
+                    cache.ensure(r2, problem, matrix, sol);
+                }
+            }
+            let warp2: Option<&crate::warp::RouteWarp> = match judge.as_deref() {
+                Some(Judge::Warp(cache, _)) if r1 != r2 => cache.get(r2),
+                _ => None,
+            };
 
             // Candidate positions: granular (adjacent to a top-K neighbour of
             // seg0) plus the two extremes — mirrors the slow path.
@@ -886,7 +996,26 @@ fn try_relocate_task_fast(
                             None => 0.0,
                         };
                     let delta_r2 = added - removed_gap + seg_service;
-                    let delta = delta_r1 + delta_r2;
+                    let mut delta = delta_r1 + delta_r2;
+                    if let Some(sw) = warp_sw {
+                        let seg_or: &[TaskRef] = if rev { &seg_rev_v } else { segment };
+                        if r1 == r2 {
+                            // Absolute penalty of the combined candidate route
+                            // (delta_r1 already subtracted the penalised cost).
+                            if let Some(v) = intra_w
+                                .and_then(|w| w.replace_seg_viol(problem, matrix, j, j, seg_or))
+                            {
+                                delta += v.penalty(sw);
+                            }
+                        } else {
+                            delta += pen_r1_after;
+                            if let Some(d) = warp2.and_then(|w| {
+                                w.penalty_delta(problem, matrix, sw, j, j, seg_or)
+                            }) {
+                                delta += d;
+                            }
+                        }
+                    }
                     if delta < -1e-9 {
                         cands.push(Cand { delta, seg_len, r2, j, rev });
                     }
@@ -921,7 +1050,9 @@ fn try_relocate_task_fast(
         }
         let route2 = &sol.routes[cand.r2];
         let veh2 = &problem.vehicles[route2.vehicle_idx];
-        // O(seg) slack prefilter on the destination route.
+        // O(seg) slack prefilter on the destination route (hard mode only —
+        // warp mode has no infeasibility to prefilter; its penalty already
+        // entered the rank and the confirm below is exact).
         if r1 == cand.r2 {
             if have_s1 {
                 let s = intra_slack[cand.seg_len].get_or_insert_with(|| {
@@ -935,7 +1066,7 @@ fn try_relocate_task_fast(
                     }
                 }
             }
-        } else if let Some(cache) = slack.as_deref_mut() {
+        } else if let Some(Judge::Slack(cache)) = judge.as_deref_mut() {
             cache.ensure(cand.r2, problem, matrix, sol);
             if let Some(s2) = cache.get(cand.r2) {
                 if !s2.replace_seg_ok(problem, matrix, veh2, cand.j, cand.j, &seg_oriented) {
@@ -1002,10 +1133,10 @@ fn try_two_opt_through(
     sol: &Solution,
     r1: usize,
     i: usize,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
-    let mut slack = slack;
+    let mut judge = judge;
     let route = &sol.routes[r1];
     let n = route.steps.len();
     if n < 3 { return; }
@@ -1022,22 +1153,48 @@ fn try_two_opt_through(
             let de = depot_end(veh);
             struct C2 { delta: f64, a: usize, b: usize }
             let mut cands: Vec<C2> = Vec::new();
+            // Warp mode: judge reversals by their exact penalty delta too —
+            // reversals are THE repair move for time-window order violations.
+            if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
+                cache.ensure(r1, problem, matrix, sol);
+            }
+            let (warp1, warp_sw) = match judge.as_deref() {
+                Some(Judge::Warp(cache, sw)) => (cache.get(r1), Some(*sw)),
+                _ => (None, None),
+            };
+            let base_pen = match (warp1, warp_sw) {
+                (Some(w), Some(sw)) => w.viol().penalty(sw),
+                _ => 0.0,
+            };
             for a in 0..n - 1 {
                 if a > i { break; } // need a ≤ i
                 let prev = if a == 0 { ds } else { Some(loc(a - 1)) };
                 let mut fwd = 0.0; // forward internal arc sum of [a..b]
                 let mut rev = 0.0; // reversed internal arc sum
+                // Reversed-segment stats for warp: Tws of locs[b..=a] reversed
+                // and the max prefix sum of per-stop pickup−delivery, both
+                // extended O(1) per b (front extension).
+                let mut rev_stats = warp1.map(|w| w.stop_stats(problem, route.steps[a]));
                 for b in a + 1..n {
                     // extend the window to include edge (b-1,b)
                     fwd += arc_cost(matrix, c, loc(b - 1), loc(b));
                     rev += arc_cost(matrix, c, loc(b), loc(b - 1));
+                    if let (Some(w), Some((rtws, rmax))) = (warp1, rev_stats.as_mut()) {
+                        let (node_b, c_b) = w.stop_stats(problem, route.steps[b]);
+                        let edge = w.edge_dur(matrix, loc(b), loc(b - 1));
+                        *rtws = crate::warp::Tws::merge(node_b, edge, *rtws);
+                        *rmax = c_b + (*rmax).max(0);
+                    }
                     if b < i { continue; } // need b ≥ i
                     let next = if b + 1 >= n { de } else { Some(loc(b + 1)) };
                     let old_e = prev.map_or(0.0, |p| arc_cost(matrix, c, p, loc(a)))
                         + next.map_or(0.0, |nx| arc_cost(matrix, c, loc(b), nx));
                     let new_e = prev.map_or(0.0, |p| arc_cost(matrix, c, p, loc(b)))
                         + next.map_or(0.0, |nx| arc_cost(matrix, c, loc(a), nx));
-                    let delta = (new_e + rev) - (old_e + fwd);
+                    let mut delta = (new_e + rev) - (old_e + fwd);
+                    if let (Some(w), Some(sw), Some((rtws, rmax))) = (warp1, warp_sw, rev_stats.as_ref()) {
+                        delta += w.reversal_viol(matrix, a, b, *rtws, *rmax).penalty(sw) - base_pen;
+                    }
                     if delta < -1e-9 {
                         cands.push(C2 { delta, a, b });
                     }
@@ -1054,7 +1211,7 @@ fn try_two_opt_through(
                 }
                 // O(segment) slack prefilter: the reversal replaces [a, b]
                 // with its mirror — chain the reversed stops, land on lat[b+1].
-                if let Some(cache) = slack.as_deref_mut() {
+                if let Some(Judge::Slack(cache)) = judge.as_deref_mut() {
                     cache.ensure(r1, problem, matrix, sol);
                     if let Some(s) = cache.get(r1) {
                         rev_seg.clear();
@@ -1108,10 +1265,10 @@ fn try_exchange_with(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
-    let mut slack = slack;
+    let mut judge = judge;
     let n_routes = sol.routes.len();
     let a = sol.routes[r1].steps[i];
     let a_loc = a.description(problem).location.index;
@@ -1132,6 +1289,9 @@ fn try_exchange_with(
             + ni.map_or(0.0, |n| arc_cost(matrix, c1, aloc, n));
         struct EC { delta: f64, r2: usize, j: usize }
         let mut cands: Vec<EC> = Vec::new();
+        if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
+            cache.ensure(r1, problem, matrix, sol);
+        }
         for r2 in 0..n_routes {
             if r2 == r1 { continue; }
             let route2 = &sol.routes[r2];
@@ -1139,6 +1299,15 @@ fn try_exchange_with(
             if !veh2.has_skills(a.skills(problem)) { continue; }
             let c2 = cost_coef(veh2);
             let n2 = route2.steps.len();
+            // Warp mode: both sides' penalty deltas are RELATIVE (the confirm
+            // subtracts both routes' penalised metrics).
+            if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
+                cache.ensure(r2, problem, matrix, sol);
+            }
+            let (warp1, warp2, wsw) = match judge.as_deref() {
+                Some(Judge::Warp(cache, sw)) => (cache.get(r1), cache.get(r2), Some(*sw)),
+                _ => (None, None, None),
+            };
             for j in 0..n2 {
                 let b = route2.steps[j];
                 let Some(bloc) = step_loc(problem, b) else { continue };
@@ -1157,7 +1326,15 @@ fn try_exchange_with(
                 let new_b = pj.map_or(0.0, |p| arc_cost(matrix, c2, p, aloc))
                     + nj.map_or(0.0, |n| arc_cost(matrix, c2, aloc, n));
                 let d2 = (new_b - old_b) + (a_serv - b_serv);
-                let delta = d1 + d2;
+                let mut delta = d1 + d2;
+                if let (Some(w1), Some(w2), Some(sw)) = (warp1, warp2, wsw) {
+                    if let (Some(p1), Some(p2)) = (
+                        w1.penalty_delta(problem, matrix, sw, i, i + 1, &[b]),
+                        w2.penalty_delta(problem, matrix, sw, j, j + 1, &[a]),
+                    ) {
+                        delta += p1 + p2;
+                    }
+                }
                 if delta < -1e-9 {
                     cands.push(EC { delta, r2, j });
                 }
@@ -1171,7 +1348,7 @@ fn try_exchange_with(
             let veh2 = &problem.vehicles[route2.vehicle_idx];
             let b = route2.steps[cd.j];
             // O(1) slack prefilter: replace a with b at i in r1, b with a at j in r2.
-            if let Some(cache) = slack.as_deref_mut() {
+            if let Some(Judge::Slack(cache)) = judge.as_deref_mut() {
                 cache.ensure(r1, problem, matrix, sol);
                 cache.ensure(cd.r2, problem, matrix, sol);
                 let ok = match (cache.get(r1), cache.get(cd.r2)) {
@@ -1260,7 +1437,7 @@ fn try_two_opt_star(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
     // Large-N guard (matrix.n ≥ 500): keep the slow path so the top-level
@@ -1268,8 +1445,11 @@ fn try_two_opt_star(
     // the fast variant is cost-identical but tie-breaks differently, which
     // measured +0.13% on one of three N=1000 seeds. Small-N (where the HGS
     // education lives) takes the fast path.
+    // NOTE: not warp-converted — under warp mode it runs BLIND (arc-only
+    // rank, exact penalised confirm): sound, but misses penalty-repair tail
+    // swaps. Convert if education measurements say it matters.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) && matrix.n < 500 {
-        try_two_opt_star_fast(problem, matrix, sol, r1, i, granular.unwrap(), slack, best);
+        try_two_opt_star_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, best);
         return;
     }
     try_two_opt_star_slow(problem, matrix, sol, r1, i, granular, best);
@@ -1290,10 +1470,10 @@ fn try_two_opt_star_fast(
     r1: usize,
     i: usize,
     granular: &Granular,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
-    let mut slack = slack;
+    let mut judge = judge;
     let n_routes = sol.routes.len();
     let route1 = &sol.routes[r1];
     let veh1 = &problem.vehicles[route1.vehicle_idx];
@@ -1390,7 +1570,7 @@ fn try_two_opt_star_fast(
         // O(1) slack prefilter for the tail swap. Each route's `lat`/load
         // arrays remain valid for the new host only when both vehicles share
         // the same day window (depots/speed already equal on this path).
-        if let Some(cache) = slack.as_deref_mut() {
+        if let Some(Judge::Slack(cache)) = judge.as_deref_mut() {
             if veh1.time_window() == veh2.time_window() {
                 cache.ensure(r1, problem, matrix, sol);
                 cache.ensure(cand.r2, problem, matrix, sol);
@@ -2044,13 +2224,13 @@ fn try_cross_exchange_with(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
     // Large-N guard: see try_two_opt_star — slow path above matrix.n ≥ 500
     // keeps the N=1000 headline byte-identical.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) && matrix.n < 500 {
-        try_cross_exchange_fast(problem, matrix, sol, r1, i, granular.unwrap(), slack, best);
+        try_cross_exchange_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, best);
         return;
     }
     try_cross_exchange_slow(problem, matrix, sol, r1, i, granular, best);
@@ -2069,10 +2249,10 @@ fn try_cross_exchange_fast(
     r1: usize,
     i: usize,
     granular: &Granular,
-    slack: Option<&mut crate::slack::SlackCache>,
+    judge: Option<&mut Judge>,
     best: &mut Option<Move>,
 ) {
-    let mut slack = slack;
+    let mut judge = judge;
     let n_routes = sol.routes.len();
     let route1 = &sol.routes[r1];
     let n1 = route1.steps.len();
@@ -2110,6 +2290,9 @@ fn try_cross_exchange_fast(
         j: usize,
     }
     let mut cands: Vec<Cand> = Vec::new();
+    if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
+        cache.ensure(r1, problem, matrix, sol);
+    }
 
     for r2 in 0..n_routes {
         if r2 == r1 {
@@ -2121,6 +2304,15 @@ fn try_cross_exchange_fast(
         if 2 > n2 {
             continue;
         }
+        // Warp mode: both penalty deltas are RELATIVE (confirm subtracts both
+        // routes' penalised metrics).
+        if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
+            cache.ensure(r2, problem, matrix, sol);
+        }
+        let (warp1, warp2, wsw) = match judge.as_deref() {
+            Some(Judge::Warp(cache, sw)) => (cache.get(r1), cache.get(r2), Some(*sw)),
+            _ => (None, None, None),
+        };
         for j in 0..=n2 - 2 {
             let (Some(s2a), Some(s2b)) = (
                 step_loc(problem, route2.steps[j]),
@@ -2164,8 +2356,16 @@ fn try_cross_exchange_fast(
                     None => 0.0,
                 };
             // Service tie-break swaps with the segments; everything else cancels.
-            let delta = (r1_new - r1_old + seg2_service - seg1_service)
+            let mut delta = (r1_new - r1_old + seg2_service - seg1_service)
                 + (r2_new - r2_old + seg1_service - seg2_service);
+            if let (Some(w1), Some(w2), Some(sw)) = (warp1, warp2, wsw) {
+                if let (Some(p1), Some(p2)) = (
+                    w1.penalty_delta(problem, matrix, sw, i, i + 2, &route2.steps[j..j + 2]),
+                    w2.penalty_delta(problem, matrix, sw, j, j + 2, &route1.steps[i..i + 2]),
+                ) {
+                    delta += p1 + p2;
+                }
+            }
             if delta < -1e-9 {
                 cands.push(Cand { delta, r2, j });
             }
@@ -2195,7 +2395,7 @@ fn try_cross_exchange_fast(
         }
         // O(1) slack prefilter: seg2 replaces [i, i+2) in r1, seg1 replaces
         // [j, j+2) in r2.
-        if let Some(cache) = slack.as_deref_mut() {
+        if let Some(Judge::Slack(cache)) = judge.as_deref_mut() {
             cache.ensure(r1, problem, matrix, sol);
             cache.ensure(cand.r2, problem, matrix, sol);
             let ok = match (cache.get(r1), cache.get(cand.r2)) {
