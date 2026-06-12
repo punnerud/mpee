@@ -128,6 +128,29 @@ pub struct RouteSlack {
 }
 
 impl RouteSlack {
+    /// An empty scratch instance: hot call sites that build slack arrays for
+    /// many TRANSIENT step lists (swap*'s per-pair bases) hold one of these
+    /// and call [`rebuild`](Self::rebuild) — the Vec capacities are reused
+    /// across rebuilds instead of reallocated per candidate.
+    pub fn scratch() -> RouteSlack {
+        RouteSlack {
+            n: 0,
+            dim: 0,
+            speed: 1.0,
+            vw: TimeWindow::FOREVER,
+            start_idx: None,
+            end_idx: None,
+            locs: Vec::new(),
+            ect: Vec::new(),
+            lat: Vec::new(),
+            init: Vec::new(),
+            del_pre: Vec::new(),
+            pick_pre: Vec::new(),
+            pre_maxs: Vec::new(),
+            suf_maxs: Vec::new(),
+        }
+    }
+
     /// Build the arrays for `steps` on `veh`. Returns `None` when something
     /// prevents exact math (missing matrix index, a currently-infeasible
     /// route, an unexpected non-job step) — callers then skip slack checks
@@ -138,9 +161,28 @@ impl RouteSlack {
         veh: &Vehicle,
         steps: &[TaskRef],
     ) -> Option<RouteSlack> {
+        let mut s = RouteSlack::scratch();
+        if s.rebuild(problem, matrix, veh, steps) {
+            Some(s)
+        } else {
+            None
+        }
+    }
+
+    /// Refill the arrays in place for a new step list (clear + extend — the
+    /// allocations are kept). Returns `false` under the same conditions
+    /// [`build`](Self::build) returns `None`; the instance is then in an
+    /// unspecified state and must not be used until a `rebuild` succeeds.
+    pub fn rebuild(
+        &mut self,
+        problem: &Problem,
+        matrix: &Matrix,
+        veh: &Vehicle,
+        steps: &[TaskRef],
+    ) -> bool {
         let n = steps.len();
         if n == 0 {
-            return None;
+            return false;
         }
         let dim = problem.capacity_dim().max(veh.capacity.len()).max(1);
         let speed = veh.speed_factor.max(0.01);
@@ -156,16 +198,23 @@ impl RouteSlack {
             ((matrix.duration(a, b) as f64) * speed).round() as i64
         };
 
-        let mut locs = Vec::with_capacity(n);
+        let locs = &mut self.locs;
+        locs.clear();
+        locs.reserve(n);
         for &s in steps {
             if !matches!(s, TaskRef::Job(_)) {
-                return None; // reloads/shipments are gated out, but be safe
+                return false; // reloads/shipments are gated out, but be safe
             }
-            locs.push(s.description(problem).location.index?);
+            match s.description(problem).location.index {
+                Some(l) => locs.push(l),
+                None => return false,
+            }
         }
 
         // Forward: earliest departure after each stop.
-        let mut ect = Vec::with_capacity(n);
+        let ect = &mut self.ect;
+        ect.clear();
+        ect.reserve(n);
         let mut t = vw.start;
         let mut prev = start_idx;
         for (k, &s) in steps.iter().enumerate() {
@@ -178,7 +227,7 @@ impl RouteSlack {
                 t = w.start;
             }
             if t > w.end {
-                return None; // route currently infeasible (shouldn't happen in hard mode)
+                return false; // route currently infeasible (shouldn't happen in hard mode)
             }
             t += job.service;
             ect.push(t);
@@ -188,7 +237,9 @@ impl RouteSlack {
         // Backward: latest feasible arrival per stop. Base case is the final
         // depot leg (`evaluate_route` checks the vehicle window only at route
         // end): arrival at the end depot must be ≤ vw.end.
-        let mut lat = vec![0i64; n];
+        let lat = &mut self.lat;
+        lat.clear();
+        lat.resize(n, 0i64);
         let mut next_lat = vw.end; // latest arrival at the "position after" point
         let mut next_loc: Option<usize> = end_idx; // None ⇒ no arc to it
         for k in (0..n).rev() {
@@ -210,9 +261,15 @@ impl RouteSlack {
 
         // Loads. Under the gate every step is a single job: deliveries are
         // subtracted, pickups added; initial load is the sum of deliveries.
-        let mut init = vec![0i64; dim];
-        let mut del_pre = vec![0i64; (n + 1) * dim];
-        let mut pick_pre = vec![0i64; (n + 1) * dim];
+        let init = &mut self.init;
+        init.clear();
+        init.resize(dim, 0i64);
+        let del_pre = &mut self.del_pre;
+        del_pre.clear();
+        del_pre.resize((n + 1) * dim, 0i64);
+        let pick_pre = &mut self.pick_pre;
+        pick_pre.clear();
+        pick_pre.resize((n + 1) * dim, 0i64);
         for (k, &s) in steps.iter().enumerate() {
             let job = s.description(problem);
             for d in 0..dim {
@@ -227,7 +284,9 @@ impl RouteSlack {
         let load_at = |k: usize, d: usize| -> i64 {
             init[d] - del_pre[(k + 1) * dim + d] + pick_pre[(k + 1) * dim + d]
         };
-        let mut pre_maxs = vec![0i64; (n + 1) * dim];
+        let pre_maxs = &mut self.pre_maxs;
+        pre_maxs.clear();
+        pre_maxs.resize((n + 1) * dim, 0i64);
         for d in 0..dim {
             pre_maxs[d] = init[d];
         }
@@ -236,34 +295,52 @@ impl RouteSlack {
                 pre_maxs[j * dim + d] = pre_maxs[(j - 1) * dim + d].max(load_at(j - 1, d));
             }
         }
-        let mut suf_maxs = vec![i64::MIN; (n + 1) * dim];
+        let suf_maxs = &mut self.suf_maxs;
+        suf_maxs.clear();
+        suf_maxs.resize((n + 1) * dim, i64::MIN);
         for j in (0..n).rev() {
             for d in 0..dim {
                 suf_maxs[j * dim + d] = suf_maxs[(j + 1) * dim + d].max(load_at(j, d));
             }
         }
 
-        Some(RouteSlack {
-            n,
-            dim,
-            speed,
-            vw,
-            start_idx,
-            end_idx,
-            locs,
-            ect,
-            lat,
-            init,
-            del_pre,
-            pick_pre,
-            pre_maxs,
-            suf_maxs,
-        })
+        self.n = n;
+        self.dim = dim;
+        self.speed = speed;
+        self.vw = vw;
+        self.start_idx = start_idx;
+        self.end_idx = end_idx;
+        true
     }
 
     #[inline]
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// Necessary load condition for inserting `task` at ANY position of this
+    /// route: the new initial load (Σ deliveries + its delivery) and the new
+    /// final load (Σ pickups + its pickup) are position-independent under the
+    /// jobs-only gate, so either exceeding capacity proves EVERY insertion
+    /// position infeasible. O(dim) whole-route filter — saves the full
+    /// position scan on capacity-saturated routes.
+    pub fn task_load_fits(&self, veh: &Vehicle, problem: &Problem, task: TaskRef) -> bool {
+        let job = task.description(problem);
+        let n = self.n;
+        let nd = self.dim.min(veh.capacity.len());
+        for d in 0..nd {
+            let dl = job.delivery.get(d).copied().unwrap_or(0);
+            if self.init[d] + dl > veh.capacity[d] {
+                return false;
+            }
+            let pk = job.pickup.get(d).copied().unwrap_or(0);
+            let end_load =
+                self.init[d] - self.del_pre[n * self.dim + d] + self.pick_pre[n * self.dim + d];
+            if end_load + pk > veh.capacity[d] {
+                return false;
+            }
+        }
+        true
     }
 
     #[inline]

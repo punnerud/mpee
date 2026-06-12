@@ -744,6 +744,12 @@ fn try_relocate_task_fast(
     let mut cands: Vec<Cand> = Vec::new();
     // Per seg_len: the route1-after-removal step list and its cost delta.
     let mut r1_after_cache: Vec<Option<(Vec<TaskRef>, f64)>> = vec![None; 4];
+    // Arc-sum cost of route1, walked at most ONCE per probe (was: a full
+    // route1_after walk per seg_len); each seg_len derives its removal delta
+    // with O(1) arc math on top.
+    let mut arc_base1: Option<f64> = None;
+    // Insertion-position scratch, reused across the (seg_len, r2) loops.
+    let mut positions: Vec<usize> = Vec::new();
     // Per seg_len, the metrics of route1-after-removal: None = not evaluated
     // yet (deferred until a candidate of this seg_len survives the slack
     // check), Some(None) = removal infeasible, Some(Some(m)) = metrics.
@@ -796,9 +802,28 @@ fn try_relocate_task_fast(
             }
             m1_eval[seg_len] = Some(m1_after);
         }
-        let cost_r1_after = route_arc_cost(problem, matrix, veh1, &route1_after);
-        let delta_r1 = cost_r1_after - route1.metrics.cost;
-        r1_after_cache[seg_len] = Some((route1_after.clone(), delta_r1));
+        let delta_r1 = if route1_after.is_empty() {
+            0.0 - route1.metrics.cost
+        } else {
+            let base = *arc_base1
+                .get_or_insert_with(|| route_arc_cost(problem, matrix, veh1, &route1.steps));
+            let prev = if i == 0 { depot_start(veh1) } else { step_loc(problem, route1.steps[i - 1]) };
+            let next = if i + seg_len == n1 {
+                depot_end(veh1)
+            } else {
+                step_loc(problem, route1.steps[i + seg_len])
+            };
+            let removed = prev.map_or(0.0, |p| arc_cost(matrix, c1, p, seg0))
+                + internal_fwd
+                + next.map_or(0.0, |nx| arc_cost(matrix, c1, seg_last, nx));
+            let added = match (prev, next) {
+                (Some(p), Some(nx)) => arc_cost(matrix, c1, p, nx),
+                _ => 0.0,
+            };
+            base + added - removed - seg_service - route1.metrics.cost
+        };
+        r1_after_cache[seg_len] = Some((route1_after, delta_r1));
+        let route1_after: &[TaskRef] = &r1_after_cache[seg_len].as_ref().unwrap().0;
 
         nmark_set(granular, seg0, matrix.n);
 
@@ -816,7 +841,7 @@ fn try_relocate_task_fast(
 
             // Candidate positions: granular (adjacent to a top-K neighbour of
             // seg0) plus the two extremes — mirrors the slow path.
-            let mut positions: Vec<usize> = Vec::new();
+            positions.clear();
             for j in 0..=nb {
                 let prev_loc = if j == 0 { None } else { step_loc(problem, base[j - 1]) };
                 let next_loc = if j == nb { None } else { step_loc(problem, base[j]) };
@@ -831,7 +856,7 @@ fn try_relocate_task_fast(
                 positions.push(nb);
             }
 
-            for j in positions {
+            for &j in &positions {
                 if r1 == r2 && j == i {
                     // (no-op slot in the ORIGINAL route; harmless here since base
                     // is route1_after, but keep parity with the slow guard)
@@ -1588,6 +1613,17 @@ fn try_two_opt_star_slow(
     }
 }
 
+thread_local! {
+    /// swap*'s per-pair transient slack arrays (r2 \ {t2}): one scratch per
+    /// thread, rebuilt in place — the millions of per-pair builds reuse the
+    /// same Vec capacities instead of allocating 7 fresh Vecs each.
+    static SWAP_S2_SCRATCH: std::cell::RefCell<crate::slack::RouteSlack> =
+        std::cell::RefCell::new(crate::slack::RouteSlack::scratch());
+    /// Insertion-position ranking buffer for `best_feasible_insertion_delta`.
+    static INS_ORDER: std::cell::RefCell<Vec<(f64, usize)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
 /// SwapStar (Vidal 2022, HGS-CVRP): swap two tasks t1 in r1, t2 in r2 but
 /// place each task at its BEST position in the other route — not at the
 /// old position of the swapped-out task. Unlike try_exchange_with, which
@@ -1649,6 +1685,32 @@ fn try_swap_star(
     // as tight as the old inline-evaluation flow kept it via `best`.
     let mut best_sc = f64::INFINITY;
 
+    // r2\{t2} scratch, reused across the whole pair scan (clear + extend).
+    let mut r2_minus: Vec<TaskRef> = Vec::new();
+
+    let t1serv = t1.description(problem).service as f64 * 1e-6;
+
+    // Largest arc removable by inserting INTO r1_minus: the t2-insertion
+    // delta is ≥ −max_removed_r1 (added arcs and service are ≥ 0), giving an
+    // O(1) stage-1 prune before the O(n1) exact insertion scan. Stage 1 only
+    // prunes pairs the exact lower bound would also prune ⇒ pair set (and
+    // trajectory) unchanged.
+    let max_removed_r1 = if prefilter {
+        let c1 = cost_coef(veh1);
+        let ds1 = depot_start(veh1);
+        let de1 = depot_end(veh1);
+        let nb = r1_minus.len();
+        let mut mx = 0.0f64;
+        for pos in 0..=nb {
+            let prev = if pos == 0 { ds1 } else { step_loc(problem, r1_minus[pos - 1]) };
+            let next = if pos == nb { de1 } else { step_loc(problem, r1_minus[pos]) };
+            if let (Some(p), Some(n)) = (prev, next) {
+                mx = mx.max(arc_cost(matrix, c1, p, n));
+            }
+        }
+        mx
+    } else { 0.0 };
+
     for r2 in 0..n_routes {
         if r2 == r1 { continue; }
         let route2 = &sol.routes[r2];
@@ -1656,6 +1718,16 @@ fn try_swap_star(
         let n2 = route2.steps.len();
         if n2 == 0 { continue; }
         if !veh2.has_skills(t1.skills(problem)) { continue; }
+        let c2 = cost_coef(veh2);
+        let ds2 = depot_start(veh2);
+        let de2 = depot_end(veh2);
+        // Lazy top-3 cheapest feasibility-ignoring insertion deltas of t1 in
+        // the FULL route2 (position kept to exclude pair-adjacent slots).
+        // r2_minus positions are exactly the full-route positions ∉ {j, j+1}
+        // plus the gap at j, so min(first non-adjacent top-3 entry, gap delta)
+        // is BIT-IDENTICAL to pred_cheapest_insert on r2_minus — computed
+        // O(1) per pair instead of O(n2).
+        let mut ins2_top3: Option<[(f64, usize); 3]> = None;
 
         for j in 0..n2 {
             let t2 = route2.steps[j];
@@ -1667,11 +1739,6 @@ fn try_swap_star(
             }
             if !veh1.has_skills(t2.skills(problem)) { continue; }
 
-            // r2\{t2}
-            let mut r2_minus: Vec<TaskRef> = Vec::with_capacity(n2 - 1);
-            r2_minus.extend_from_slice(&route2.steps[..j]);
-            r2_minus.extend_from_slice(&route2.steps[j + 1..]);
-
             let rem2 = if prefilter {
                 pred_remove_delta(problem, matrix, veh2, &route2.steps, j)
             } else { 0.0 };
@@ -1680,16 +1747,76 @@ fn try_swap_star(
             // (exact removals) ≤ true pair delta. Skip if it can't beat the
             // incumbent. Never prunes an improving move ⇒ equivalence preserved.
             if prefilter {
-                let lb = rem1 + pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2)
-                    + rem2 + pred_cheapest_insert(problem, matrix, veh2, &r2_minus, t1);
+                let top3 = ins2_top3.get_or_insert_with(|| {
+                    let mut t = [(f64::INFINITY, usize::MAX); 3];
+                    if let Some(tloc) = t1_loc {
+                        for pos in 0..=n2 {
+                            let prev = if pos == 0 { ds2 } else { step_loc(problem, route2.steps[pos - 1]) };
+                            let next = if pos == n2 { de2 } else { step_loc(problem, route2.steps[pos]) };
+                            let added = prev.map_or(0.0, |p| arc_cost(matrix, c2, p, tloc))
+                                + next.map_or(0.0, |n| arc_cost(matrix, c2, tloc, n));
+                            let removed = match (prev, next) {
+                                (Some(p), Some(n)) => arc_cost(matrix, c2, p, n),
+                                _ => 0.0,
+                            };
+                            let d = added - removed + t1serv;
+                            if d < t[2].0 {
+                                t[2] = (d, pos);
+                                if t[2].0 < t[1].0 { t.swap(1, 2); }
+                                if t[1].0 < t[0].0 { t.swap(0, 1); }
+                            }
+                        }
+                    }
+                    t
+                });
+                let ins2_lb = {
+                    // Gap delta: inserting t1 where t2 used to sit.
+                    let prev = if j == 0 { ds2 } else { step_loc(problem, route2.steps[j - 1]) };
+                    let next = if j + 1 == n2 { de2 } else { step_loc(problem, route2.steps[j + 1]) };
+                    let mut lb = match t1_loc {
+                        Some(tloc) => {
+                            let added = prev.map_or(0.0, |p| arc_cost(matrix, c2, p, tloc))
+                                + next.map_or(0.0, |n| arc_cost(matrix, c2, tloc, n));
+                            let removed = match (prev, next) {
+                                (Some(p), Some(n)) => arc_cost(matrix, c2, p, n),
+                                _ => 0.0,
+                            };
+                            added - removed + t1serv
+                        }
+                        None => f64::INFINITY,
+                    };
+                    // First non-adjacent entry = exact min over all
+                    // non-adjacent positions (at most 2 are excluded).
+                    for &(d, p) in top3.iter() {
+                        if p != j && p != j + 1 {
+                            lb = lb.min(d);
+                            break;
+                        }
+                    }
+                    lb
+                };
                 let thresh = best.as_ref().map(|b| b.delta).unwrap_or(-1e-9).min(best_sc);
+                // Stage 1: O(1) optimistic bound on the r1-side insert.
+                if rem1 + rem2 + ins2_lb - max_removed_r1 >= thresh - 1e-12 {
+                    continue;
+                }
+                let lb = rem1 + pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2)
+                    + rem2 + ins2_lb;
                 if lb >= thresh - 1e-12 {
                     continue;
                 }
             }
 
+            // r2\{t2} — only built for pairs that survive the prune.
+            r2_minus.clear();
+            r2_minus.extend_from_slice(&route2.steps[..j]);
+            r2_minus.extend_from_slice(&route2.steps[j + 1..]);
+
             // Slack branch: judge both insertions with O(1) checks and exact
             // arc deltas — zero evaluations until the confirm phase below.
+            // Outcomes: None ⇒ arrays unavailable, fall to the eval path;
+            // Some(None) ⇒ no feasible insertion, the pair is dead;
+            // Some(Some(..)) ⇒ judged.
             if use_slack {
                 let s1m_ref = s1m
                     .get_or_insert_with(|| {
@@ -1698,21 +1825,33 @@ fn try_swap_star(
                     })
                     .as_deref();
                 if let Some(s1ref) = s1m_ref {
-                    if let Some(s2m) =
-                        crate::slack::RouteSlack::build(problem, matrix, veh2, &r2_minus)
-                    {
-                        let Some((pos1, d1)) = best_feasible_insertion_delta(
-                            problem, matrix, veh1, &r1_minus, t2, s1ref,
-                        ) else { continue };
-                        let Some((pos2, d2)) = best_feasible_insertion_delta(
-                            problem, matrix, veh2, &r2_minus, t1, &s2m,
-                        ) else { continue };
-                        let delta = rem1 + d1 + rem2 + d2;
-                        if delta < -1e-9 {
-                            best_sc = best_sc.min(delta);
-                            scands.push(SCand { delta, r2, j, pos1, pos2 });
+                    let judged: Option<Option<(usize, f64, usize, f64)>> =
+                        SWAP_S2_SCRATCH.with(|cell| {
+                            // r1-side first: its arrays are already built, and
+                            // a dead r1-side saves the per-pair s2m rebuild.
+                            let Some((pos1, d1)) = best_feasible_insertion_delta(
+                                problem, matrix, veh1, &r1_minus, t2, s1ref,
+                            ) else { return Some(None) };
+                            let mut s2m = cell.borrow_mut();
+                            if !s2m.rebuild(problem, matrix, veh2, &r2_minus) {
+                                return None;
+                            }
+                            let Some((pos2, d2)) = best_feasible_insertion_delta(
+                                problem, matrix, veh2, &r2_minus, t1, &s2m,
+                            ) else { return Some(None) };
+                            Some(Some((pos1, d1, pos2, d2)))
+                        });
+                    match judged {
+                        Some(Some((pos1, d1, pos2, d2))) => {
+                            let delta = rem1 + d1 + rem2 + d2;
+                            if delta < -1e-9 {
+                                best_sc = best_sc.min(delta);
+                                scands.push(SCand { delta, r2, j, pos1, pos2 });
+                            }
+                            continue;
                         }
-                        continue;
+                        Some(None) => continue,
+                        None => {} // arrays unavailable — eval path below
                     }
                 }
             }
@@ -1787,13 +1926,21 @@ fn best_feasible_insertion_delta(
     slack_base: &crate::slack::RouteSlack,
 ) -> Option<(usize, f64)> {
     let tloc = step_loc(problem, task)?;
+    // O(dim) whole-route load filter: if the task provably fits at NO
+    // position, skip the full position scan.
+    if !slack_base.task_load_fits(veh, problem, task) {
+        op_slack_skip(OP_SWAP_STAR);
+        return None;
+    }
     let c = cost_coef(veh);
     let nb = base.len();
     let tserv = task.description(problem).service as f64 * 1e-6;
     let ds = depot_start(veh);
     let de = depot_end(veh);
-    let mut order: Vec<(f64, usize)> = (0..=nb)
-        .map(|pos| {
+    INS_ORDER.with(|cell| {
+        let mut order = cell.borrow_mut();
+        order.clear();
+        order.extend((0..=nb).map(|pos| {
             let prev = if pos == 0 { ds } else { step_loc(problem, base[pos - 1]) };
             let next = if pos == nb { de } else { step_loc(problem, base[pos]) };
             let added = prev.map_or(0.0, |p| arc_cost(matrix, c, p, tloc))
@@ -1803,17 +1950,17 @@ fn best_feasible_insertion_delta(
                 _ => 0.0,
             };
             (added - removed + tserv, pos)
-        })
-        .collect();
-    order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let seg = [task];
-    for (d, pos) in order {
-        if slack_base.replace_seg_ok(problem, matrix, veh, pos, pos, &seg) {
-            return Some((pos, d));
+        }));
+        order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let seg = [task];
+        for &(d, pos) in order.iter() {
+            if slack_base.replace_seg_ok(problem, matrix, veh, pos, pos, &seg) {
+                return Some((pos, d));
+            }
+            op_slack_skip(OP_SWAP_STAR);
         }
-        op_slack_skip(OP_SWAP_STAR);
-    }
-    None
+        None
+    })
 }
 
 /// Helper for SwapStar: try each insertion position for `task` in `base`,
