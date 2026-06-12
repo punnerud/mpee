@@ -377,6 +377,7 @@ fn evaluate_route_with_buf(
     // Penalty-managed soft constraints (off by default → all three excess
     // accumulators stay 0 and every check below behaves as a hard reject).
     let soft = soft_active();
+    let warp = soft && SOFT_WARP.with(|c| c.get());
     let sw = if soft { soft_weights() } else { SoftWeights { tw: 0.0, load: 0.0, dur: 0.0 } };
     let mut tw_late: i64 = 0; // seconds of time-window lateness (time warp)
     let mut load_excess: i64 = 0; // peak units of capacity overload
@@ -615,8 +616,12 @@ fn evaluate_route_with_buf(
             t = chosen_tw.start;
         }
         if t > chosen_tw.end {
-            if soft { tw_late += t - chosen_tw.end; }
-            else { return Err("arrived after time window end"); }
+            if soft {
+                tw_late += t - chosen_tw.end;
+                // Warp semantics (PyVRP): judge each stop against an on-time
+                // prefix — lateness is charged once, not propagated downstream.
+                if warp { t = chosen_tw.end; }
+            } else { return Err("arrived after time window end"); }
         }
 
         // Apply load change in place — no allocations.
@@ -962,11 +967,29 @@ pub struct SoftWeights {
     pub dur: f64,
 }
 
+/// Lateness semantics for the soft time-window penalty.
+///
+/// `CarryForward` (the public default, OR-Tools soft-bound semantics): a late
+/// arrival is charged `t − tw.end` and `t` keeps running late, so lateness
+/// propagates downstream. This is the user-facing soft-TW product behaviour.
+///
+/// `Warp` (internal, PyVRP/Vidal time-warp): a late arrival is charged the same
+/// but `t` is clamped back to `tw.end`, so each stop's lateness is judged
+/// against an on-time prefix. Unlike carry-forward, warp composes into O(1)
+/// segment statistics (see `crate::warp`), which is what makes a fast soft LS
+/// possible. Only the HGS infeasible track arms this mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoftMode {
+    CarryForward,
+    Warp,
+}
+
 thread_local! {
     static SOFT_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SOFT_TW: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     static SOFT_LOAD: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     static SOFT_DUR: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    static SOFT_WARP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Bumped on every weight change so the route-eval cache never serves a
     /// soft-penalised result to a hard query (or across a λ update). `0` ⇒ hard
     /// mode, which keeps the cache key — and thus behaviour — byte-identical.
@@ -977,21 +1000,37 @@ thread_local! {
 /// weights, or pass `None` to restore hard constraints. Call at the start of a
 /// per-seed search and clear (`None`) before any final hard re-evaluation.
 pub fn set_soft_penalties(weights: Option<SoftWeights>) {
+    set_soft_penalties_mode(weights, SoftMode::CarryForward);
+}
+
+/// `set_soft_penalties` with an explicit lateness semantics. `None` weights
+/// restore hard mode regardless of `mode`.
+pub fn set_soft_penalties_mode(weights: Option<SoftWeights>, mode: SoftMode) {
     match weights {
         Some(w) => {
             SOFT_TW.with(|c| c.set(w.tw));
             SOFT_LOAD.with(|c| c.set(w.load));
             SOFT_DUR.with(|c| c.set(w.dur));
+            SOFT_WARP.with(|c| c.set(mode == SoftMode::Warp));
             SOFT_ACTIVE.with(|c| c.set(true));
             // Advance to a fresh, non-zero generation so cached hard/old-λ
             // entries are not reused. Odd step keeps successive gens distinct.
+            // The same bump isolates Warp-mode results from CarryForward ones.
             SOFT_GEN.with(|c| c.set(c.get().wrapping_add(0x9E37_79B9_7F4A_7C15)));
         }
         None => {
             SOFT_ACTIVE.with(|c| c.set(false));
+            SOFT_WARP.with(|c| c.set(false));
             SOFT_GEN.with(|c| c.set(0));
         }
     }
+}
+
+/// True iff soft mode is armed on this thread with `SoftMode::Warp` semantics.
+/// The warp-based fast soft LS (`crate::warp`) is exact only in this mode.
+#[inline]
+pub fn warp_soft_active() -> bool {
+    SOFT_ACTIVE.with(|c| c.get()) && SOFT_WARP.with(|c| c.get())
 }
 
 #[inline]
@@ -1008,7 +1047,7 @@ pub fn soft_is_active() -> bool {
 }
 
 #[inline]
-fn soft_weights() -> SoftWeights {
+pub(crate) fn soft_weights() -> SoftWeights {
     SoftWeights {
         tw: SOFT_TW.with(|c| c.get()),
         load: SOFT_LOAD.with(|c| c.get()),

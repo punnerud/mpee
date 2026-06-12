@@ -1269,11 +1269,15 @@ pub fn solve_genetic(
                 }
                 pop[pb].sol.clone()
             };
-            crate::solution::set_soft_penalties(Some(crate::solution::SoftWeights {
-                tw: lam,
-                load: lam,
-                dur: lam,
-            }));
+            // WARP semantics (not the public carry-forward): the penalised
+            // objective here is internal — pop_inf costs only rank soft
+            // offspring at a frozen λ and every member is re-judged hard —
+            // and warp is what the O(1) soft-delta fast LS (crate::warp) is
+            // exact against, so education runs at fast-path speed.
+            crate::solution::set_soft_penalties_mode(
+                Some(crate::solution::SoftWeights { tw: lam, load: lam, dur: lam }),
+                crate::solution::SoftMode::Warp,
+            );
             let child_opt = srex_crossover(&pop[pa].sol, &pb_sol, problem, matrix, &mut rng);
             let soft_child = child_opt.map(|mut c| {
                 let uns = srex_unsettled(&c, &pop[pa].sol, &pb_sol);

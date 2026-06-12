@@ -777,11 +777,22 @@ fn solve_scalar_with_extra_global(
             );
         }
 
-        // Arm soft penalties for the ILS (construction above stayed hard). With a
-        // fixed high λ this leaves a feasible instance's trajectory unchanged and
-        // lets an over-constrained one serve stops late instead of dropping them.
+        // Arm soft penalties for the ILS only when they can matter: construction
+        // left stops unassigned (over-constrained — soft serves them late instead
+        // of dropping), the caller forced soft mode, or BROOOM_NO_HARD_ILS=1
+        // restores the old always-arm behaviour for A/B. On a fully-assigned
+        // solution the fixed high λ makes soft trajectory-identical to hard by
+        // design — but soft_is_active() disables every fast LS path, so arming it
+        // unconditionally paid the slow path for zero trajectory difference.
+        // (Construction above stayed hard either way.)
+        let force_soft = config.soft_search == Some(true)
+            || std::env::var("BROOOM_NO_HARD_ILS").is_ok();
+        let mut soft_armed = false;
         if let Some(w) = soft_weights {
-            crate::solution::set_soft_penalties(Some(w));
+            if force_soft || !sol.unassigned.is_empty() {
+                crate::solution::set_soft_penalties(Some(w));
+                soft_armed = true;
+            }
         }
 
         // ILS with Late-Acceptance Hill-Climbing (Burke & Bykov 2017), the
@@ -856,6 +867,16 @@ fn solve_scalar_with_extra_global(
                         config.max_local_search_passes, gran,
                     );
                 }
+                // One-way latch: a kick can strand a task (re-insertion failed
+                // under hard mode) — from then on this variant runs soft as
+                // before, so the walk can serve it late rather than carry the
+                // drop prize.
+                if !soft_armed && !perturbed.unassigned.is_empty() {
+                    if let Some(w) = soft_weights {
+                        crate::solution::set_soft_penalties(Some(w));
+                        soft_armed = true;
+                    }
+                }
                 let cc = perturbed.summary.cost;
                 // New global best → keep it, and (exhaustive-on-best) give it a
                 // full no-don't-look-bit polish, à la PyVRP `exhaustive_on_best`.
@@ -903,6 +924,12 @@ fn solve_scalar_with_extra_global(
                     problem, matrix, &mut perturbed,
                     config.max_local_search_passes, granular.as_ref(),
                 );
+                if !soft_armed && !perturbed.unassigned.is_empty() {
+                    if let Some(w) = soft_weights {
+                        crate::solution::set_soft_penalties(Some(w));
+                        soft_armed = true;
+                    }
+                }
                 if perturbed.summary.cost < best_cost {
                     best_cost = perturbed.summary.cost;
                     best_sol = perturbed;
@@ -1003,9 +1030,20 @@ fn solve_scalar_with_extra_global(
     // Arm soft penalties for the serial polish too, so it never re-rejects a
     // legitimately-served-late route (and can pull a dropped stop in late via the
     // repair pass). On a feasible instance the high λ keeps the polish identical
-    // to hard mode. Cleared at the end of the solve.
+    // to hard mode — so when everything is assigned (nothing served late, nothing
+    // to pull in) we stay hard and keep the fast LS paths, same contract as the
+    // ILS arming above. BROOOM_NO_HARD_ILS=1 restores always-arm.
     if let Some(w) = soft_weights {
-        crate::solution::set_soft_penalties(Some(w));
+        let served_late = best.routes.iter().any(|r| {
+            r.metrics.tw_excess > 0.0 || r.metrics.load_excess > 0.0 || r.metrics.dur_excess > 0.0
+        });
+        if config.soft_search == Some(true)
+            || std::env::var("BROOOM_NO_HARD_ILS").is_ok()
+            || !best.unassigned.is_empty()
+            || served_late
+        {
+            crate::solution::set_soft_penalties(Some(w));
+        }
     }
 
     // GPU polish uses a hard-only megakernel (no soft penalties), so skip it when
