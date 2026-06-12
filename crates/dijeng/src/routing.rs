@@ -480,6 +480,9 @@ impl RoutingService {
     /// tour starting/ending at `pts[0]`; `false` gives an open path pinned to
     /// start at `pts[0]` and end at the last point. Returns `None` when there
     /// is no CH, fewer than 2 points, or no feasible ordering (disconnected).
+    /// Native-only: rides on the parallel `matrix` (the wasm demo's VRP path
+    /// uses the serial `matrix_with_distance` twin instead).
+    #[cfg(feature = "native")]
     pub fn trip(&self, pts: &[(f32, f32)], roundtrip: bool) -> Option<TripResponse> {
         self.ch.as_ref()?;
         let n = pts.len();
@@ -528,6 +531,8 @@ impl RoutingService {
     /// Map matching (Newson-Krumm HMM): reconstruct the road path a noisy GPS
     /// trace was driven on. `sigma_m` is the GPS noise (≈15 m urban). Returns
     /// one matched road point per input ping plus a confidence in [0, 1].
+    /// Native-only: the HMM transitions ride on the parallel CH matrix.
+    #[cfg(feature = "native")]
     pub fn match_trace(
         &self,
         trace: &[(f32, f32)],

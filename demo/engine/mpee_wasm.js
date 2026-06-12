@@ -141,15 +141,24 @@ export class Engine {
      * Vehicles start/end at `depot` (JSON `[lat,lon]`, or `null` → centroid).
      * Returns JSON with one entry per used vehicle (ordered stops + coords),
      * totals and any unassigned stops. CPU solver (serial multi-start).
+     *
+     * Working-hours model: `max_route_min > 0` caps each driver's route —
+     * driving + service + the return to the depot must fit within that many
+     * minutes (a shift; the UI subtracts the break before calling). The cap
+     * is hard: stops that can't fit any driver's remaining shift come back
+     * in `unassigned`. `service_min > 0` adds that many minutes of work at
+     * every stop. `capacity <= 0` means uncapacitated (hours bind instead).
      * @param {string} stops_json
      * @param {string} depot_json
      * @param {number} vehicles
      * @param {number} capacity
      * @param {number} time_limit_s
      * @param {string} objective
+     * @param {number} max_route_min
+     * @param {number} service_min
      * @returns {string}
      */
-    optimize(stops_json, depot_json, vehicles, capacity, time_limit_s, objective) {
+    optimize(stops_json, depot_json, vehicles, capacity, time_limit_s, objective, max_route_min, service_min) {
         let deferred5_0;
         let deferred5_1;
         try {
@@ -159,7 +168,7 @@ export class Engine {
             const len1 = WASM_VECTOR_LEN;
             const ptr2 = passStringToWasm0(objective, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len2 = WASM_VECTOR_LEN;
-            const ret = wasm.engine_optimize(this.__wbg_ptr, ptr0, len0, ptr1, len1, vehicles, capacity, time_limit_s, ptr2, len2);
+            const ret = wasm.engine_optimize(this.__wbg_ptr, ptr0, len0, ptr1, len1, vehicles, capacity, time_limit_s, ptr2, len2, max_route_min, service_min);
             var ptr4 = ret[0];
             var len4 = ret[1];
             if (ret[3]) {
@@ -687,7 +696,7 @@ function __wbg_get_imports() {
             arg0.unmap();
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 140, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 149, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__he21e22a18e7c17bf);
             return ret;
         },

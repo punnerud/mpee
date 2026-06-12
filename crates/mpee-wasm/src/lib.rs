@@ -240,6 +240,13 @@ impl Engine {
     /// Vehicles start/end at `depot` (JSON `[lat,lon]`, or `null` → centroid).
     /// Returns JSON with one entry per used vehicle (ordered stops + coords),
     /// totals and any unassigned stops. CPU solver (serial multi-start).
+    ///
+    /// Working-hours model: `max_route_min > 0` caps each driver's route —
+    /// driving + service + the return to the depot must fit within that many
+    /// minutes (a shift; the UI subtracts the break before calling). The cap
+    /// is hard: stops that can't fit any driver's remaining shift come back
+    /// in `unassigned`. `service_min > 0` adds that many minutes of work at
+    /// every stop. `capacity <= 0` means uncapacitated (hours bind instead).
     pub fn optimize(
         &self,
         stops_json: &str,
@@ -248,6 +255,8 @@ impl Engine {
         capacity: i32,
         time_limit_s: f64,
         objective: &str,
+        max_route_min: f64,
+        service_min: f64,
     ) -> Result<String, JsValue> {
         let capacity = capacity as i64; // i32 maps to a JS number; widen for brooom
         // `objective`: "" / "scalar" → today's single-cost solve; otherwise a
@@ -288,6 +297,15 @@ impl Engine {
         };
         let matrix = Matrix { n, durations: to_i(&durs_f), distances: Some(to_i(&dists_f)) };
 
+        // Shift cap as a vehicle time window [0, work_s]: the evaluator then
+        // enforces driving + service + waiting + the return leg <= work_s.
+        let work_s: Option<i64> = (max_route_min > 0.0)
+            .then(|| (max_route_min * 60.0).round() as i64)
+            .filter(|&s| s > 0);
+        let service_s: i64 = if service_min > 0.0 { (service_min * 60.0).round() as i64 } else { 0 };
+        // capacity <= 0 ⇒ uncapacitated: every job fits, hours bind instead.
+        let capacity = if capacity <= 0 { stops.len() as i64 } else { capacity };
+
         let mut problem = Problem::default();
         for v in 0..vehicles {
             problem.vehicles.push(Vehicle {
@@ -296,7 +314,8 @@ impl Engine {
                 end: Some(Location::from_index(0)),
                 capacity: vec![capacity],
                 skills: vec![],
-                time_window: None,
+                time_window: work_s
+                    .map(|s| brooom::problem::TimeWindow { start: 0, end: s }),
                 speed_factor: 1.0,
                 max_tasks: None,
                 max_travel_time: None,
@@ -329,7 +348,7 @@ impl Engine {
                 id: (i + 1) as u64,
                 location: Location::from_index(i + 1),
                 kind: Default::default(),
-                service: 0,
+                service: service_s,
                 setup: 0,
                 release: 0,
                 delivery: vec![1],
@@ -385,6 +404,9 @@ impl Engine {
             }
             td += dist[prev * n] as i64;
             tt += matrix.durations[prev * n] as i64;
+            // Route duration = driving + service: the working time the shift
+            // cap judges (waiting can't occur here — no job time windows).
+            tt += service_s * steps.len() as i64;
             grand_d += td;
             grand_t += tt;
             grand_stops += steps.len();
@@ -416,6 +438,10 @@ impl Engine {
             "total_duration_min": grand_t as f64 / 60.0,
             "depot": [depot.0, depot.1],
             "unassigned": unassigned,
+            // Echo of the working-hours model, so the UI can render
+            // "6h 51m / 7h 30m" without re-deriving its own inputs.
+            "max_route_min": max_route_min,
+            "service_min": service_min,
         });
         Ok(out.to_string())
     }

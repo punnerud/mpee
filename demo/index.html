@@ -201,12 +201,14 @@
     <div class="pane on" id="pane-trip">
       <!-- Primary actions on top so Optimize is visible without scrolling. -->
       <div class="controls">
-        <div class="ctl"><label>Vehicles</label><input type="number" id="o-v" value="4" min="1" max="20"></div>
-        <div class="ctl"><label>Capacity</label><input type="number" id="o-cap" value="10" min="1"></div>
+        <div class="ctl"><label>Max drivers</label><input type="number" id="o-v" value="4" min="1" max="20"></div>
+        <div class="ctl"><label>Shift (hours)</label><input type="number" id="o-shift" value="8" min="1" max="24" step="0.5"></div>
+        <div class="ctl"><label>Break (min)</label><input type="number" id="o-break" value="30" min="0" step="5"></div>
+        <div class="ctl"><label>Per stop (min)</label><input type="number" id="o-serv" value="5" min="0"></div>
         <div class="ctl" style="flex:1 1 100%"><label>Objective</label><select id="o-obj">
-          <option value="">Lowest cost (default)</option>
-          <option value="vehicles,cost">Fewest vehicles → then cost</option>
-          <option value="unassigned,vehicles,cost">Serve all → fewest vehicles → cost</option>
+          <option value="unassigned,vehicles,cost">Serve all → fewest drivers → cost (default)</option>
+          <option value="vehicles,cost">Fewest drivers → then cost</option>
+          <option value="">Lowest cost</option>
         </select></div>
       </div>
       <div class="actions" style="margin-top:8px">
@@ -255,7 +257,7 @@
 </div>
 
 <script type="module">
-const BUILD = '3h0';
+const BUILD = '3i0';
 // The engine module is imported DYNAMICALLY inside boot() with ?v=${BUILD}, so a
 // fresh wasm build is never served stale from a previous deploy's cache (a
 // hard-coded ?v on a static import had drifted out of sync).
@@ -510,28 +512,37 @@ function doRoute() {
 async function doOptimize() {
   if (stops.length < 2) return;
   const vehicles = Math.max(1, +$('o-v').value || 4);
-  const capacity = Math.max(1, +$('o-cap').value || 10);
-  // "" = scalar (lowest cost); else a lexicographic level list, e.g. "vehicles,cost".
+  // Working-hours model: each driver has a shift; the break is subtracted up
+  // front, so the solver caps every route (driving + per-stop service + the
+  // return to the depot) at the remaining work time.
+  const shiftH  = Math.max(1, +$('o-shift').value || 8);
+  const breakMin = Math.max(0, +$('o-break').value || 0);
+  const servMin  = Math.max(0, +$('o-serv').value || 0);
+  const workMin  = Math.max(30, shiftH * 60 - breakMin);
+  // Lexicographic level list; default "unassigned,vehicles,cost" = serve all
+  // stops with the FEWEST drivers, then cheapest. "" = scalar lowest cost.
   const objective = $('o-obj').value;
   // First stop = depot; the rest are delivery jobs.
   const depot = [stops[0].lat, stops[0].lon];
   const jobs = stops.slice(1).map(s => [s.lat, s.lon]);
   // Run the GPU solver when WebGPU compute is verified and the toggle is on;
   // otherwise the CPU (WASM) solver. The GPU path is async (returns a Promise).
-  // The GPU 2-opt path can't run the lexicographic meta-driver, so any non-default
-  // objective falls back to the CPU solver.
+  // The GPU 2-opt path can't run the lexicographic meta-driver or the
+  // working-hours cap — it's only used for the plain "Lowest cost" objective,
+  // as a GPU showcase (uncapacitated round-robin + 2-opt).
   const useGpu = $('o-gpu').checked && navigator.gpu && gpuVerified && !objective;
   const t0 = performance.now();
   let plan;
   try {
     plan = useGpu
-      ? JSON.parse(await engine.optimize_gpu(JSON.stringify(jobs), JSON.stringify(depot), vehicles, capacity))
-      : JSON.parse(engine.optimize(JSON.stringify(jobs), JSON.stringify(depot), vehicles, capacity, 2.0, objective));
+      ? JSON.parse(await engine.optimize_gpu(JSON.stringify(jobs), JSON.stringify(depot), vehicles, jobs.length))
+      : JSON.parse(engine.optimize(JSON.stringify(jobs), JSON.stringify(depot), vehicles, 0, 2.0, objective, workMin, servMin));
   } catch(e){ setOut('trip-out', 'Optimize failed: '+e.message); return; }
   const ms = performance.now()-t0;
   lastPlan = plan;
   track('optimize', { solver: useGpu ? 'gpu' : 'cpu', objective: objective || 'scalar',
-                      stops: plan.total_stops, vehicles: plan.vehicles_used, ms: Math.round(ms) });
+                      stops: plan.total_stops, vehicles: plan.vehicles_used, ms: Math.round(ms),
+                      work_min: workMin, service_min: servMin });
 
   clearRoutes(); clearResultMarkers();
   const lines = [];
@@ -557,17 +568,25 @@ async function doOptimize() {
   fit(stops);
   const onGpu = plan.solver === 'gpu-2opt';
 
-  // Per-vehicle breakdown (colour-matched to the routes on the map).
-  let html = `<b>${plan.vehicles_used} vehicle${plan.vehicles_used===1?'':'s'} · ${plan.total_stops} stops</b> · depot = stop 1<br>`
-    + `total <b>${plan.total_distance_km.toFixed(1)} km</b> · ${fmtMin(plan.total_duration_min)}`
+  // Per-vehicle breakdown (colour-matched to the routes on the map). The CPU
+  // plan echoes the working-hours model (max_route_min); the GPU showcase
+  // path doesn't run it, so the shift line and the "/ shift" budgets only
+  // render when the cap was actually applied.
+  const capMin = +plan.max_route_min > 0 ? +plan.max_route_min : null;
+  let html = `<b>${plan.vehicles_used} driver${plan.vehicles_used===1?'':'s'} · ${plan.total_stops} stops</b> · depot = stop 1<br>`
+    + `total <b>${plan.total_distance_km.toFixed(1)} km</b> · ${fmtMin(plan.total_duration_min)} work`
     + ` · unassigned ${plan.unassigned.length}`
+    + (capMin ? `<br><span class="dim">${shiftH}h shift incl ${breakMin} min break → ${fmtMin(workMin)} workable`
+                + (servMin ? ` · ${servMin} min/stop` : '') + `</span>` : '')
     + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on ${onGpu ? 'GPU (WebGPU local search) ✓' : 'CPU (WASM)'}</span>`
-    + (onGpu ? `<br><span class="dim">GPU relocate + 2-opt: ${plan.before_distance_km.toFixed(1)} → ${plan.after_distance_km.toFixed(1)} km (naive → optimised)</span>` : '')
+    + (onGpu ? `<br><span class="dim">GPU relocate + 2-opt: ${plan.before_distance_km.toFixed(1)} → ${plan.after_distance_km.toFixed(1)} km (naive → optimised; no working-hours cap)</span>` : '')
+    + ((capMin && plan.unassigned.length) ? `<br><span class="dim">⚠ ${plan.unassigned.length} stop(s) don't fit the shifts — add drivers or hours</span>` : '')
     + `<div class="veh-list">`;
   plan.routes.forEach((rt, vi) => {
     const color = PALETTE[vi % PALETTE.length];
     html += `<div class="veh"><span class="sw" style="background:${color}"></span>`
-      + `<b>Vehicle ${rt.vehicle_id}</b> — ${rt.n_stops} stops · ${rt.distance_km.toFixed(1)} km · ${fmtMin(rt.duration_min)}</div>`;
+      + `<b>Driver ${rt.vehicle_id}</b> — ${rt.n_stops} stops · ${rt.distance_km.toFixed(1)} km · `
+      + (capMin ? `${fmtMin(rt.duration_min)} / ${fmtMin(capMin)}` : fmtMin(rt.duration_min)) + `</div>`;
   });
   html += `</div>`;
   setOutHTML('trip-out', html);
