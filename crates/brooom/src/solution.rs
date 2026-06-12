@@ -228,6 +228,16 @@ thread_local! {
     static SCRATCH_LOAD: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(Vec::new());
 }
 
+// ── env-gated LS statistics (BROOOM_LS_STATS=1) ──────────────────────────────
+// Global counters for evaluate_route traffic. The flag is read once; when off
+// (the default) the hot path pays a single cached-bool load and no atomics.
+pub fn ls_stats_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BROOOM_LS_STATS").is_ok())
+}
+pub static EVAL_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static EVAL_CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 // Per-thread LRU cache for evaluate_route. Keyed by (epoch, vehicle.id,
 // step-hash). The epoch is a global atomic that the solver bumps at the
 // start of each solve — so even rayon worker threads with persistent
@@ -300,6 +310,9 @@ pub fn evaluate_route(
     // the key — and behaviour — is byte-identical to before.
     let key = (prob_id, vehicle.id, hash_steps(steps) ^ soft_generation());
 
+    if ls_stats_on() {
+        EVAL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     // Lookup. Reset cache if epoch has bumped since we last touched it.
     if let Some(hit) = EVAL_CACHE.with(|cell| {
         let mut c = cell.borrow_mut();
@@ -311,6 +324,9 @@ pub fn evaluate_route(
             c.map.get(&key).copied()
         }
     }) {
+        if ls_stats_on() {
+            EVAL_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         return hit;
     }
 
