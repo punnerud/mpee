@@ -37,6 +37,31 @@ fn edu_escalate_on() -> bool {
     std::env::var("BROOOM_NO_EDU_ESCALATE").is_err()
 }
 
+/// Escalation checkpoints as (generation, max-budget-fraction) pairs,
+/// overridable via BROOOM_EDU_ESC="30:0.30,120:0.45,400:0.60" for tuning
+/// sweeps without a rebuild. Any parse error falls back to the defaults;
+/// an explicitly empty string means no escalation checkpoints.
+fn edu_esc_schedule() -> Vec<(usize, f64)> {
+    const DEFAULT: [(usize, f64); 3] = [(30, 0.30), (120, 0.45), (400, 0.60)];
+    let Ok(raw) = std::env::var("BROOOM_EDU_ESC") else {
+        return DEFAULT.to_vec();
+    };
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let Some((g, f)) = part.split_once(':') else {
+            return DEFAULT.to_vec();
+        };
+        match (g.trim().parse::<usize>(), f.trim().parse::<f64>()) {
+            (Ok(g), Ok(f)) if f.is_finite() => out.push((g, f)),
+            _ => return DEFAULT.to_vec(),
+        }
+    }
+    out
+}
+
 /// Whether this problem fits the v1 HGS envelope (see module docs). Outside it,
 /// the caller keeps the proven search path.
 pub fn hgs_applicable(problem: &Problem) -> bool {
@@ -1214,6 +1239,7 @@ pub fn solve_genetic(
     let max_pop = mu + lambda;
     // Wall-clock breakdown per component, reported under BROOOM_HGS_DEBUG.
     let (mut t_xover, mut t_edu, mut t_full) = (0f64, 0f64, 0f64);
+    let esc_schedule = edu_esc_schedule();
     for gen in 0..max_gens {
         gen_count = gen;
         if let Some(d) = deadline {
@@ -1234,9 +1260,7 @@ pub fn solve_genetic(
             // Kill-switch: BROOOM_NO_EDU_ESCALATE=1.
             if edu_passes < max_passes
                 && edu_escalate_on()
-                && ((gen == 30 && frac < 0.30)
-                    || (gen == 120 && frac < 0.45)
-                    || (gen == 400 && frac < 0.60))
+                && esc_schedule.iter().any(|&(g, f)| gen == g && frac < f)
             {
                 edu_passes = (edu_passes * 2).min(max_passes);
             }
@@ -1498,4 +1522,25 @@ pub fn solve_genetic_parallel(
         eprintln!("{}", stats);
     }
     result
+}
+
+#[cfg(test)]
+mod esc_tests {
+    use super::edu_esc_schedule;
+
+    #[test]
+    fn edu_esc_schedule_parses() {
+        // Env is process-global: all cases in one test fn.
+        std::env::remove_var("BROOOM_EDU_ESC");
+        assert_eq!(edu_esc_schedule(), vec![(30, 0.30), (120, 0.45), (400, 0.60)]);
+        std::env::set_var("BROOOM_EDU_ESC", "10:0.2,50:0.5");
+        assert_eq!(edu_esc_schedule(), vec![(10, 0.2), (50, 0.5)]);
+        std::env::set_var("BROOOM_EDU_ESC", "");
+        assert_eq!(edu_esc_schedule(), Vec::<(usize, f64)>::new());
+        std::env::set_var("BROOOM_EDU_ESC", "garbage");
+        assert_eq!(edu_esc_schedule(), vec![(30, 0.30), (120, 0.45), (400, 0.60)]);
+        std::env::set_var("BROOOM_EDU_ESC", "10:nan");
+        assert_eq!(edu_esc_schedule(), vec![(30, 0.30), (120, 0.45), (400, 0.60)]);
+        std::env::remove_var("BROOOM_EDU_ESC");
+    }
 }

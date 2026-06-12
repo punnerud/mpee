@@ -866,13 +866,29 @@ fn inv_slice(marks: &[(u32, u32)], r2: usize) -> &[(u32, u32)] {
 /// are then appended if absent — IN THIS EXACT ORDER. The candidate sort
 /// downstream is stable, so the emission order is part of the trajectory
 /// contract the inverted generator must reproduce.
-fn scan_positions(problem: &Problem, base: &[TaskRef], nb: usize, positions: &mut Vec<usize>) {
+///
+/// `extremes` gates the appended extremes (`Marked` keeps them only when the
+/// granular pass emitted something — judged AFTER the loop, the only
+/// definition both this scan and `inv_emit` agree on, since the inverted
+/// intra-route path skips marks inside the removed segment).
+fn scan_positions(
+    problem: &Problem,
+    base: &[TaskRef],
+    nb: usize,
+    extremes: crate::posidx::RelocExtremes,
+    positions: &mut Vec<usize>,
+) {
     for j in 0..=nb {
         let prev_loc = if j == 0 { None } else { step_loc(problem, base[j - 1]) };
         let next_loc = if j == nb { None } else { step_loc(problem, base[j]) };
         if prev_loc.map_or(false, nmark_has) || next_loc.map_or(false, nmark_has) {
             positions.push(j);
         }
+    }
+    match extremes {
+        crate::posidx::RelocExtremes::Full => {}
+        crate::posidx::RelocExtremes::Marked if !positions.is_empty() => {}
+        _ => return,
     }
     if !positions.contains(&0) {
         positions.push(0);
@@ -895,6 +911,7 @@ fn inv_emit(
     i: usize,
     seg_len: usize,
     nb: usize,
+    extremes: crate::posidx::RelocExtremes,
     positions: &mut Vec<usize>,
 ) {
     #[inline]
@@ -918,6 +935,11 @@ fn inv_emit(
         };
         push_asc(positions, pt);
         push_asc(positions, pt + 1);
+    }
+    match extremes {
+        crate::posidx::RelocExtremes::Full => {}
+        crate::posidx::RelocExtremes::Marked if !positions.is_empty() => {}
+        _ => return,
     }
     if !positions.contains(&0) {
         positions.push(0);
@@ -961,6 +983,7 @@ fn try_relocate_task_fast(
         _ => None,
     };
     let check_inv = inv_marks.is_some() && posidx.is_some_and(|px| px.check_inv);
+    let extremes = posidx.map_or(crate::posidx::RelocExtremes::Full, |px| px.reloc_extremes);
 
     // Judge for route1: slack gives an O(1) removal feasibility check (the
     // route1-after-removal evaluation is deferred to the confirm loop); warp
@@ -1102,6 +1125,17 @@ fn try_relocate_task_fast(
         }
 
         for r2 in 0..sol.routes.len() {
+            // Under Marked/Off an empty mark slice means zero candidate
+            // positions in this route — skip the per-route setup entirely.
+            // (Trajectory-neutral given the gating; kept off under the
+            // cross-check so the scan comparison still runs.)
+            if extremes != crate::posidx::RelocExtremes::Full && !check_inv {
+                if let Some(m) = inv_marks {
+                    if inv_slice(m, r2).is_empty() {
+                        continue;
+                    }
+                }
+            }
             let route2 = &sol.routes[r2];
             let veh2 = &problem.vehicles[route2.vehicle_idx];
             if !segment.iter().all(|t| veh2.has_skills(t.skills(problem))) {
@@ -1141,17 +1175,17 @@ fn try_relocate_task_fast(
             // otherwise (and as a cross-check under BROOOM_CHECK_INV).
             positions.clear();
             if let Some(m) = inv_marks {
-                inv_emit(inv_slice(m, r2), r1 == r2, i, seg_len, nb, &mut positions);
+                inv_emit(inv_slice(m, r2), r1 == r2, i, seg_len, nb, extremes, &mut positions);
                 if check_inv {
                     let mut scanned: Vec<usize> = Vec::new();
-                    scan_positions(problem, base, nb, &mut scanned);
+                    scan_positions(problem, base, nb, extremes, &mut scanned);
                     assert_eq!(
                         positions, scanned,
                         "inverted enumeration diverged (r1={r1} r2={r2} i={i} seg_len={seg_len})"
                     );
                 }
             } else {
-                scan_positions(problem, base, nb, &mut positions);
+                scan_positions(problem, base, nb, extremes, &mut positions);
             }
 
             for &j in &positions {
@@ -2257,6 +2291,16 @@ fn try_swap_star(
     let use_slack = use_slack && prefilter;
     let mut s1m: Option<Option<Box<crate::slack::RouteSlack>>> = None;
 
+    // Vidal-style level B (see posidx.rs::swap_b): the pruning lower bound is
+    // the EXACT arc delta of the argmin gaps, so surviving pairs are pushed
+    // as candidates directly — no per-pair r2_minus/s1m/s2m builds, no exact
+    // best-insertion scan. The confirm evaluation rejects infeasible argmins;
+    // a pair whose argmin is infeasible is lost even if a worse position was
+    // feasible (Vidal's trade). Gated on use_slack so the eval path and all
+    // kill-switch combinations stay bitwise untouched.
+    let level_b = use_slack && posidx.is_some_and(|px| px.swap_b);
+    let swap_b_cap = posidx.map_or(usize::MAX, |px| px.swap_b_cap);
+
     // Slack-judged pair candidates: exact O(1) cost deltas + O(1) feasibility,
     // confirmed best-first after the scan (same shape as the other fast ops).
     struct SCand {
@@ -2373,7 +2417,7 @@ fn try_swap_star(
                     }
                     _ => top3_compute(problem, matrix, veh2, &route2.steps, t1),
                 });
-                let ins2_lb = {
+                let (ins2_lb, ins2_pos) = {
                     // Gap delta: inserting t1 where t2 used to sit.
                     let prev = if j == 0 { ds2 } else { step_loc(problem, route2.steps[j - 1]) };
                     let next = if j + 1 == n2 { de2 } else { step_loc(problem, route2.steps[j + 1]) };
@@ -2389,16 +2433,24 @@ fn try_swap_star(
                         }
                         None => f64::INFINITY,
                     };
+                    // Argmin position in r2_minus coordinates (the bridge gap
+                    // at j maps to j; full-route gaps p<j → p, p>j+1 → p−1).
+                    // Only consumed under level B; strict `<` below means the
+                    // bridge wins value ties.
+                    let mut pos = j;
                     // First non-adjacent entry = exact min over all
                     // non-adjacent positions (at most 2 are excluded; the
                     // u32::MAX sentinel never matches a real position).
                     for &(d, p) in top3.iter() {
                         if p as usize != j && p as usize != j + 1 {
-                            lb = lb.min(d);
+                            if d < lb {
+                                lb = d;
+                                pos = if (p as usize) < j { p as usize } else { p as usize - 1 };
+                            }
                             break;
                         }
                     }
-                    lb
+                    (lb, pos)
                 };
                 let thresh = best.as_ref().map(|b| b.delta).unwrap_or(-1e-9).min(best_sc);
                 // Stage 1: O(1) optimistic bound on the r1-side insert.
@@ -2410,7 +2462,7 @@ fn try_swap_star(
                 // adjacent gaps {i, i+1}, plus the bridge gap at i — the
                 // same gap bijection as ins2_lb above, BIT-IDENTICAL to
                 // pred_cheapest_insert on r1_minus but O(1) per pair.
-                let ins1_lb = match posidx {
+                let (ins1_lb, ins1_pos) = match posidx {
                     Some(px) if px.swap_r1gap => {
                         let top3 =
                             top3_cached(problem, matrix, veh1, &route1.steps, t2, px, r1);
@@ -2440,9 +2492,19 @@ fn try_swap_star(
                             }
                             None => f64::INFINITY,
                         };
+                        // Argmin in r1_minus coordinates (bridge → i; same
+                        // bijection as the r2 side).
+                        let mut pos = i;
                         for &(d, p) in top3.iter() {
                             if p as usize != i && p as usize != i + 1 {
-                                lb = lb.min(d);
+                                if d < lb {
+                                    lb = d;
+                                    pos = if (p as usize) < i {
+                                        p as usize
+                                    } else {
+                                        p as usize - 1
+                                    };
+                                }
                                 break;
                             }
                         }
@@ -2455,12 +2517,27 @@ fn try_swap_star(
                                 "r1 gap-trick diverged from pred_cheapest_insert: {lb} vs {exact}"
                             );
                         }
-                        lb
+                        (lb, pos)
                     }
-                    _ => pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2),
+                    // Never taken under level B (swap_b requires swap_r1gap);
+                    // the sentinel position is never read.
+                    _ => (
+                        pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2),
+                        usize::MAX,
+                    ),
                 };
                 let lb = rem1 + ins1_lb + rem2 + ins2_lb;
                 if lb >= thresh - 1e-12 {
+                    continue;
+                }
+                // Level B: the lb IS the exact arc delta at (ins1_pos,
+                // ins2_pos) — push the candidate and skip the per-pair
+                // builds and the exact insertion scans entirely.
+                if level_b {
+                    if lb < -1e-9 {
+                        best_sc = best_sc.min(lb);
+                        scands.push(SCand { delta: lb, r2, j, pos1: ins1_pos, pos2: ins2_pos });
+                    }
                     continue;
                 }
             }
@@ -2541,7 +2618,14 @@ fn try_swap_star(
         return;
     }
     scands.sort_by(|a, b| a.delta.partial_cmp(&b.delta).unwrap());
+    // Level B pushes feasibility-unchecked argmins, so confirmation failures
+    // are expected — cap the failed attempts per probe. Break-on-first-success
+    // stays correct in both modes (sorted ascending, delta exact-if-feasible).
+    let mut fails = 0usize;
     for sc in &scands {
+        if level_b && fails >= swap_b_cap {
+            break;
+        }
         if best.as_ref().map_or(false, |b| sc.delta >= b.delta - 1e-12) {
             break;
         }
@@ -2558,9 +2642,15 @@ fn try_swap_star(
         cand2.extend_from_slice(&route2.steps[sc.j + 1..]);
         cand2.insert(sc.pos2, t1);
         op_confirm_eval(OP_SWAP_STAR);
-        let Ok(m1) = evaluate_route(problem, matrix, veh1, &cand1) else { continue };
+        let Ok(m1) = evaluate_route(problem, matrix, veh1, &cand1) else {
+            fails += 1;
+            continue;
+        };
         op_confirm_eval(OP_SWAP_STAR);
-        let Ok(m2) = evaluate_route(problem, matrix, veh2, &cand2) else { continue };
+        let Ok(m2) = evaluate_route(problem, matrix, veh2, &cand2) else {
+            fails += 1;
+            continue;
+        };
         let delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
         consider(best, Move {
             delta,

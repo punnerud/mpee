@@ -30,6 +30,11 @@ fn clear_switches() {
     for s in SWITCHES {
         std::env::remove_var(s);
     }
+    // Deliberately trajectory-CHANGING heuristics (both opt-in) are kept at
+    // their identity-preserving defaults for the whole matrix;
+    // tests/ls_heuristic_switches.rs covers the heuristic configurations.
+    std::env::remove_var("BROOOM_SWAPSTAR_TOP3CAND");
+    std::env::remove_var("BROOOM_RELOC_EXTREMES");
 }
 
 /// Greedy + LS under the given switch (all others cleared); returns the full

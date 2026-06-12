@@ -33,6 +33,19 @@ fn posidx_enabled() -> bool {
     std::env::var("BROOOM_NO_POSIDX").is_err()
 }
 
+/// Relocate extreme-position policy (BROOOM_RELOC_EXTREMES=full|marked|off).
+/// The two extremes (position 0 and nb) are emitted in EVERY route per
+/// (seg_len, rev) — candidate mass that does not shrink with granular-K.
+/// `Marked` keeps them only in routes that already have a granular-matched
+/// position; `Off` drops them entirely. `Full` (the default) is today's
+/// trajectory. Requires the index (the NO_POSIDX scan path always runs Full).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RelocExtremes {
+    Full,
+    Marked,
+    Off,
+}
+
 pub(crate) struct PosIndex {
     /// task key → (slot, pos); slot == u32::MAX means "not in any route"
     /// (mirrors the linear `locate()` returning None).
@@ -60,6 +73,18 @@ pub(crate) struct PosIndex {
     pub(crate) swap_r1gap: bool,
     /// Inverted pair scans in swap*/exchange/2opt*/cross-exchange.
     pub(crate) pair_inv: bool,
+    /// Relocate extreme-position policy (see `RelocExtremes`).
+    pub(crate) reloc_extremes: RelocExtremes,
+    /// Vidal-style SWAP* level B: the pruning lower bound (cached top-3 +
+    /// bridge gap) IS the candidate — skip the exact per-pair best-insertion
+    /// scan and let the confirm evaluation reject infeasible argmins. Costs
+    /// exactness (a feasible non-argmin position is lost when the argmin is
+    /// infeasible); requires both swap* caches. Opt-IN via
+    /// BROOOM_SWAPSTAR_TOP3CAND=1 (A/B arm, not a default — see `arm`).
+    pub(crate) swap_b: bool,
+    /// Max FAILED pair confirmations per probe under level B
+    /// (BROOOM_SWAPSTAR_TOP3CAND_CAP, default 5).
+    pub(crate) swap_b_cap: usize,
 }
 
 impl PosIndex {
@@ -85,6 +110,8 @@ impl PosIndex {
         let n_jobs = problem.jobs.len();
         let n_keys = n_jobs + 2 * problem.shipments.len();
         let n_routes = sol.routes.len();
+        let swap_top3 = std::env::var("BROOOM_NO_SWAPSTAR_TOPCACHE").is_err();
+        let swap_r1gap = std::env::var("BROOOM_NO_SWAPSTAR_R1GAP").is_err();
         let mut px = PosIndex {
             pos: vec![(u32::MAX, 0); n_keys],
             slot_of_idx: (0..n_routes as u32).collect(),
@@ -95,9 +122,29 @@ impl PosIndex {
             csr_tasks: Vec::new(),
             reloc_inv: std::env::var("BROOOM_NO_RELOC_INV").is_err(),
             check_inv: std::env::var("BROOOM_CHECK_INV").is_ok(),
-            swap_top3: std::env::var("BROOOM_NO_SWAPSTAR_TOPCACHE").is_err(),
-            swap_r1gap: std::env::var("BROOOM_NO_SWAPSTAR_R1GAP").is_err(),
+            swap_top3,
+            swap_r1gap,
             pair_inv: std::env::var("BROOOM_NO_PAIR_INV").is_err(),
+            reloc_extremes: match std::env::var("BROOOM_RELOC_EXTREMES").as_deref() {
+                Ok("marked") => RelocExtremes::Marked,
+                Ok("off") => RelocExtremes::Off,
+                _ => RelocExtremes::Full,
+            },
+            // The level-B gate is baked in at arm time: it reuses the top-3
+            // cache and the r1-side gap trick, so either kill switch also
+            // disables it. OPT-IN (session 10 A/B): the throughput win
+            // (swap* 32s→19s, 108M slack-skips→0 on rc2_4_5) is eaten by
+            // confirm evaluations of infeasible argmins (56k→2.8M evals) —
+            // quality mixed (rc2 −0.8pp, rc1 +0.6pp), GH400 mean neutral.
+            // To make it pay: O(1) feasibility on the argmin (single-window
+            // replace_seg_ok on the full route) + a known-infeasible memo.
+            swap_b: std::env::var("BROOOM_SWAPSTAR_TOP3CAND").is_ok()
+                && swap_top3
+                && swap_r1gap,
+            swap_b_cap: std::env::var("BROOOM_SWAPSTAR_TOP3CAND_CAP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5),
         };
         for (r, route) in sol.routes.iter().enumerate() {
             px.stamp(r as u32, &route.steps);
