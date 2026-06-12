@@ -387,6 +387,19 @@ fn local_search_with_settled(
     // Only armed when both the fast cost model and the per-mode math are
     // exact; the cache stays index-aligned with sol.routes via on_apply below.
     let mut judge = Judge::arm(problem, sol.routes.len(), granular.is_some());
+    // O(1) task→(route, pos) index (see posidx.rs); kept aligned with
+    // sol.routes via on_apply below, independently of the judge.
+    let mut posidx = crate::posidx::PosIndex::arm(problem, matrix.n, sol);
+    if let Some(px) = posidx.as_ref() {
+        if px.swap_top3 || px.swap_r1gap {
+            swap_top3_arm(px.n_keys(), px.n_slots());
+        }
+    }
+
+    // Shared inverted-enumeration buffer: every fast operator anchors its
+    // granular neighbourhood on route1.steps[i]'s location, so the
+    // neighbour→(route, pos) marks are built ONCE per probe and passed down.
+    let mut marks_buf: Vec<(u32, u32)> = Vec::new();
 
     'outer: for _ in 0..max_passes {
         if ls_deadline_hit() { break 'outer; }
@@ -400,7 +413,7 @@ fn local_search_with_settled(
             if ti % 64 == 0 && ls_deadline_hit() { break 'outer; }
             if settled.contains(&task) { continue; }
 
-            let Some((r1, i)) = locate(sol, task) else { continue; };
+            let Some((r1, i)) = locate_via(posidx.as_ref(), sol, task) else { continue; };
 
             let mut best: Option<Move> = None;
 
@@ -408,16 +421,28 @@ fn local_search_with_settled(
             let use_slack = matches!(&judge, Some(Judge::Slack(_)));
             let warp_mode = matches!(&judge, Some(Judge::Warp(..)));
             let sc = &mut judge;
-            op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            let px = posidx.as_ref();
+            let marks: Option<&[(u32, u32)]> = match (px, granular, step_loc(problem, task)) {
+                (Some(pxr), Some(g), Some(loc))
+                    if (pxr.reloc_inv || pxr.pair_inv)
+                        && fast_ls_enabled()
+                        && fast_cost_eligible(problem) =>
+                {
+                    inv_pair_marks_into(pxr, g, loc, &mut marks_buf);
+                    Some(&marks_buf[..])
+                }
+                _ => None,
+            };
+            op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
             op_timed(OP_TWO_OPT, stats, || try_two_opt_through(problem, matrix, sol, r1, i, sc.as_mut(), &mut best));
-            op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
-            op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
-            op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
+            op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
+            op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
             // swap* has no warp conversion yet: its slack arrays are
             // meaningless on violating routes and its eval fallback is the
             // per-pair full-evaluation bomb — skip it under warp mode.
             if !warp_mode {
-                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, &mut best));
+                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, px, marks, &mut best));
             }
 
             match best {
@@ -436,6 +461,9 @@ fn local_search_with_settled(
                     for t in &mv.touched { settled.remove(t); }
                     if let Some(j) = judge.as_mut() {
                         j.on_apply(&mv.route_updates);
+                    }
+                    if let Some(px) = posidx.as_mut() {
+                        px.on_apply(&mv.route_updates);
                     }
                     apply_move(sol, mv);
                     any_change = true;
@@ -466,6 +494,14 @@ pub fn local_search_full(
     granular: Option<&Granular>,
 ) {
     let mut judge = Judge::arm(problem, sol.routes.len(), granular.is_some());
+    let mut posidx = crate::posidx::PosIndex::arm(problem, matrix.n, sol);
+    if let Some(px) = posidx.as_ref() {
+        if px.swap_top3 || px.swap_r1gap {
+            swap_top3_arm(px.n_keys(), px.n_slots());
+        }
+    }
+
+    let mut marks_buf: Vec<(u32, u32)> = Vec::new();
 
     'outer: for _ in 0..max_passes {
         if ls_deadline_hit() { break 'outer; }
@@ -474,27 +510,42 @@ pub fn local_search_full(
 
         for (ti, task) in task_seq.into_iter().enumerate() {
             if ti % 64 == 0 && ls_deadline_hit() { break 'outer; }
-            let Some((r1, i)) = locate(sol, task) else { continue; };
+            let Some((r1, i)) = locate_via(posidx.as_ref(), sol, task) else { continue; };
 
             let mut best: Option<Move> = None;
             let stats = crate::solution::ls_stats_on();
             let use_slack = matches!(&judge, Some(Judge::Slack(_)));
             let warp_mode = matches!(&judge, Some(Judge::Warp(..)));
             let sc = &mut judge;
-            op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            let px = posidx.as_ref();
+            let marks: Option<&[(u32, u32)]> = match (px, granular, step_loc(problem, task)) {
+                (Some(pxr), Some(g), Some(loc))
+                    if (pxr.reloc_inv || pxr.pair_inv)
+                        && fast_ls_enabled()
+                        && fast_cost_eligible(problem) =>
+                {
+                    inv_pair_marks_into(pxr, g, loc, &mut marks_buf);
+                    Some(&marks_buf[..])
+                }
+                _ => None,
+            };
+            op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
             op_timed(OP_TWO_OPT, stats, || try_two_opt_through(problem, matrix, sol, r1, i, sc.as_mut(), &mut best));
-            op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
-            op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
-            op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
+            op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
+            op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
             // See local_search_with_settled: swap* is skipped in warp mode.
             if !warp_mode {
-                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, &mut best));
+                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, px, marks, &mut best));
             }
 
             if let Some(mv) = best {
                 if mv.delta < -1e-9 {
                     if let Some(j) = judge.as_mut() {
                         j.on_apply(&mv.route_updates);
+                    }
+                    if let Some(px) = posidx.as_mut() {
+                        px.on_apply(&mv.route_updates);
                     }
                     apply_move(sol, mv);
                     any_change = true;
@@ -516,6 +567,23 @@ fn locate(sol: &Solution, task: TaskRef) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+/// O(1) locate via the maintained index when armed, linear scan otherwise.
+#[inline]
+fn locate_via(
+    posidx: Option<&crate::posidx::PosIndex>,
+    sol: &Solution,
+    task: TaskRef,
+) -> Option<(usize, usize)> {
+    match posidx {
+        Some(px) => {
+            let r = px.locate(task);
+            debug_assert_eq!(r, locate(sol, task), "PosIndex drifted from sol.routes");
+            r
+        }
+        None => locate(sol, task),
+    }
 }
 
 fn apply_move(sol: &mut Solution, mv: Move) {
@@ -552,13 +620,15 @@ fn try_relocate_task(
     i: usize,
     granular: Option<&Granular>,
     judge: Option<&mut Judge>,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     // Fast O(1) cost-delta path: enumerate candidates by exact edge-delta cost,
     // then confirm feasibility lazily best-first (the first feasible candidate is
     // the best feasible move). Only when the arc-cost model is exact.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) {
-        try_relocate_task_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, best);
+        try_relocate_task_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, posidx, marks, best);
         return;
     }
     try_relocate_task_slow(problem, matrix, sol, r1, i, granular, best);
@@ -761,6 +831,102 @@ fn pred_remove_delta(
     added - removed - tserv
 }
 
+/// Ascending (route, pos) of every task whose location is a granular
+/// neighbour of `anchor_loc` — the inverted form of nmark_set + an
+/// all-positions nmark scan, O(K · tasks-per-location) per probe instead of
+/// O(total tasks). The per-route slices (see `inv_slice`) come out sorted
+/// ascending in position, which is the scan order the operators rely on.
+fn inv_pair_marks_into(
+    px: &crate::posidx::PosIndex,
+    g: &Granular,
+    anchor_loc: usize,
+    buf: &mut Vec<(u32, u32)>,
+) {
+    buf.clear();
+    for nb in g.neighbors(anchor_loc) {
+        for &t in px.tasks_at(nb) {
+            if let Some((r, p)) = px.locate(t) {
+                buf.push((r as u32, p as u32));
+            }
+        }
+    }
+    buf.sort_unstable();
+}
+
+/// The slice of `marks` belonging to route `r2` (ascending positions).
+#[inline]
+fn inv_slice(marks: &[(u32, u32)], r2: usize) -> &[(u32, u32)] {
+    let lo = marks.partition_point(|&(r, _)| (r as usize) < r2);
+    let hi = marks.partition_point(|&(r, _)| (r as usize) <= r2);
+    &marks[lo..hi]
+}
+
+/// The original all-positions granular scan: position j qualifies when the
+/// step before or after it sits at an nmark-marked location; the two extremes
+/// are then appended if absent — IN THIS EXACT ORDER. The candidate sort
+/// downstream is stable, so the emission order is part of the trajectory
+/// contract the inverted generator must reproduce.
+fn scan_positions(problem: &Problem, base: &[TaskRef], nb: usize, positions: &mut Vec<usize>) {
+    for j in 0..=nb {
+        let prev_loc = if j == 0 { None } else { step_loc(problem, base[j - 1]) };
+        let next_loc = if j == nb { None } else { step_loc(problem, base[j]) };
+        if prev_loc.map_or(false, nmark_has) || next_loc.map_or(false, nmark_has) {
+            positions.push(j);
+        }
+    }
+    if !positions.contains(&0) {
+        positions.push(0);
+    }
+    if !positions.contains(&nb) {
+        positions.push(nb);
+    }
+}
+
+/// Inverted equivalent of `scan_positions`: a marked (neighbour) task at
+/// position p contributes candidate positions {p, p+1}. `marks` is ascending
+/// in p, so an emit-if-greater merge reproduces the scan's ascending dedup
+/// exactly. For the intra-route case (`base` = route1 minus
+/// [i, i+seg_len)) the mark positions — which live in route1 coordinates —
+/// are translated, and marks inside the removed segment are skipped (those
+/// tasks are not in `base`, so the scan never sees them).
+fn inv_emit(
+    marks: &[(u32, u32)],
+    intra: bool,
+    i: usize,
+    seg_len: usize,
+    nb: usize,
+    positions: &mut Vec<usize>,
+) {
+    #[inline]
+    fn push_asc(v: &mut Vec<usize>, x: usize) {
+        if v.last().map_or(true, |&l| x > l) {
+            v.push(x);
+        }
+    }
+    for &(_, p) in marks {
+        let p = p as usize;
+        let pt = if intra {
+            if p < i {
+                p
+            } else if p >= i + seg_len {
+                p - seg_len
+            } else {
+                continue;
+            }
+        } else {
+            p
+        };
+        push_asc(positions, pt);
+        push_asc(positions, pt + 1);
+    }
+    if !positions.contains(&0) {
+        positions.push(0);
+    }
+    if !positions.contains(&nb) {
+        positions.push(nb);
+    }
+}
+
 /// Fast relocate: O(1) edge-delta cost enumeration + lazy feasibility confirm.
 /// Equivalent to `try_relocate_task_slow` on `fast_cost_eligible` problems
 /// (verified in tests/incremental_ls.rs), but evaluates the full route only on
@@ -773,12 +939,28 @@ fn try_relocate_task_fast(
     i: usize,
     granular: &Granular,
     judge: Option<&mut Judge>,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     let route1 = &sol.routes[r1];
     let n1 = route1.steps.len();
     let veh1 = &problem.vehicles[route1.vehicle_idx];
     let c1 = cost_coef(veh1);
+
+    // Inverted granular enumeration (see posidx.rs): the probe-shared marks
+    // hold the (route, position) of every task whose location is a granular
+    // neighbour of this probe's anchor (seg0 = route1.steps[i], the same for
+    // every seg_len), ascending by (route, pos) — the per-(seg_len, r2)
+    // candidate positions fall out of a slice lookup instead of an
+    // all-positions nmark scan. Position values are in route coordinates
+    // (route.steps); the r1==r2 case translates them to route1_after
+    // coordinates below.
+    let inv_marks: Option<&[(u32, u32)]> = match (posidx, marks) {
+        (Some(px), Some(m)) if px.reloc_inv => Some(m),
+        _ => None,
+    };
+    let check_inv = inv_marks.is_some() && posidx.is_some_and(|px| px.check_inv);
 
     // Judge for route1: slack gives an O(1) removal feasibility check (the
     // route1-after-removal evaluation is deferred to the confirm loop); warp
@@ -913,7 +1095,11 @@ fn try_relocate_task_fast(
             seg_rev_v.extend(segment.iter().rev().copied());
         }
 
-        nmark_set(granular, seg0, matrix.n);
+        // The inverted enumeration never consults nmark — only the legacy
+        // scan (fallback or BROOOM_CHECK_INV cross-check) needs the marks.
+        if inv_marks.is_none() || check_inv {
+            nmark_set(granular, seg0, matrix.n);
+        }
 
         for r2 in 0..sol.routes.len() {
             let route2 = &sol.routes[r2];
@@ -950,20 +1136,22 @@ fn try_relocate_task_fast(
             };
 
             // Candidate positions: granular (adjacent to a top-K neighbour of
-            // seg0) plus the two extremes — mirrors the slow path.
+            // seg0) plus the two extremes — mirrors the slow path. Inverted
+            // O(K) generation when the index is armed; the legacy O(nb) scan
+            // otherwise (and as a cross-check under BROOOM_CHECK_INV).
             positions.clear();
-            for j in 0..=nb {
-                let prev_loc = if j == 0 { None } else { step_loc(problem, base[j - 1]) };
-                let next_loc = if j == nb { None } else { step_loc(problem, base[j]) };
-                if prev_loc.map_or(false, nmark_has) || next_loc.map_or(false, nmark_has) {
-                    positions.push(j);
+            if let Some(m) = inv_marks {
+                inv_emit(inv_slice(m, r2), r1 == r2, i, seg_len, nb, &mut positions);
+                if check_inv {
+                    let mut scanned: Vec<usize> = Vec::new();
+                    scan_positions(problem, base, nb, &mut scanned);
+                    assert_eq!(
+                        positions, scanned,
+                        "inverted enumeration diverged (r1={r1} r2={r2} i={i} seg_len={seg_len})"
+                    );
                 }
-            }
-            if !positions.contains(&0) {
-                positions.push(0);
-            }
-            if !positions.contains(&nb) {
-                positions.push(nb);
+            } else {
+                scan_positions(problem, base, nb, &mut positions);
             }
 
             for &j in &positions {
@@ -1266,6 +1454,8 @@ fn try_exchange_with(
     i: usize,
     granular: Option<&Granular>,
     judge: Option<&mut Judge>,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     let mut judge = judge;
@@ -1277,7 +1467,16 @@ fn try_exchange_with(
     let fast = granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem);
     if fast {
         let Some(aloc) = a_loc else { return };
-        nmark_set(granular.unwrap(), aloc, matrix.n);
+        // Inverted pair source (see try_swap_star — same contract: ascending
+        // j per r2, identical pair set as the nmark scan).
+        let inv_pairs: Option<&[(u32, u32)]> = match (posidx, marks) {
+            (Some(px), Some(m)) if px.pair_inv => Some(m),
+            _ => None,
+        };
+        let check_inv = inv_pairs.is_some() && posidx.is_some_and(|px| px.check_inv);
+        if inv_pairs.is_none() || check_inv {
+            nmark_set(granular.unwrap(), aloc, matrix.n);
+        }
         let route1 = &sol.routes[r1];
         let veh1 = &problem.vehicles[route1.vehicle_idx];
         let c1 = cost_coef(veh1);
@@ -1289,11 +1488,16 @@ fn try_exchange_with(
             + ni.map_or(0.0, |n| arc_cost(matrix, c1, aloc, n));
         struct EC { delta: f64, r2: usize, j: usize }
         let mut cands: Vec<EC> = Vec::new();
+        let mut js: Vec<u32> = Vec::new();
         if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
             cache.ensure(r1, problem, matrix, sol);
         }
         for r2 in 0..n_routes {
             if r2 == r1 { continue; }
+            let inv_js: Option<&[(u32, u32)]> = inv_pairs.map(|m| inv_slice(m, r2));
+            if let Some(s) = inv_js {
+                if s.is_empty() && !check_inv { continue; }
+            }
             let route2 = &sol.routes[r2];
             let veh2 = &problem.vehicles[route2.vehicle_idx];
             if !veh2.has_skills(a.skills(problem)) { continue; }
@@ -1308,10 +1512,30 @@ fn try_exchange_with(
                 Some(Judge::Warp(cache, sw)) => (cache.get(r1), cache.get(r2), Some(*sw)),
                 _ => (None, None, None),
             };
-            for j in 0..n2 {
+            js.clear();
+            match inv_js {
+                Some(s) => js.extend(s.iter().map(|&(_, j)| j)),
+                None => {
+                    for j in 0..n2 {
+                        let Some(bloc) = step_loc(problem, route2.steps[j]) else { continue };
+                        if !nmark_has(bloc) { continue; }
+                        js.push(j as u32);
+                    }
+                }
+            }
+            if check_inv {
+                let mut scanned: Vec<u32> = Vec::new();
+                for j in 0..n2 {
+                    let Some(bloc) = step_loc(problem, route2.steps[j]) else { continue };
+                    if !nmark_has(bloc) { continue; }
+                    scanned.push(j as u32);
+                }
+                assert_eq!(js, scanned, "inverted exchange pair scan diverged (r1={r1} r2={r2} i={i})");
+            }
+            for &j in &js {
+                let j = j as usize;
                 let b = route2.steps[j];
                 let Some(bloc) = step_loc(problem, b) else { continue };
-                if !nmark_has(bloc) { continue; }
                 if !veh1.has_skills(b.skills(problem)) { continue; }
                 let b_serv = b.description(problem).service as f64 * 1e-6;
                 // r1: a→b at i.
@@ -1438,6 +1662,8 @@ fn try_two_opt_star(
     i: usize,
     granular: Option<&Granular>,
     judge: Option<&mut Judge>,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     // Large-N guard (matrix.n ≥ 500): keep the slow path so the top-level
@@ -1449,7 +1675,7 @@ fn try_two_opt_star(
     // rank, exact penalised confirm): sound, but misses penalty-repair tail
     // swaps. Convert if education measurements say it matters.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) && matrix.n < 500 {
-        try_two_opt_star_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, best);
+        try_two_opt_star_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, posidx, marks, best);
         return;
     }
     try_two_opt_star_slow(problem, matrix, sol, r1, i, granular, best);
@@ -1471,6 +1697,8 @@ fn try_two_opt_star_fast(
     i: usize,
     granular: &Granular,
     judge: Option<&mut Judge>,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     let mut judge = judge;
@@ -1482,7 +1710,15 @@ fn try_two_opt_star_fast(
     let Some(a_i) = step_loc(problem, route1.steps[i]) else {
         return;
     };
-    nmark_set(granular, a_i, matrix.n);
+    // Inverted pair source (see try_swap_star).
+    let inv_pairs: Option<&[(u32, u32)]> = match (posidx, marks) {
+        (Some(px), Some(m)) if px.pair_inv => Some(m),
+        _ => None,
+    };
+    let check_inv = inv_pairs.is_some() && posidx.is_some_and(|px| px.check_inv);
+    if inv_pairs.is_none() || check_inv {
+        nmark_set(granular, a_i, matrix.n);
+    }
     let next1 = if i + 1 < n1 {
         step_loc(problem, route1.steps[i + 1])
     } else {
@@ -1495,6 +1731,7 @@ fn try_two_opt_star_fast(
         j: usize,
     }
     let mut cands: Vec<Cand> = Vec::new();
+    let mut js: Vec<u32> = Vec::new();
 
     for r2 in 0..n_routes {
         if r2 == r1 {
@@ -1505,22 +1742,52 @@ fn try_two_opt_star_fast(
         // Same-depot gate: tails carry their depot legs with them, which only
         // cancels when both vehicles use the same depots. Otherwise evaluate
         // this pair the slow way (rare: multi-depot heterogeneous fleets).
+        // NOTE: this fallback must run regardless of the inverted source —
+        // the empty-slice skip below sits AFTER it on purpose.
         if depot_start(veh1) != depot_start(veh2) || depot_end(veh1) != depot_end(veh2) {
             two_opt_star_pair_slow(problem, matrix, sol, r1, i, r2, true, best);
             continue;
         }
+        let inv_js: Option<&[(u32, u32)]> = inv_pairs.map(|m| inv_slice(m, r2));
+        if let Some(s) = inv_js {
+            if s.is_empty() && !check_inv {
+                continue;
+            }
+        }
         let n2 = route2.steps.len();
 
-        for j in 0..n2 {
-            // Granular parity with the slow path: only cut points whose r2[j]
-            // is a top-K neighbour of the anchor (j == n2 has no r2[j] and is
-            // skipped there too).
+        js.clear();
+        match inv_js {
+            Some(s) => js.extend(s.iter().map(|&(_, j)| j)),
+            None => {
+                for j in 0..n2 {
+                    // Granular parity with the slow path: only cut points
+                    // whose r2[j] is a top-K neighbour of the anchor (j == n2
+                    // has no r2[j] and is skipped there too).
+                    let Some(b_j) = step_loc(problem, route2.steps[j]) else { continue };
+                    if !nmark_has(b_j) {
+                        continue;
+                    }
+                    js.push(j as u32);
+                }
+            }
+        }
+        if check_inv {
+            let mut scanned: Vec<u32> = Vec::new();
+            for j in 0..n2 {
+                let Some(b_j) = step_loc(problem, route2.steps[j]) else { continue };
+                if !nmark_has(b_j) {
+                    continue;
+                }
+                scanned.push(j as u32);
+            }
+            assert_eq!(js, scanned, "inverted 2opt* pair scan diverged (r1={r1} r2={r2} i={i})");
+        }
+        for &j in &js {
+            let j = j as usize;
             let Some(b_j) = step_loc(problem, route2.steps[j]) else {
                 continue;
             };
-            if !nmark_has(b_j) {
-                continue;
-            }
             let prev2 = if j > 0 {
                 step_loc(problem, route2.steps[j - 1])
             } else {
@@ -1802,6 +2069,125 @@ thread_local! {
     /// Insertion-position ranking buffer for `best_feasible_insertion_delta`.
     static INS_ORDER: std::cell::RefCell<Vec<(f64, usize)>> =
         std::cell::RefCell::new(Vec::new());
+    /// swap*'s persistent top-3 insertion cache (see Top3Cache).
+    static SWAP_TOP3: std::cell::RefCell<Top3Cache> =
+        std::cell::RefCell::new(Top3Cache { epoch: 0, n_slots: 0, entries: Vec::new() });
+}
+
+/// swap*'s top-3 insertion cache: for (task, route slot), the 3 cheapest
+/// feasibility-ignoring insertion deltas of the task into the FULL route,
+/// with positions. The same numbers swap* used to recompute lazily per
+/// (probe, r2) — now validated in O(1) against the PosIndex per-slot
+/// generation and reused across probes and passes until the route changes.
+/// The per-call epoch isolates LS calls (and solutions) from each other
+/// while the flat allocation is reused for the thread's lifetime.
+struct Top3Cache {
+    epoch: u32,
+    n_slots: usize,
+    /// Indexed task_key * n_slots + slot.
+    entries: Vec<Top3Entry>,
+}
+
+#[derive(Clone, Copy)]
+struct Top3Entry {
+    epoch: u32,
+    gen: u32,
+    top3: [(f64, u32); 3],
+}
+
+const TOP3_EMPTY: [(f64, u32); 3] = [(f64::INFINITY, u32::MAX); 3];
+
+/// Arm the thread's top-3 cache for one local-search call: bump the epoch
+/// (invalidating every prior entry in O(1)) and size the flat buffer.
+fn swap_top3_arm(n_keys: usize, n_slots: usize) {
+    SWAP_TOP3.with(|c| {
+        let mut c = c.borrow_mut();
+        c.epoch = c.epoch.wrapping_add(1);
+        if c.epoch == 0 {
+            // Epoch wrapped: stale entries from epoch 0 four billion calls
+            // ago would validate — flush and restart at 1.
+            c.entries.clear();
+            c.epoch = 1;
+        }
+        c.n_slots = n_slots;
+        let need = n_keys * n_slots;
+        if c.entries.len() < need {
+            c.entries.resize(need, Top3Entry { epoch: 0, gen: 0, top3: TOP3_EMPTY });
+        }
+    });
+}
+
+/// Top-3 cheapest feasibility-ignoring insertion deltas of `task` into the
+/// full `steps`, with positions. The float expression matches
+/// `pred_cheapest_insert` term for term (same `added - removed + tserv`);
+/// unfilled slots are (INFINITY, u32::MAX) — the sentinel position never
+/// collides with a real adjacency exclusion.
+fn top3_compute(
+    problem: &Problem,
+    matrix: &Matrix,
+    veh: &crate::problem::Vehicle,
+    steps: &[TaskRef],
+    task: TaskRef,
+) -> [(f64, u32); 3] {
+    let mut t = TOP3_EMPTY;
+    let Some(tloc) = step_loc(problem, task) else { return t };
+    let c = cost_coef(veh);
+    let nb = steps.len();
+    let tserv = task.description(problem).service as f64 * 1e-6;
+    let ds = depot_start(veh);
+    let de = depot_end(veh);
+    for pos in 0..=nb {
+        let prev = if pos == 0 { ds } else { step_loc(problem, steps[pos - 1]) };
+        let next = if pos == nb { de } else { step_loc(problem, steps[pos]) };
+        let added = prev.map_or(0.0, |p| arc_cost(matrix, c, p, tloc))
+            + next.map_or(0.0, |n| arc_cost(matrix, c, tloc, n));
+        let removed = match (prev, next) {
+            (Some(p), Some(n)) => arc_cost(matrix, c, p, n),
+            _ => 0.0,
+        };
+        let d = added - removed + tserv;
+        if d < t[2].0 {
+            t[2] = (d, pos as u32);
+            if t[2].0 < t[1].0 {
+                t.swap(1, 2);
+            }
+            if t[1].0 < t[0].0 {
+                t.swap(0, 1);
+            }
+        }
+    }
+    t
+}
+
+/// Get-or-compute the cached top-3 of `task` into the route currently at
+/// index `r` (steps given). Requires `swap_top3_arm` for this LS call.
+fn top3_cached(
+    problem: &Problem,
+    matrix: &Matrix,
+    veh: &crate::problem::Vehicle,
+    steps: &[TaskRef],
+    task: TaskRef,
+    px: &crate::posidx::PosIndex,
+    r: usize,
+) -> [(f64, u32); 3] {
+    let Some(key) = px.key_of(task) else {
+        return top3_compute(problem, matrix, veh, steps, task);
+    };
+    let slot = px.slot_of(r);
+    let gen = px.gen_of_slot(slot);
+    SWAP_TOP3.with(|c| {
+        let mut c = c.borrow_mut();
+        let epoch = c.epoch;
+        let idx = key * c.n_slots + slot;
+        debug_assert!(idx < c.entries.len(), "Top3Cache not armed for this call");
+        let e = &mut c.entries[idx];
+        if e.epoch == epoch && e.gen == gen {
+            return e.top3;
+        }
+        let t3 = top3_compute(problem, matrix, veh, steps, task);
+        *e = Top3Entry { epoch, gen, top3: t3 };
+        t3
+    })
 }
 
 /// SwapStar (Vidal 2022, HGS-CVRP): swap two tasks t1 in r1, t2 in r2 but
@@ -1819,6 +2205,8 @@ fn try_swap_star(
     i: usize,
     granular: Option<&Granular>,
     use_slack: bool,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     let n_routes = sol.routes.len();
@@ -1828,8 +2216,26 @@ fn try_swap_star(
     let t1 = route1.steps[i];
     let t1_loc = t1.description(problem).location.index;
 
+    // Inverted pair enumeration (see posidx.rs): the (route, position) of
+    // every task whose location is a granular neighbour of t1's — the same
+    // pair set the nmark scan below admits, generated in O(K) instead of
+    // O(total tasks) per probe. Ascending (r2, j): the per-r2 slices keep
+    // the scan's ascending-j order, so the prune trajectory (best_sc/thresh
+    // evolve during the scan) is identical.
+    let inv_pairs: Option<&[(u32, u32)]> = match (posidx, marks) {
+        (Some(px), Some(m)) if px.pair_inv => Some(m),
+        _ => None,
+    };
+    let check_inv = inv_pairs.is_some() && posidx.is_some_and(|px| px.check_inv);
     let has_gran = match (granular, t1_loc) {
-        (Some(g), Some(loc)) => { nmark_set(g, loc, matrix.n); true }
+        (Some(g), Some(loc)) => {
+            // The inverted source never consults nmark — only the legacy
+            // scan (fallback or BROOOM_CHECK_INV cross-check) needs it.
+            if inv_pairs.is_none() || check_inv {
+                nmark_set(g, loc, matrix.n);
+            }
+            true
+        }
         _ => false,
     };
 
@@ -1891,8 +2297,19 @@ fn try_swap_star(
         mx
     } else { 0.0 };
 
+    // Pair-position scratch, reused across the r2 loop.
+    let mut js: Vec<u32> = Vec::new();
+
     for r2 in 0..n_routes {
         if r2 == r1 { continue; }
+        // Inverted pair source for this r2 (ascending j). An empty slice
+        // means no granular pair lands in r2 — skip its setup entirely
+        // (nothing below has side effects until a pair runs; ins2_top3 is
+        // lazy). None = legacy nmark scan.
+        let inv_js: Option<&[(u32, u32)]> = inv_pairs.map(|m| inv_slice(m, r2));
+        if let Some(s) = inv_js {
+            if s.is_empty() && !check_inv { continue; }
+        }
         let route2 = &sol.routes[r2];
         let veh2 = &problem.vehicles[route2.vehicle_idx];
         let n2 = route2.steps.len();
@@ -1906,17 +2323,40 @@ fn try_swap_star(
         // r2_minus positions are exactly the full-route positions ∉ {j, j+1}
         // plus the gap at j, so min(first non-adjacent top-3 entry, gap delta)
         // is BIT-IDENTICAL to pred_cheapest_insert on r2_minus — computed
-        // O(1) per pair instead of O(n2).
-        let mut ins2_top3: Option<[(f64, usize); 3]> = None;
+        // O(1) per pair instead of O(n2). With the index armed the numbers
+        // come from the persistent Top3Cache (same compute, memoized across
+        // probes and passes until route2 changes).
+        let mut ins2_top3: Option<[(f64, u32); 3]> = None;
 
-        for j in 0..n2 {
-            let t2 = route2.steps[j];
-
-            // Granular filter: skip pairs where t2 is not near t1.
-            if has_gran {
-                let l = t2.description(problem).location.index;
-                if l.map_or(true, |l| !nmark_has(l)) { continue; }
+        js.clear();
+        match inv_js {
+            Some(s) => js.extend(s.iter().map(|&(_, j)| j)),
+            None => {
+                for j in 0..n2 {
+                    // Granular filter: skip pairs where t2 is not near t1.
+                    if has_gran {
+                        let l = route2.steps[j].description(problem).location.index;
+                        if l.map_or(true, |l| !nmark_has(l)) { continue; }
+                    }
+                    js.push(j as u32);
+                }
             }
+        }
+        if check_inv {
+            let mut scanned: Vec<u32> = Vec::new();
+            for j in 0..n2 {
+                let l = route2.steps[j].description(problem).location.index;
+                if l.map_or(true, |l| !nmark_has(l)) { continue; }
+                scanned.push(j as u32);
+            }
+            assert_eq!(
+                js, scanned,
+                "inverted swap* pair scan diverged (r1={r1} r2={r2} i={i})"
+            );
+        }
+        for &j in &js {
+            let j = j as usize;
+            let t2 = route2.steps[j];
             if !veh1.has_skills(t2.skills(problem)) { continue; }
 
             let rem2 = if prefilter {
@@ -1927,27 +2367,11 @@ fn try_swap_star(
             // (exact removals) ≤ true pair delta. Skip if it can't beat the
             // incumbent. Never prunes an improving move ⇒ equivalence preserved.
             if prefilter {
-                let top3 = ins2_top3.get_or_insert_with(|| {
-                    let mut t = [(f64::INFINITY, usize::MAX); 3];
-                    if let Some(tloc) = t1_loc {
-                        for pos in 0..=n2 {
-                            let prev = if pos == 0 { ds2 } else { step_loc(problem, route2.steps[pos - 1]) };
-                            let next = if pos == n2 { de2 } else { step_loc(problem, route2.steps[pos]) };
-                            let added = prev.map_or(0.0, |p| arc_cost(matrix, c2, p, tloc))
-                                + next.map_or(0.0, |n| arc_cost(matrix, c2, tloc, n));
-                            let removed = match (prev, next) {
-                                (Some(p), Some(n)) => arc_cost(matrix, c2, p, n),
-                                _ => 0.0,
-                            };
-                            let d = added - removed + t1serv;
-                            if d < t[2].0 {
-                                t[2] = (d, pos);
-                                if t[2].0 < t[1].0 { t.swap(1, 2); }
-                                if t[1].0 < t[0].0 { t.swap(0, 1); }
-                            }
-                        }
+                let top3 = ins2_top3.get_or_insert_with(|| match posidx {
+                    Some(px) if px.swap_top3 => {
+                        top3_cached(problem, matrix, veh2, &route2.steps, t1, px, r2)
                     }
-                    t
+                    _ => top3_compute(problem, matrix, veh2, &route2.steps, t1),
                 });
                 let ins2_lb = {
                     // Gap delta: inserting t1 where t2 used to sit.
@@ -1966,9 +2390,10 @@ fn try_swap_star(
                         None => f64::INFINITY,
                     };
                     // First non-adjacent entry = exact min over all
-                    // non-adjacent positions (at most 2 are excluded).
+                    // non-adjacent positions (at most 2 are excluded; the
+                    // u32::MAX sentinel never matches a real position).
                     for &(d, p) in top3.iter() {
-                        if p != j && p != j + 1 {
+                        if p as usize != j && p as usize != j + 1 {
                             lb = lb.min(d);
                             break;
                         }
@@ -1980,8 +2405,61 @@ fn try_swap_star(
                 if rem1 + rem2 + ins2_lb - max_removed_r1 >= thresh - 1e-12 {
                     continue;
                 }
-                let lb = rem1 + pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2)
-                    + rem2 + ins2_lb;
+                // Exact r1-side insertion lower bound. With the index armed:
+                // cached top-3 of t2 into FULL route1, excluding the t1-
+                // adjacent gaps {i, i+1}, plus the bridge gap at i — the
+                // same gap bijection as ins2_lb above, BIT-IDENTICAL to
+                // pred_cheapest_insert on r1_minus but O(1) per pair.
+                let ins1_lb = match posidx {
+                    Some(px) if px.swap_r1gap => {
+                        let top3 =
+                            top3_cached(problem, matrix, veh1, &route1.steps, t2, px, r1);
+                        let mut lb = match step_loc(problem, t2) {
+                            Some(tloc) => {
+                                let c1 = cost_coef(veh1);
+                                let t2serv =
+                                    t2.description(problem).service as f64 * 1e-6;
+                                let prev = if i == 0 {
+                                    depot_start(veh1)
+                                } else {
+                                    step_loc(problem, route1.steps[i - 1])
+                                };
+                                let next = if i + 1 == n1 {
+                                    depot_end(veh1)
+                                } else {
+                                    step_loc(problem, route1.steps[i + 1])
+                                };
+                                let added = prev
+                                    .map_or(0.0, |p| arc_cost(matrix, c1, p, tloc))
+                                    + next.map_or(0.0, |n| arc_cost(matrix, c1, tloc, n));
+                                let removed = match (prev, next) {
+                                    (Some(p), Some(n)) => arc_cost(matrix, c1, p, n),
+                                    _ => 0.0,
+                                };
+                                added - removed + t2serv
+                            }
+                            None => f64::INFINITY,
+                        };
+                        for &(d, p) in top3.iter() {
+                            if p as usize != i && p as usize != i + 1 {
+                                lb = lb.min(d);
+                                break;
+                            }
+                        }
+                        if px.check_inv {
+                            let exact =
+                                pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2);
+                            assert!(
+                                lb.to_bits() == exact.to_bits()
+                                    || (lb == 0.0 && exact == 0.0),
+                                "r1 gap-trick diverged from pred_cheapest_insert: {lb} vs {exact}"
+                            );
+                        }
+                        lb
+                    }
+                    _ => pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2),
+                };
+                let lb = rem1 + ins1_lb + rem2 + ins2_lb;
                 if lb >= thresh - 1e-12 {
                     continue;
                 }
@@ -2225,12 +2703,14 @@ fn try_cross_exchange_with(
     i: usize,
     granular: Option<&Granular>,
     judge: Option<&mut Judge>,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     // Large-N guard: see try_two_opt_star — slow path above matrix.n ≥ 500
     // keeps the N=1000 headline byte-identical.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) && matrix.n < 500 {
-        try_cross_exchange_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, best);
+        try_cross_exchange_fast(problem, matrix, sol, r1, i, granular.unwrap(), judge, posidx, marks, best);
         return;
     }
     try_cross_exchange_slow(problem, matrix, sol, r1, i, granular, best);
@@ -2250,6 +2730,8 @@ fn try_cross_exchange_fast(
     i: usize,
     granular: &Granular,
     judge: Option<&mut Judge>,
+    posidx: Option<&crate::posidx::PosIndex>,
+    marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
 ) {
     let mut judge = judge;
@@ -2267,7 +2749,17 @@ fn try_cross_exchange_fast(
     ) else {
         return;
     };
-    nmark_set(granular, s1a, matrix.n);
+    // Inverted pair source (see try_swap_star). A neighbour task at position
+    // p admits segment starts j ∈ {p−1, p} (the scan accepts j when steps[j]
+    // OR steps[j+1] is marked).
+    let inv_pairs: Option<&[(u32, u32)]> = match (posidx, marks) {
+        (Some(px), Some(m)) if px.pair_inv => Some(m),
+        _ => None,
+    };
+    let check_inv = inv_pairs.is_some() && posidx.is_some_and(|px| px.check_inv);
+    if inv_pairs.is_none() || check_inv {
+        nmark_set(granular, s1a, matrix.n);
+    }
     let prev1 = if i > 0 { step_loc(problem, route1.steps[i - 1]) } else { depot_start(veh1) };
     let nxt1 = if i + 2 < n1 { step_loc(problem, route1.steps[i + 2]) } else { depot_end(veh1) };
     let seg1_service: f64 = route1.steps[i..i + 2]
@@ -2290,6 +2782,7 @@ fn try_cross_exchange_fast(
         j: usize,
     }
     let mut cands: Vec<Cand> = Vec::new();
+    let mut js: Vec<u32> = Vec::new();
     if let Some(Judge::Warp(cache, _)) = judge.as_deref_mut() {
         cache.ensure(r1, problem, matrix, sol);
     }
@@ -2297,6 +2790,12 @@ fn try_cross_exchange_fast(
     for r2 in 0..n_routes {
         if r2 == r1 {
             continue;
+        }
+        let inv_js: Option<&[(u32, u32)]> = inv_pairs.map(|m| inv_slice(m, r2));
+        if let Some(s) = inv_js {
+            if s.is_empty() && !check_inv {
+                continue;
+            }
         }
         let route2 = &sol.routes[r2];
         let veh2 = &problem.vehicles[route2.vehicle_idx];
@@ -2313,17 +2812,69 @@ fn try_cross_exchange_fast(
             Some(Judge::Warp(cache, sw)) => (cache.get(r1), cache.get(r2), Some(*sw)),
             _ => (None, None, None),
         };
-        for j in 0..=n2 - 2 {
+        // Segment starts j where steps[j] or steps[j+1] sits at a marked
+        // location, both ends located — in ascending order (scan parity).
+        js.clear();
+        match inv_js {
+            Some(s) => {
+                for &(_, p) in s {
+                    let p = p as usize;
+                    let lo_j = p.saturating_sub(1);
+                    for j in lo_j..=p {
+                        if j > n2 - 2 {
+                            continue;
+                        }
+                        if js.last().is_some_and(|&l| l as usize >= j) {
+                            continue; // ascending dedup
+                        }
+                        if step_loc(problem, route2.steps[j]).is_none()
+                            || step_loc(problem, route2.steps[j + 1]).is_none()
+                        {
+                            continue;
+                        }
+                        js.push(j as u32);
+                    }
+                }
+            }
+            None => {
+                for j in 0..=n2 - 2 {
+                    let (Some(s2a), Some(s2b)) = (
+                        step_loc(problem, route2.steps[j]),
+                        step_loc(problem, route2.steps[j + 1]),
+                    ) else {
+                        continue;
+                    };
+                    if !nmark_has(s2a) && !nmark_has(s2b) {
+                        continue;
+                    }
+                    js.push(j as u32);
+                }
+            }
+        }
+        if check_inv {
+            let mut scanned: Vec<u32> = Vec::new();
+            for j in 0..=n2 - 2 {
+                let (Some(s2a), Some(s2b)) = (
+                    step_loc(problem, route2.steps[j]),
+                    step_loc(problem, route2.steps[j + 1]),
+                ) else {
+                    continue;
+                };
+                if !nmark_has(s2a) && !nmark_has(s2b) {
+                    continue;
+                }
+                scanned.push(j as u32);
+            }
+            assert_eq!(js, scanned, "inverted cross pair scan diverged (r1={r1} r2={r2} i={i})");
+        }
+        for &j in &js {
+            let j = j as usize;
             let (Some(s2a), Some(s2b)) = (
                 step_loc(problem, route2.steps[j]),
                 step_loc(problem, route2.steps[j + 1]),
             ) else {
                 continue;
             };
-            // Granular parity: at least one of seg2's locations near the anchor.
-            if !nmark_has(s2a) && !nmark_has(s2b) {
-                continue;
-            }
             let prev2 = if j > 0 { step_loc(problem, route2.steps[j - 1]) } else { depot_start(veh2) };
             let nxt2 = if j + 2 < n2 { step_loc(problem, route2.steps[j + 2]) } else { depot_end(veh2) };
             let seg2_service: f64 = route2.steps[j..j + 2]

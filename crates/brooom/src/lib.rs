@@ -20,6 +20,7 @@ pub mod granular;
 pub mod propagate;
 pub mod insertion;
 pub mod local_search;
+pub(crate) mod posidx;
 pub mod slack;
 pub mod warp;
 pub mod solver;
