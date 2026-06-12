@@ -121,6 +121,90 @@ fn step_loc(problem: &Problem, t: TaskRef) -> Option<usize> {
     t.description(problem).location.index
 }
 
+// ── env-gated per-operator statistics (BROOOM_LS_STATS=1) ────────────────────
+// One slot per operator in the probe order of the core loop. `probes` counts
+// invocations, `nanos` wall time inside the operator (including its confirm
+// evaluations), `confirm_evals` the evaluate_route calls made by the fast
+// confirm loops. All increments are guarded by `ls_stats_on()` so the default
+// path pays nothing beyond a cached-bool read.
+const OP_NAMES: [&str; 6] = ["reloc", "2opt", "exch", "2opt*", "xchg2", "swap*"];
+const OP_RELOC: usize = 0;
+const OP_TWO_OPT: usize = 1;
+const OP_EXCH: usize = 2;
+const OP_TWO_OPT_STAR: usize = 3;
+const OP_CROSS: usize = 4;
+const OP_SWAP_STAR: usize = 5;
+struct OpStats {
+    probes: std::sync::atomic::AtomicU64,
+    nanos: std::sync::atomic::AtomicU64,
+    confirm_evals: std::sync::atomic::AtomicU64,
+    slack_skips: std::sync::atomic::AtomicU64,
+}
+#[allow(clippy::declare_interior_mutable_const)]
+const OP_STATS_INIT: OpStats = OpStats {
+    probes: std::sync::atomic::AtomicU64::new(0),
+    nanos: std::sync::atomic::AtomicU64::new(0),
+    confirm_evals: std::sync::atomic::AtomicU64::new(0),
+    slack_skips: std::sync::atomic::AtomicU64::new(0),
+};
+static OP_STATS: [OpStats; 6] = [OP_STATS_INIT; 6];
+
+#[inline]
+fn op_confirm_eval(op: usize) {
+    if crate::solution::ls_stats_on() {
+        OP_STATS[op].confirm_evals.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[inline]
+fn op_slack_skip(op: usize) {
+    if crate::solution::ls_stats_on() {
+        OP_STATS[op].slack_skips.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Run one operator probe, timing it when stats are on.
+#[inline]
+fn op_timed(op: usize, stats: bool, f: impl FnOnce()) {
+    if stats {
+        let t0 = std::time::Instant::now();
+        f();
+        OP_STATS[op].probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        OP_STATS[op]
+            .nanos
+            .fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        f();
+    }
+}
+
+/// Render and reset the global LS statistics (operators + evaluate_route).
+/// Returns an empty string when BROOOM_LS_STATS is off.
+pub fn ls_stats_snapshot_and_reset() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !crate::solution::ls_stats_on() {
+        return String::new();
+    }
+    let calls = crate::solution::EVAL_CALLS.swap(0, Relaxed);
+    let hits = crate::solution::EVAL_CACHE_HITS.swap(0, Relaxed);
+    let mut out = format!("LS-STATS: eval_calls={} cache_hits={}", calls, hits);
+    for (k, name) in OP_NAMES.iter().enumerate() {
+        let p = OP_STATS[k].probes.swap(0, Relaxed);
+        let ns = OP_STATS[k].nanos.swap(0, Relaxed);
+        let ce = OP_STATS[k].confirm_evals.swap(0, Relaxed);
+        let sk = OP_STATS[k].slack_skips.swap(0, Relaxed);
+        out.push_str(&format!(
+            " | {} probes={} t={:.2}s evals={} skips={}",
+            name,
+            p,
+            ns as f64 / 1e9,
+            ce,
+            sk
+        ));
+    }
+    out
+}
+
 // Thread-local epoch-stamped membership buffer for granular neighbours. Replaces
 // a per-call `HashSet` (alloc + K hashes) in the hot LS operators with O(1)
 // array writes and zero allocation after warmup. Each operator stamps the
@@ -248,6 +332,15 @@ fn local_search_with_settled(
     granular: Option<&Granular>,
     mut settled: HashSet<TaskRef>,
 ) {
+    // O(1) feasibility prefilter for the fast operators (see slack.rs). Only
+    // armed when both the fast cost model and the slack math are exact; the
+    // cache stays index-aligned with sol.routes via on_apply below.
+    let mut slack_cache: Option<crate::slack::SlackCache> = (granular.is_some()
+        && fast_ls_enabled()
+        && fast_cost_eligible(problem)
+        && crate::slack::slack_eligible(problem))
+    .then(|| crate::slack::SlackCache::new(sol.routes.len()));
+
     'outer: for _ in 0..max_passes {
         if ls_deadline_hit() { break 'outer; }
         let task_seq: Vec<TaskRef> = sol.routes.iter().flat_map(|r| r.steps.iter().copied()).collect();
@@ -264,12 +357,14 @@ fn local_search_with_settled(
 
             let mut best: Option<Move> = None;
 
-            try_relocate_task(problem, matrix, sol, r1, i, granular, &mut best);
-            try_two_opt_through(problem, matrix, sol, r1, i, &mut best);
-            try_exchange_with(problem, matrix, sol, r1, i, granular, &mut best);
-            try_two_opt_star(problem, matrix, sol, r1, i, granular, &mut best);
-            try_cross_exchange_with(problem, matrix, sol, r1, i, granular, &mut best);
-            try_swap_star(problem, matrix, sol, r1, i, granular, &mut best);
+            let stats = crate::solution::ls_stats_on();
+            let sc = &mut slack_cache;
+            op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_TWO_OPT, stats, || try_two_opt_through(problem, matrix, sol, r1, i, sc.as_mut(), &mut best));
+            op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, sc.is_some(), &mut best));
 
             match best {
                 Some(mv) if mv.delta < -1e-9 => {
@@ -285,6 +380,9 @@ fn local_search_with_settled(
                         }
                     }
                     for t in &mv.touched { settled.remove(t); }
+                    if let Some(c) = slack_cache.as_mut() {
+                        c.on_apply(&mv.route_updates);
+                    }
                     apply_move(sol, mv);
                     any_change = true;
                 }
@@ -313,6 +411,12 @@ pub fn local_search_full(
     max_passes: usize,
     granular: Option<&Granular>,
 ) {
+    let mut slack_cache: Option<crate::slack::SlackCache> = (granular.is_some()
+        && fast_ls_enabled()
+        && fast_cost_eligible(problem)
+        && crate::slack::slack_eligible(problem))
+    .then(|| crate::slack::SlackCache::new(sol.routes.len()));
+
     'outer: for _ in 0..max_passes {
         if ls_deadline_hit() { break 'outer; }
         let task_seq: Vec<TaskRef> = sol.routes.iter().flat_map(|r| r.steps.iter().copied()).collect();
@@ -323,15 +427,20 @@ pub fn local_search_full(
             let Some((r1, i)) = locate(sol, task) else { continue; };
 
             let mut best: Option<Move> = None;
-            try_relocate_task(problem, matrix, sol, r1, i, granular, &mut best);
-            try_two_opt_through(problem, matrix, sol, r1, i, &mut best);
-            try_exchange_with(problem, matrix, sol, r1, i, granular, &mut best);
-            try_two_opt_star(problem, matrix, sol, r1, i, granular, &mut best);
-            try_cross_exchange_with(problem, matrix, sol, r1, i, granular, &mut best);
-            try_swap_star(problem, matrix, sol, r1, i, granular, &mut best);
+            let stats = crate::solution::ls_stats_on();
+            let sc = &mut slack_cache;
+            op_timed(OP_RELOC, stats, || try_relocate_task(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_TWO_OPT, stats, || try_two_opt_through(problem, matrix, sol, r1, i, sc.as_mut(), &mut best));
+            op_timed(OP_EXCH, stats, || try_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_TWO_OPT_STAR, stats, || try_two_opt_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), &mut best));
+            op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, sc.is_some(), &mut best));
 
             if let Some(mv) = best {
                 if mv.delta < -1e-9 {
+                    if let Some(c) = slack_cache.as_mut() {
+                        c.on_apply(&mv.route_updates);
+                    }
                     apply_move(sol, mv);
                     any_change = true;
                 }
@@ -387,13 +496,14 @@ fn try_relocate_task(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
     // Fast O(1) cost-delta path: enumerate candidates by exact edge-delta cost,
     // then confirm feasibility lazily best-first (the first feasible candidate is
     // the best feasible move). Only when the arc-cost model is exact.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) {
-        try_relocate_task_fast(problem, matrix, sol, r1, i, granular.unwrap(), best);
+        try_relocate_task_fast(problem, matrix, sol, r1, i, granular.unwrap(), slack, best);
         return;
     }
     try_relocate_task_slow(problem, matrix, sol, r1, i, granular, best);
@@ -607,12 +717,22 @@ fn try_relocate_task_fast(
     r1: usize,
     i: usize,
     granular: &Granular,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
     let route1 = &sol.routes[r1];
     let n1 = route1.steps.len();
     let veh1 = &problem.vehicles[route1.vehicle_idx];
     let c1 = cost_coef(veh1);
+
+    // Slack prefilter: with arrays for route1 the removal check is O(1) and
+    // the route1-after-removal evaluation is deferred to the confirm loop.
+    let mut slack = slack;
+    let mut have_s1 = false;
+    if let Some(cache) = slack.as_deref_mut() {
+        cache.ensure(r1, problem, matrix, sol);
+        have_s1 = cache.get(r1).is_some();
+    }
 
     struct Cand {
         delta: f64,
@@ -622,8 +742,12 @@ fn try_relocate_task_fast(
         rev: bool,
     }
     let mut cands: Vec<Cand> = Vec::new();
-    // Per seg_len: the route1-after-removal step list, its metrics, feasibility.
-    let mut r1_after_cache: Vec<Option<(Vec<TaskRef>, Option<RouteMetrics>, f64)>> = vec![None; 4];
+    // Per seg_len: the route1-after-removal step list and its cost delta.
+    let mut r1_after_cache: Vec<Option<(Vec<TaskRef>, f64)>> = vec![None; 4];
+    // Per seg_len, the metrics of route1-after-removal: None = not evaluated
+    // yet (deferred until a candidate of this seg_len survives the slack
+    // check), Some(None) = removal infeasible, Some(Some(m)) = metrics.
+    let mut m1_eval: [Option<Option<RouteMetrics>>; 4] = [None, None, None, None];
 
     for &seg_len in &SEGMENT_LENS {
         if i + seg_len > n1 {
@@ -651,17 +775,30 @@ fn try_relocate_task_fast(
         let mut route1_after: Vec<TaskRef> = Vec::with_capacity(n1 - seg_len);
         route1_after.extend_from_slice(&route1.steps[..i]);
         route1_after.extend_from_slice(&route1.steps[i + seg_len..]);
-        let m1_after = if route1_after.is_empty() {
-            Some(RouteMetrics::default())
+        if have_s1 {
+            // O(1) removal check; route1-after metrics are evaluated lazily in
+            // the confirm loop, only when a candidate of this seg_len survives.
+            let s1 = slack.as_deref().unwrap().get(r1).unwrap();
+            if !s1.replace_seg_ok(problem, matrix, veh1, i, i + seg_len, &[]) {
+                op_slack_skip(OP_RELOC);
+                continue; // removal provably infeasible — skip seg_len
+            }
         } else {
-            evaluate_route(problem, matrix, veh1, &route1_after).ok()
-        };
-        if m1_after.is_none() {
-            continue; // removal infeasible (e.g. split a shipment) — skip seg_len
+            let m1_after = if route1_after.is_empty() {
+                Some(RouteMetrics::default())
+            } else {
+                op_confirm_eval(OP_RELOC);
+                evaluate_route(problem, matrix, veh1, &route1_after).ok()
+            };
+            if m1_after.is_none() {
+                m1_eval[seg_len] = Some(None);
+                continue; // removal infeasible (e.g. split a shipment) — skip seg_len
+            }
+            m1_eval[seg_len] = Some(m1_after);
         }
         let cost_r1_after = route_arc_cost(problem, matrix, veh1, &route1_after);
         let delta_r1 = cost_r1_after - route1.metrics.cost;
-        r1_after_cache[seg_len] = Some((route1_after.clone(), m1_after, delta_r1));
+        r1_after_cache[seg_len] = Some((route1_after.clone(), delta_r1));
 
         nmark_set(granular, seg0, matrix.n);
 
@@ -739,11 +876,19 @@ fn try_relocate_task_fast(
     cands.sort_by(|a, b| a.delta.partial_cmp(&b.delta).unwrap());
 
     // Confirm feasibility best-first; first feasible candidate is the best move.
+    // Transient slack arrays for the intra-route base (route1 minus the
+    // segment), built lazily per seg_len.
+    let mut intra_slack: [Option<Option<Box<crate::slack::RouteSlack>>>; 4] =
+        [None, None, None, None];
     for cand in &cands {
         if best.as_ref().map_or(false, |b| cand.delta >= b.delta - 1e-12) {
             break; // can't beat the incumbent from here on (sorted)
         }
-        let (route1_after, m1_after, _) = r1_after_cache[cand.seg_len].as_ref().unwrap();
+        // seg_len found removal-infeasible by a deferred evaluation?
+        if matches!(&m1_eval[cand.seg_len], Some(None)) {
+            continue;
+        }
+        let (route1_after, _) = r1_after_cache[cand.seg_len].as_ref().unwrap();
         let segment: Vec<TaskRef> = route1.steps[i..i + cand.seg_len].to_vec();
         let mut seg_oriented = segment.clone();
         if cand.rev {
@@ -751,11 +896,49 @@ fn try_relocate_task_fast(
         }
         let route2 = &sol.routes[cand.r2];
         let veh2 = &problem.vehicles[route2.vehicle_idx];
+        // O(seg) slack prefilter on the destination route.
+        if r1 == cand.r2 {
+            if have_s1 {
+                let s = intra_slack[cand.seg_len].get_or_insert_with(|| {
+                    crate::slack::RouteSlack::build(problem, matrix, veh1, route1_after)
+                        .map(Box::new)
+                });
+                if let Some(s) = s {
+                    if !s.replace_seg_ok(problem, matrix, veh1, cand.j, cand.j, &seg_oriented) {
+                        op_slack_skip(OP_RELOC);
+                        continue;
+                    }
+                }
+            }
+        } else if let Some(cache) = slack.as_deref_mut() {
+            cache.ensure(cand.r2, problem, matrix, sol);
+            if let Some(s2) = cache.get(cand.r2) {
+                if !s2.replace_seg_ok(problem, matrix, veh2, cand.j, cand.j, &seg_oriented) {
+                    op_slack_skip(OP_RELOC);
+                    continue;
+                }
+            }
+        }
+        // Deferred route1-after evaluation (its metrics go into the Move).
+        if r1 != cand.r2 && m1_eval[cand.seg_len].is_none() {
+            let m = if route1_after.is_empty() {
+                Some(RouteMetrics::default())
+            } else {
+                op_confirm_eval(OP_RELOC);
+                evaluate_route(problem, matrix, veh1, route1_after).ok()
+            };
+            let dead = m.is_none();
+            m1_eval[cand.seg_len] = Some(m);
+            if dead {
+                continue;
+            }
+        }
         let base: &[TaskRef] = if r1 == cand.r2 { route1_after } else { &route2.steps };
         let mut cand2 = Vec::with_capacity(base.len() + cand.seg_len);
         cand2.extend_from_slice(&base[..cand.j]);
         cand2.extend_from_slice(&seg_oriented);
         cand2.extend_from_slice(&base[cand.j..]);
+        op_confirm_eval(OP_RELOC);
         let m2 = match evaluate_route(problem, matrix, veh2, &cand2) {
             Ok(m) => m,
             Err(_) => continue,
@@ -770,7 +953,7 @@ fn try_relocate_task_fast(
                 touched,
             });
         } else {
-            let m1 = m1_after.clone().unwrap();
+            let m1 = m1_eval[cand.seg_len].as_ref().unwrap().clone().unwrap();
             let real_delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
             let upd1 = if route1_after.is_empty() {
                 (r1, None)
@@ -794,8 +977,10 @@ fn try_two_opt_through(
     sol: &Solution,
     r1: usize,
     i: usize,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
+    let mut slack = slack;
     let route = &sol.routes[r1];
     let n = route.steps.len();
     if n < 3 { return; }
@@ -837,12 +1022,27 @@ fn try_two_opt_through(
                 return;
             }
             cands.sort_by(|x, y| x.delta.partial_cmp(&y.delta).unwrap());
+            let mut rev_seg: Vec<TaskRef> = Vec::new();
             for cd in &cands {
                 if best.as_ref().map_or(false, |bm| cd.delta >= bm.delta - 1e-12) {
                     break;
                 }
+                // O(segment) slack prefilter: the reversal replaces [a, b]
+                // with its mirror — chain the reversed stops, land on lat[b+1].
+                if let Some(cache) = slack.as_deref_mut() {
+                    cache.ensure(r1, problem, matrix, sol);
+                    if let Some(s) = cache.get(r1) {
+                        rev_seg.clear();
+                        rev_seg.extend(route.steps[cd.a..=cd.b].iter().rev().copied());
+                        if !s.replace_seg_ok(problem, matrix, veh, cd.a, cd.b + 1, &rev_seg) {
+                            op_slack_skip(OP_TWO_OPT);
+                            continue;
+                        }
+                    }
+                }
                 let mut cand = route.steps.clone();
                 cand[cd.a..=cd.b].reverse();
+                op_confirm_eval(OP_TWO_OPT);
                 let m = match evaluate_route(problem, matrix, veh, &cand) {
                     Ok(m) => m, Err(_) => continue,
                 };
@@ -883,8 +1083,10 @@ fn try_exchange_with(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
+    let mut slack = slack;
     let n_routes = sol.routes.len();
     let a = sol.routes[r1].steps[i];
     let a_loc = a.description(problem).location.index;
@@ -943,11 +1145,29 @@ fn try_exchange_with(
             let route2 = &sol.routes[cd.r2];
             let veh2 = &problem.vehicles[route2.vehicle_idx];
             let b = route2.steps[cd.j];
+            // O(1) slack prefilter: replace a with b at i in r1, b with a at j in r2.
+            if let Some(cache) = slack.as_deref_mut() {
+                cache.ensure(r1, problem, matrix, sol);
+                cache.ensure(cd.r2, problem, matrix, sol);
+                let ok = match (cache.get(r1), cache.get(cd.r2)) {
+                    (Some(s1), Some(s2)) => {
+                        s1.replace_seg_ok(problem, matrix, veh1, i, i + 1, &[b])
+                            && s2.replace_seg_ok(problem, matrix, veh2, cd.j, cd.j + 1, &[a])
+                    }
+                    _ => true,
+                };
+                if !ok {
+                    op_slack_skip(OP_EXCH);
+                    continue;
+                }
+            }
             let mut cand1 = route1.steps.clone();
             let mut cand2 = route2.steps.clone();
             cand1[i] = b;
             cand2[cd.j] = a;
+            op_confirm_eval(OP_EXCH);
             let m1 = match evaluate_route(problem, matrix, veh1, &cand1) { Ok(m) => m, Err(_) => continue };
+            op_confirm_eval(OP_EXCH);
             let m2 = match evaluate_route(problem, matrix, veh2, &cand2) { Ok(m) => m, Err(_) => continue };
             let delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
             consider(best, Move {
@@ -1015,6 +1235,7 @@ fn try_two_opt_star(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
     // Large-N guard (matrix.n ≥ 500): keep the slow path so the top-level
@@ -1023,7 +1244,7 @@ fn try_two_opt_star(
     // measured +0.13% on one of three N=1000 seeds. Small-N (where the HGS
     // education lives) takes the fast path.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) && matrix.n < 500 {
-        try_two_opt_star_fast(problem, matrix, sol, r1, i, granular.unwrap(), best);
+        try_two_opt_star_fast(problem, matrix, sol, r1, i, granular.unwrap(), slack, best);
         return;
     }
     try_two_opt_star_slow(problem, matrix, sol, r1, i, granular, best);
@@ -1044,8 +1265,10 @@ fn try_two_opt_star_fast(
     r1: usize,
     i: usize,
     granular: &Granular,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
+    let mut slack = slack;
     let n_routes = sol.routes.len();
     let route1 = &sol.routes[r1];
     let veh1 = &problem.vehicles[route1.vehicle_idx];
@@ -1139,16 +1362,71 @@ fn try_two_opt_star_fast(
         if !r2_tail.iter().all(|t| veh1.has_skills(t.skills(problem))) {
             continue;
         }
+        // O(1) slack prefilter for the tail swap. Each route's `lat`/load
+        // arrays remain valid for the new host only when both vehicles share
+        // the same day window (depots/speed already equal on this path).
+        if let Some(cache) = slack.as_deref_mut() {
+            if veh1.time_window() == veh2.time_window() {
+                cache.ensure(r1, problem, matrix, sol);
+                cache.ensure(cand.r2, problem, matrix, sol);
+                if let (Some(s1), Some(s2)) = (cache.get(r1), cache.get(cand.r2)) {
+                    let dim = s1.dim();
+                    if dim == s2.dim() && dim <= 8 {
+                        let mut ok = true;
+                        // new r1 = r1[..=i] + r2[j..]  (r2 tail is non-empty)
+                        ok &= s2.admits_arrival(matrix, j, s1.ect(i), Some(s1.loc(i)));
+                        // new r2 = r2[..j] + r1[i+1..]
+                        if i + 1 < n1 {
+                            let (t2, from2) = s2.depart_before(j);
+                            ok &= s1.admits_arrival(matrix, i + 1, t2, from2);
+                        } else if j > 0 {
+                            // truncated r2 must still reach its end depot
+                            let (t2, from2) = s2.depart_before(j);
+                            ok &= s2.admits_arrival(matrix, n2, t2, from2);
+                        }
+                        if ok {
+                            // Load checkpoints: prefixes shift by the change in
+                            // downstream deliveries, tails by the change in
+                            // carried pickups.
+                            let mut shift1 = [0i64; 8];
+                            let mut shift2 = [0i64; 8];
+                            let mut nshift1 = [0i64; 8];
+                            let mut nshift2 = [0i64; 8];
+                            for d in 0..dim {
+                                let del_tail1 = s1.del_pre(n1, d) - s1.del_pre(i + 1, d);
+                                let del_tail2 = s2.del_pre(n2, d) - s2.del_pre(j, d);
+                                shift1[d] = del_tail2 - del_tail1;
+                                nshift1[d] = -shift1[d];
+                                shift2[d] = s1.pick_pre(i + 1, d) - s2.pick_pre(j, d);
+                                nshift2[d] = -shift2[d];
+                            }
+                            ok &= s1.pre_shift_ok(veh1, i + 1, &shift1[..dim]);
+                            ok &= s2.suf_shift_ok(veh1, j, &shift2[..dim]);
+                            if i + 1 < n1 || j > 0 {
+                                ok &= s2.pre_shift_ok(veh2, j, &nshift1[..dim]);
+                                ok &= s1.suf_shift_ok(veh2, i + 1, &nshift2[..dim]);
+                            }
+                        }
+                        if !ok {
+                            op_slack_skip(OP_TWO_OPT_STAR);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
         let mut cand1: Vec<TaskRef> = Vec::with_capacity(i + 1 + (n2 - j));
         cand1.extend_from_slice(&route1.steps[..=i]);
         cand1.extend_from_slice(r2_tail);
         let mut cand2: Vec<TaskRef> = Vec::with_capacity(j + (n1 - i - 1));
         cand2.extend_from_slice(&route2.steps[..j]);
         cand2.extend_from_slice(r1_tail);
+        op_confirm_eval(OP_TWO_OPT_STAR);
         let m1 = match evaluate_route(problem, matrix, veh1, &cand1) {
             Ok(m) => m,
             Err(_) => continue,
         };
+        op_confirm_eval(OP_TWO_OPT_STAR);
         let m2 = match evaluate_route(problem, matrix, veh2, &cand2) {
             Ok(m) => m,
             Err(_) => continue,
@@ -1324,6 +1602,7 @@ fn try_swap_star(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
+    use_slack: bool,
     best: &mut Option<Move>,
 ) {
     let n_routes = sol.routes.len();
@@ -1349,6 +1628,27 @@ fn try_swap_star(
         pred_remove_delta(problem, matrix, veh1, &route1.steps, i)
     } else { 0.0 };
 
+    // Transient slack arrays for the hypothetical bases: r1\{t1} is shared
+    // across all pairs (built lazily on the first surviving pair), r2\{t2}
+    // is built per pair. One O(route) build replaces up to O(route) full
+    // evaluations inside best_insertion.
+    let use_slack = use_slack && prefilter;
+    let mut s1m: Option<Option<Box<crate::slack::RouteSlack>>> = None;
+
+    // Slack-judged pair candidates: exact O(1) cost deltas + O(1) feasibility,
+    // confirmed best-first after the scan (same shape as the other fast ops).
+    struct SCand {
+        delta: f64,
+        r2: usize,
+        j: usize,
+        pos1: usize,
+        pos2: usize,
+    }
+    let mut scands: Vec<SCand> = Vec::new();
+    // Running best among the slack-judged pairs — keeps the lower-bound prune
+    // as tight as the old inline-evaluation flow kept it via `best`.
+    let mut best_sc = f64::INFINITY;
+
     for r2 in 0..n_routes {
         if r2 == r1 { continue; }
         let route2 = &sol.routes[r2];
@@ -1367,33 +1667,62 @@ fn try_swap_star(
             }
             if !veh1.has_skills(t2.skills(problem)) { continue; }
 
-            // Lower-bound prune: (cheapest feasibility-ignoring inserts) +
-            // (exact removals) ≤ true pair delta. Skip if it can't beat the
-            // incumbent. Never prunes an improving move ⇒ equivalence preserved.
-            if prefilter {
-                let mut r2_minus_tmp: Vec<TaskRef> = Vec::with_capacity(n2 - 1);
-                r2_minus_tmp.extend_from_slice(&route2.steps[..j]);
-                r2_minus_tmp.extend_from_slice(&route2.steps[j + 1..]);
-                let rem2 = pred_remove_delta(problem, matrix, veh2, &route2.steps, j);
-                let lb = rem1 + pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2)
-                    + rem2 + pred_cheapest_insert(problem, matrix, veh2, &r2_minus_tmp, t1);
-                let thresh = best.as_ref().map(|b| b.delta).unwrap_or(-1e-9);
-                if lb >= thresh - 1e-12 {
-                    continue;
-                }
-            }
-
-            // Best position for t2 in r1\{t1}
-            let best1 = best_insertion(problem, matrix, veh1, &r1_minus, t2);
-            let Some((cand1, m1)) = best1 else { continue };
-
             // r2\{t2}
             let mut r2_minus: Vec<TaskRef> = Vec::with_capacity(n2 - 1);
             r2_minus.extend_from_slice(&route2.steps[..j]);
             r2_minus.extend_from_slice(&route2.steps[j + 1..]);
 
+            let rem2 = if prefilter {
+                pred_remove_delta(problem, matrix, veh2, &route2.steps, j)
+            } else { 0.0 };
+
+            // Lower-bound prune: (cheapest feasibility-ignoring inserts) +
+            // (exact removals) ≤ true pair delta. Skip if it can't beat the
+            // incumbent. Never prunes an improving move ⇒ equivalence preserved.
+            if prefilter {
+                let lb = rem1 + pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2)
+                    + rem2 + pred_cheapest_insert(problem, matrix, veh2, &r2_minus, t1);
+                let thresh = best.as_ref().map(|b| b.delta).unwrap_or(-1e-9).min(best_sc);
+                if lb >= thresh - 1e-12 {
+                    continue;
+                }
+            }
+
+            // Slack branch: judge both insertions with O(1) checks and exact
+            // arc deltas — zero evaluations until the confirm phase below.
+            if use_slack {
+                let s1m_ref = s1m
+                    .get_or_insert_with(|| {
+                        crate::slack::RouteSlack::build(problem, matrix, veh1, &r1_minus)
+                            .map(Box::new)
+                    })
+                    .as_deref();
+                if let Some(s1ref) = s1m_ref {
+                    if let Some(s2m) =
+                        crate::slack::RouteSlack::build(problem, matrix, veh2, &r2_minus)
+                    {
+                        let Some((pos1, d1)) = best_feasible_insertion_delta(
+                            problem, matrix, veh1, &r1_minus, t2, s1ref,
+                        ) else { continue };
+                        let Some((pos2, d2)) = best_feasible_insertion_delta(
+                            problem, matrix, veh2, &r2_minus, t1, &s2m,
+                        ) else { continue };
+                        let delta = rem1 + d1 + rem2 + d2;
+                        if delta < -1e-9 {
+                            best_sc = best_sc.min(delta);
+                            scands.push(SCand { delta, r2, j, pos1, pos2 });
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Eval path (no slack, or arrays unavailable for this pair).
+            let best1 = best_insertion(problem, matrix, veh1, &r1_minus, t2, None);
+            let Some((cand1, m1)) = best1 else { continue };
+
             // Best position for t1 in r2\{t2}
-            let best2 = best_insertion(problem, matrix, veh2, &r2_minus, t1);
+            let best2 = best_insertion(problem, matrix, veh2, &r2_minus, t1, None);
             let Some((cand2, m2)) = best2 else { continue };
 
             let delta = (m1.cost - route1.metrics.cost)
@@ -1408,6 +1737,83 @@ fn try_swap_star(
             });
         }
     }
+
+    // Confirm the slack-judged pairs best-first; the first pair whose two
+    // routes evaluate cleanly is the best feasible swap.
+    if scands.is_empty() {
+        return;
+    }
+    scands.sort_by(|a, b| a.delta.partial_cmp(&b.delta).unwrap());
+    for sc in &scands {
+        if best.as_ref().map_or(false, |b| sc.delta >= b.delta - 1e-12) {
+            break;
+        }
+        let route2 = &sol.routes[sc.r2];
+        let veh2 = &problem.vehicles[route2.vehicle_idx];
+        let n2 = route2.steps.len();
+        let t2 = route2.steps[sc.j];
+        let mut cand1: Vec<TaskRef> = Vec::with_capacity(n1);
+        cand1.extend_from_slice(&r1_minus[..sc.pos1]);
+        cand1.push(t2);
+        cand1.extend_from_slice(&r1_minus[sc.pos1..]);
+        let mut cand2: Vec<TaskRef> = Vec::with_capacity(n2);
+        cand2.extend_from_slice(&route2.steps[..sc.j]);
+        cand2.extend_from_slice(&route2.steps[sc.j + 1..]);
+        cand2.insert(sc.pos2, t1);
+        op_confirm_eval(OP_SWAP_STAR);
+        let Ok(m1) = evaluate_route(problem, matrix, veh1, &cand1) else { continue };
+        op_confirm_eval(OP_SWAP_STAR);
+        let Ok(m2) = evaluate_route(problem, matrix, veh2, &cand2) else { continue };
+        let delta = (m1.cost - route1.metrics.cost) + (m2.cost - route2.metrics.cost);
+        consider(best, Move {
+            delta,
+            route_updates: vec![(r1, Some((cand1, m1))), (sc.r2, Some((cand2, m2)))],
+            touched: vec![t1, t2],
+        });
+        break;
+    }
+}
+
+/// SwapStar helper: the best insertion position of `task` into `base` judged
+/// purely by O(1) slack checks — positions ranked by exact arc-cost delta,
+/// first slack-feasible wins. Mirrors `best_insertion`'s choice (which the
+/// confirm evaluation still validates) without any route evaluation.
+fn best_feasible_insertion_delta(
+    problem: &Problem,
+    matrix: &Matrix,
+    veh: &crate::problem::Vehicle,
+    base: &[TaskRef],
+    task: TaskRef,
+    slack_base: &crate::slack::RouteSlack,
+) -> Option<(usize, f64)> {
+    let tloc = step_loc(problem, task)?;
+    let c = cost_coef(veh);
+    let nb = base.len();
+    let tserv = task.description(problem).service as f64 * 1e-6;
+    let ds = depot_start(veh);
+    let de = depot_end(veh);
+    let mut order: Vec<(f64, usize)> = (0..=nb)
+        .map(|pos| {
+            let prev = if pos == 0 { ds } else { step_loc(problem, base[pos - 1]) };
+            let next = if pos == nb { de } else { step_loc(problem, base[pos]) };
+            let added = prev.map_or(0.0, |p| arc_cost(matrix, c, p, tloc))
+                + next.map_or(0.0, |n| arc_cost(matrix, c, tloc, n));
+            let removed = match (prev, next) {
+                (Some(p), Some(n)) => arc_cost(matrix, c, p, n),
+                _ => 0.0,
+            };
+            (added - removed + tserv, pos)
+        })
+        .collect();
+    order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let seg = [task];
+    for (d, pos) in order {
+        if slack_base.replace_seg_ok(problem, matrix, veh, pos, pos, &seg) {
+            return Some((pos, d));
+        }
+        op_slack_skip(OP_SWAP_STAR);
+    }
+    None
 }
 
 /// Helper for SwapStar: try each insertion position for `task` in `base`,
@@ -1418,6 +1824,7 @@ fn best_insertion(
     veh: &crate::problem::Vehicle,
     base: &[TaskRef],
     task: TaskRef,
+    slack_base: Option<&crate::slack::RouteSlack>,
 ) -> Option<(Vec<TaskRef>, RouteMetrics)> {
     // Fast path: rank positions by exact O(1) insertion cost-delta, then confirm
     // feasibility best-first — the first feasible position is the cheapest one.
@@ -1442,11 +1849,21 @@ fn best_insertion(
                 })
                 .collect();
             order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let seg = [task];
             for (_, pos) in order {
+                // O(1) slack prefilter: positions that provably miss a time
+                // window or a load checkpoint are skipped without evaluation.
+                if let Some(s) = slack_base {
+                    if !s.replace_seg_ok(problem, matrix, veh, pos, pos, &seg) {
+                        op_slack_skip(OP_SWAP_STAR);
+                        continue;
+                    }
+                }
                 let mut cand: Vec<TaskRef> = Vec::with_capacity(nb + 1);
                 cand.extend_from_slice(&base[..pos]);
                 cand.push(task);
                 cand.extend_from_slice(&base[pos..]);
+                op_confirm_eval(OP_SWAP_STAR);
                 if let Ok(m) = evaluate_route(problem, matrix, veh, &cand) {
                     return Some((cand, m));
                 }
@@ -1480,12 +1897,13 @@ fn try_cross_exchange_with(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
     // Large-N guard: see try_two_opt_star — slow path above matrix.n ≥ 500
     // keeps the N=1000 headline byte-identical.
     if granular.is_some() && fast_ls_enabled() && fast_cost_eligible(problem) && matrix.n < 500 {
-        try_cross_exchange_fast(problem, matrix, sol, r1, i, granular.unwrap(), best);
+        try_cross_exchange_fast(problem, matrix, sol, r1, i, granular.unwrap(), slack, best);
         return;
     }
     try_cross_exchange_slow(problem, matrix, sol, r1, i, granular, best);
@@ -1504,8 +1922,10 @@ fn try_cross_exchange_fast(
     r1: usize,
     i: usize,
     granular: &Granular,
+    slack: Option<&mut crate::slack::SlackCache>,
     best: &mut Option<Move>,
 ) {
+    let mut slack = slack;
     let n_routes = sol.routes.len();
     let route1 = &sol.routes[r1];
     let n1 = route1.steps.len();
@@ -1626,6 +2046,23 @@ fn try_cross_exchange_fast(
         if !seg2.iter().all(|t| veh1.has_skills(t.skills(problem))) {
             continue;
         }
+        // O(1) slack prefilter: seg2 replaces [i, i+2) in r1, seg1 replaces
+        // [j, j+2) in r2.
+        if let Some(cache) = slack.as_deref_mut() {
+            cache.ensure(r1, problem, matrix, sol);
+            cache.ensure(cand.r2, problem, matrix, sol);
+            let ok = match (cache.get(r1), cache.get(cand.r2)) {
+                (Some(s1), Some(s2)) => {
+                    s1.replace_seg_ok(problem, matrix, veh1, i, i + 2, seg2)
+                        && s2.replace_seg_ok(problem, matrix, veh2, j, j + 2, &seg1)
+                }
+                _ => true,
+            };
+            if !ok {
+                op_slack_skip(OP_CROSS);
+                continue;
+            }
+        }
         let mut cand1: Vec<TaskRef> = Vec::with_capacity(n1);
         cand1.extend_from_slice(&route1.steps[..i]);
         cand1.extend_from_slice(seg2);
@@ -1634,10 +2071,12 @@ fn try_cross_exchange_fast(
         cand2.extend_from_slice(&route2.steps[..j]);
         cand2.extend_from_slice(&seg1);
         cand2.extend_from_slice(&route2.steps[j + 2..]);
+        op_confirm_eval(OP_CROSS);
         let m1 = match evaluate_route(problem, matrix, veh1, &cand1) {
             Ok(m) => m,
             Err(_) => continue,
         };
+        op_confirm_eval(OP_CROSS);
         let m2 = match evaluate_route(problem, matrix, veh2, &cand2) {
             Ok(m) => m,
             Err(_) => continue,

@@ -1446,7 +1446,10 @@ pub fn solve_genetic_parallel(
     }
     let pool = MigrationPool::new();
     let migrate = std::env::var("BROOOM_NO_MIGRATION").is_err();
-    (0..n_islands.max(1) as u64)
+    // Stats window: drop whatever the multi-start phase accumulated so the
+    // line printed below covers the HGS islands only.
+    let _ = crate::local_search::ls_stats_snapshot_and_reset();
+    let result = (0..n_islands.max(1) as u64)
         .into_par_iter()
         .filter_map(|i| {
             // Only island 0 is anchored on the provided seed (e.g. the ILS best):
@@ -1466,5 +1469,10 @@ pub fn solve_genetic_parallel(
                 if migrate { Some(&pool) } else { None },
             )
         })
-        .min_by(|a, b| a.summary.cost.partial_cmp(&b.summary.cost).unwrap())
+        .min_by(|a, b| a.summary.cost.partial_cmp(&b.summary.cost).unwrap());
+    let stats = crate::local_search::ls_stats_snapshot_and_reset();
+    if !stats.is_empty() {
+        eprintln!("{}", stats);
+    }
+    result
 }

@@ -20,6 +20,7 @@ pub mod granular;
 pub mod propagate;
 pub mod insertion;
 pub mod local_search;
+pub mod slack;
 pub mod solver;
 pub mod io;
 pub mod options;
