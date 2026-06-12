@@ -77,9 +77,11 @@ pub(crate) struct PosIndex {
     pub(crate) reloc_extremes: RelocExtremes,
     /// Vidal-style SWAP* level B: the pruning lower bound (cached top-3 +
     /// bridge gap) IS the candidate — skip the exact per-pair best-insertion
-    /// scan and let the confirm evaluation reject infeasible argmins. Costs
-    /// exactness (a feasible non-argmin position is lost when the argmin is
-    /// infeasible); requires both swap* caches. Opt-IN via
+    /// scan. v2: each side's candidate gaps are pre-checked with the live
+    /// full-route slack arrays (O(window) replace_seg_ok, first feasible of
+    /// bridge + top-3 wins), so infeasible argmins no longer reach the
+    /// confirm evaluation. Still non-exact (a feasible position outside
+    /// bridge + top-3 is lost); requires both swap* caches. Opt-IN via
     /// BROOOM_SWAPSTAR_TOP3CAND=1 (A/B arm, not a default — see `arm`).
     pub(crate) swap_b: bool,
     /// Max FAILED pair confirmations per probe under level B
@@ -132,12 +134,12 @@ impl PosIndex {
             },
             // The level-B gate is baked in at arm time: it reuses the top-3
             // cache and the r1-side gap trick, so either kill switch also
-            // disables it. OPT-IN (session 10 A/B): the throughput win
-            // (swap* 32s→19s, 108M slack-skips→0 on rc2_4_5) is eaten by
-            // confirm evaluations of infeasible argmins (56k→2.8M evals) —
-            // quality mixed (rc2 −0.8pp, rc1 +0.6pp), GH400 mean neutral.
-            // To make it pay: O(1) feasibility on the argmin (single-window
-            // replace_seg_ok on the full route) + a known-infeasible memo.
+            // disables it. OPT-IN (session 10 A/B): v1's throughput win
+            // (swap* 32s→19s, 108M slack-skips→0 on rc2_4_5) was eaten by
+            // confirm evaluations of infeasible argmins (56k→2.8M evals).
+            // v2 (session 11) pre-checks the candidate gaps with the live
+            // full-route slack arrays (see local_search::level_b_side) and
+            // walks bridge + top-3 per side — benchmarks judge the default.
             swap_b: std::env::var("BROOOM_SWAPSTAR_TOP3CAND").is_ok()
                 && swap_top3
                 && swap_r1gap,

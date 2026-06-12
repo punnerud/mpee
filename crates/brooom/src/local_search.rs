@@ -218,7 +218,8 @@ fn op_slack_skip(op: usize) {
 #[inline]
 fn op_timed(op: usize, stats: bool, f: impl FnOnce()) {
     if stats {
-        let t0 = std::time::Instant::now();
+        // web_time = std::time on native, a browser-safe clock on wasm32.
+        let t0 = web_time::Instant::now();
         f();
         OP_STATS[op].probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         OP_STATS[op]
@@ -297,21 +298,23 @@ fn nmark_has(l: usize) -> bool {
 // A deadline here caps every pass loop; an interrupted solution is merely
 // unconverged, never invalid (moves apply atomically). `None` (the default, and
 // always the case without a time limit) changes nothing.
+// web_time::Instant == std::time::Instant on native; on wasm32 it's a
+// browser-safe clock (std's panics there), matching solver.rs/genetic.rs.
 thread_local! {
-    static LS_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+    static LS_DEADLINE: std::cell::Cell<Option<web_time::Instant>> =
         const { std::cell::Cell::new(None) };
 }
 /// Arm (or clear) the wall-clock deadline LS honours on this thread. Callers
 /// that run on pooled threads (rayon) must set it on entry — workers are reused
 /// and may carry a previous phase's value.
-pub fn set_ls_deadline(d: Option<std::time::Instant>) {
+pub fn set_ls_deadline(d: Option<web_time::Instant>) {
     LS_DEADLINE.with(|c| c.set(d));
 }
 /// True once the armed deadline (if any) has passed. Public so other
 /// construction-time loops (greedy insertion) can honour the same wall-clock.
 #[inline]
 pub fn ls_deadline_hit() -> bool {
-    LS_DEADLINE.with(|c| c.get().is_some_and(|d| std::time::Instant::now() >= d))
+    LS_DEADLINE.with(|c| c.get().is_some_and(|d| web_time::Instant::now() >= d))
 }
 
 /// The depot index a vehicle starts/ends at (for arc endpoints).
@@ -418,7 +421,6 @@ fn local_search_with_settled(
             let mut best: Option<Move> = None;
 
             let stats = crate::solution::ls_stats_on();
-            let use_slack = matches!(&judge, Some(Judge::Slack(_)));
             let warp_mode = matches!(&judge, Some(Judge::Warp(..)));
             let sc = &mut judge;
             let px = posidx.as_ref();
@@ -442,7 +444,7 @@ fn local_search_with_settled(
             // meaningless on violating routes and its eval fallback is the
             // per-pair full-evaluation bomb — skip it under warp mode.
             if !warp_mode {
-                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, px, marks, &mut best));
+                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
             }
 
             match best {
@@ -514,7 +516,6 @@ pub fn local_search_full(
 
             let mut best: Option<Move> = None;
             let stats = crate::solution::ls_stats_on();
-            let use_slack = matches!(&judge, Some(Judge::Slack(_)));
             let warp_mode = matches!(&judge, Some(Judge::Warp(..)));
             let sc = &mut judge;
             let px = posidx.as_ref();
@@ -536,7 +537,7 @@ pub fn local_search_full(
             op_timed(OP_CROSS, stats, || try_cross_exchange_with(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
             // See local_search_with_settled: swap* is skipped in warp mode.
             if !warp_mode {
-                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, use_slack, px, marks, &mut best));
+                op_timed(OP_SWAP_STAR, stats, || try_swap_star(problem, matrix, sol, r1, i, granular, sc.as_mut(), px, marks, &mut best));
             }
 
             if let Some(mv) = best {
@@ -2238,7 +2239,7 @@ fn try_swap_star(
     r1: usize,
     i: usize,
     granular: Option<&Granular>,
-    use_slack: bool,
+    mut judge: Option<&mut Judge>,
     posidx: Option<&crate::posidx::PosIndex>,
     marks: Option<&[(u32, u32)]>,
     best: &mut Option<Move>,
@@ -2288,18 +2289,25 @@ fn try_swap_star(
     // across all pairs (built lazily on the first surviving pair), r2\{t2}
     // is built per pair. One O(route) build replaces up to O(route) full
     // evaluations inside best_insertion.
-    let use_slack = use_slack && prefilter;
+    let use_slack =
+        matches!(judge.as_deref(), Some(Judge::Slack(_))) && prefilter;
     let mut s1m: Option<Option<Box<crate::slack::RouteSlack>>> = None;
 
     // Vidal-style level B (see posidx.rs::swap_b): the pruning lower bound is
     // the EXACT arc delta of the argmin gaps, so surviving pairs are pushed
     // as candidates directly — no per-pair r2_minus/s1m/s2m builds, no exact
-    // best-insertion scan. The confirm evaluation rejects infeasible argmins;
-    // a pair whose argmin is infeasible is lost even if a worse position was
-    // feasible (Vidal's trade). Gated on use_slack so the eval path and all
+    // best-insertion scan. v2: each side's candidate gaps (bridge + non-
+    // adjacent top-3) are pre-checked with the live full-route slack arrays
+    // (O(window) replace_seg_ok per gap, first feasible wins — Vidal's walk),
+    // so the confirm phase stops burning O(n) evaluations on infeasible
+    // argmins, and a pair survives when a non-argmin gap is feasible. A pair
+    // is still lost when none of its candidate gaps is feasible (the top-3
+    // bound is Vidal's trade). Gated on use_slack so the eval path and all
     // kill-switch combinations stay bitwise untouched.
     let level_b = use_slack && posidx.is_some_and(|px| px.swap_b);
     let swap_b_cap = posidx.map_or(usize::MAX, |px| px.swap_b_cap);
+    // Level-B side-walk scratch: the replacement-window segment.
+    let mut seg_buf: Vec<TaskRef> = Vec::new();
 
     // Slack-judged pair candidates: exact O(1) cost deltas + O(1) feasibility,
     // confirmed best-first after the scan (same shape as the other fast ops).
@@ -2417,7 +2425,7 @@ fn try_swap_star(
                     }
                     _ => top3_compute(problem, matrix, veh2, &route2.steps, t1),
                 });
-                let (ins2_lb, ins2_pos) = {
+                let (ins2_lb, ins2_pos, bridge2) = {
                     // Gap delta: inserting t1 where t2 used to sit.
                     let prev = if j == 0 { ds2 } else { step_loc(problem, route2.steps[j - 1]) };
                     let next = if j + 1 == n2 { de2 } else { step_loc(problem, route2.steps[j + 1]) };
@@ -2433,6 +2441,8 @@ fn try_swap_star(
                         }
                         None => f64::INFINITY,
                     };
+                    // The bridge value alone, kept for the level-B side walk.
+                    let bridge = lb;
                     // Argmin position in r2_minus coordinates (the bridge gap
                     // at j maps to j; full-route gaps p<j → p, p>j+1 → p−1).
                     // Only consumed under level B; strict `<` below means the
@@ -2450,7 +2460,7 @@ fn try_swap_star(
                             break;
                         }
                     }
-                    (lb, pos)
+                    (lb, pos, bridge)
                 };
                 let thresh = best.as_ref().map(|b| b.delta).unwrap_or(-1e-9).min(best_sc);
                 // Stage 1: O(1) optimistic bound on the r1-side insert.
@@ -2462,7 +2472,7 @@ fn try_swap_star(
                 // adjacent gaps {i, i+1}, plus the bridge gap at i — the
                 // same gap bijection as ins2_lb above, BIT-IDENTICAL to
                 // pred_cheapest_insert on r1_minus but O(1) per pair.
-                let (ins1_lb, ins1_pos) = match posidx {
+                let (ins1_lb, ins1_pos, bridge1) = match posidx {
                     Some(px) if px.swap_r1gap => {
                         let top3 =
                             top3_cached(problem, matrix, veh1, &route1.steps, t2, px, r1);
@@ -2492,6 +2502,8 @@ fn try_swap_star(
                             }
                             None => f64::INFINITY,
                         };
+                        // The bridge value alone, kept for the level-B walk.
+                        let bridge = lb;
                         // Argmin in r1_minus coordinates (bridge → i; same
                         // bijection as the r2 side).
                         let mut pos = i;
@@ -2517,26 +2529,60 @@ fn try_swap_star(
                                 "r1 gap-trick diverged from pred_cheapest_insert: {lb} vs {exact}"
                             );
                         }
-                        (lb, pos)
+                        (lb, pos, bridge)
                     }
                     // Never taken under level B (swap_b requires swap_r1gap);
-                    // the sentinel position is never read.
+                    // the sentinel position and bridge are never read.
                     _ => (
                         pred_cheapest_insert(problem, matrix, veh1, &r1_minus, t2),
                         usize::MAX,
+                        f64::INFINITY,
                     ),
                 };
                 let lb = rem1 + ins1_lb + rem2 + ins2_lb;
                 if lb >= thresh - 1e-12 {
                     continue;
                 }
-                // Level B: the lb IS the exact arc delta at (ins1_pos,
-                // ins2_pos) — push the candidate and skip the per-pair
-                // builds and the exact insertion scans entirely.
+                // Level B v2: walk each side's candidate gaps with the live
+                // full-route slack arrays (see level_b_side); the chosen
+                // deltas are exact, so the pushed candidate confirms cleanly
+                // under the gate. Slack arrays unavailable for a route ⇒
+                // that side degrades to the unchecked argmin (v1 behavior).
                 if level_b {
-                    if lb < -1e-9 {
-                        best_sc = best_sc.min(lb);
-                        scands.push(SCand { delta: lb, r2, j, pos1: ins1_pos, pos2: ins2_pos });
+                    let (s1f, s2f) = match judge.as_deref_mut() {
+                        Some(Judge::Slack(cache)) => {
+                            cache.ensure(r1, problem, matrix, sol);
+                            cache.ensure(r2, problem, matrix, sol);
+                            (cache.get(r1), cache.get(r2))
+                        }
+                        _ => (None, None),
+                    };
+                    let check_inv_b = posidx.is_some_and(|px| px.check_inv);
+                    // r2 side first: its top-3 is already at hand.
+                    let Some((pos2, d2)) = level_b_side(
+                        problem, matrix, veh2, &route2.steps, j, t1, bridge2,
+                        top3, (ins2_lb, ins2_pos), s2f, check_inv_b,
+                        &mut seg_buf,
+                    ) else { continue };
+                    // level_b ⇒ swap_r1gap, so this cache entry is hot (the
+                    // ins1 block above just computed it) — O(1) re-fetch.
+                    let top3_1 = match posidx {
+                        Some(px) if px.swap_r1gap => top3_cached(
+                            problem, matrix, veh1, &route1.steps, t2, px, r1,
+                        ),
+                        _ => unreachable!("level_b requires swap_r1gap"),
+                    };
+                    let Some((pos1, d1)) = level_b_side(
+                        problem, matrix, veh1, &route1.steps, i, t2, bridge1,
+                        &top3_1, (ins1_lb, ins1_pos), s1f, check_inv_b,
+                        &mut seg_buf,
+                    ) else { continue };
+                    // A fallback gap costs more than the argmin: recompute
+                    // the pair delta from the CHOSEN gaps and re-judge it.
+                    let delta = rem1 + d1 + rem2 + d2;
+                    if delta < -1e-9 {
+                        best_sc = best_sc.min(delta);
+                        scands.push(SCand { delta, r2, j, pos1, pos2 });
                     }
                     continue;
                 }
@@ -2659,6 +2705,111 @@ fn try_swap_star(
         });
         break;
     }
+}
+
+/// Level-B side walk: among the candidate gaps for inserting `task` into
+/// `steps` minus position `rm` — the bridge plus the non-adjacent cached
+/// top-3, ascending by exact arc delta with the bridge winning value ties
+/// (matching the argmin's strict `<`) — return the first gap the O(window)
+/// slack pre-check admits, as (minus-route position, delta). `slack` absent
+/// ⇒ no pre-check: the argmin is returned unchecked. `None` means every
+/// candidate gap is proven infeasible: the pair is dead.
+///
+/// The candidate route "remove `rm`, insert `task` at minus-pos `pos`" is a
+/// single contiguous window replacement on the FULL route, judged by
+/// `RouteSlack::replace_seg_ok` without rebuilding any arrays:
+///   pos == rm (bridge):  [rm, rm+1)  ← [task]
+///   pos <  rm:           [pos, rm+1) ← [task] ++ steps[pos..rm]
+///   pos >  rm:           [rm, pos+1) ← steps[rm+1..pos+1] ++ [task]
+/// (minus-pos `rm` can only be the bridge: the full gap rm+1 is adjacency-
+/// excluded, so the three cases partition cleanly.)
+#[allow(clippy::too_many_arguments)]
+fn level_b_side(
+    problem: &Problem,
+    matrix: &Matrix,
+    veh: &crate::problem::Vehicle,
+    steps: &[TaskRef],
+    rm: usize,
+    task: TaskRef,
+    bridge: f64,
+    top3: &[(f64, u32); 3],
+    argmin: (f64, usize),
+    slack: Option<&crate::slack::RouteSlack>,
+    check_inv: bool,
+    seg: &mut Vec<TaskRef>,
+) -> Option<(usize, f64)> {
+    let Some(s) = slack else {
+        return Some((argmin.1, argmin.0));
+    };
+    // ≤ 4 candidates: the filtered top-3 (already ascending) with the bridge
+    // merged in before the first entry it doesn't strictly lose to.
+    let mut cands = [(f64::INFINITY, usize::MAX); 4];
+    let mut n = 0;
+    for &(d, p) in top3 {
+        // Sentinels are (INFINITY, u32::MAX): the position would slice out
+        // of bounds below, so the finiteness filter is load-bearing.
+        if !d.is_finite() {
+            break;
+        }
+        let p = p as usize;
+        if p == rm || p == rm + 1 {
+            continue;
+        }
+        cands[n] = (d, if p < rm { p } else { p - 1 });
+        n += 1;
+    }
+    let mut bi = n;
+    for (k, c) in cands[..n].iter().enumerate() {
+        if c.0 >= bridge {
+            bi = k;
+            break;
+        }
+    }
+    let mut k = n;
+    while k > bi {
+        cands[k] = cands[k - 1];
+        k -= 1;
+    }
+    cands[bi] = (bridge, rm);
+    n += 1;
+
+    for &(d, pos) in &cands[..n] {
+        if !d.is_finite() {
+            break;
+        }
+        seg.clear();
+        let (iw, kw) = if pos == rm {
+            seg.push(task);
+            (rm, rm + 1)
+        } else if pos < rm {
+            seg.push(task);
+            seg.extend_from_slice(&steps[pos..rm]);
+            (pos, rm + 1)
+        } else {
+            seg.extend_from_slice(&steps[rm + 1..pos + 1]);
+            seg.push(task);
+            (rm, pos + 1)
+        };
+        if s.replace_seg_ok(problem, matrix, veh, iw, kw, seg) {
+            return Some((pos, d));
+        }
+        op_slack_skip(OP_SWAP_STAR);
+        if check_inv {
+            // One-sided contract only (no false negatives): a rejected gap
+            // must evaluate infeasible. The converse does NOT hold —
+            // allowed_vehicles, unreachable legs, backhaul ordering and
+            // dim>8 are all pass-side under the slack gate.
+            let mut cand: Vec<TaskRef> = Vec::with_capacity(steps.len());
+            cand.extend_from_slice(&steps[..rm]);
+            cand.extend_from_slice(&steps[rm + 1..]);
+            cand.insert(pos, task);
+            assert!(
+                evaluate_route(problem, matrix, veh, &cand).is_err(),
+                "level B pre-check rejected a feasible side candidate (rm={rm} pos={pos})"
+            );
+        }
+    }
+    None
 }
 
 /// SwapStar helper: the best insertion position of `task` into `base` judged
