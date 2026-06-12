@@ -257,7 +257,7 @@
 </div>
 
 <script type="module">
-const BUILD = '3i0';
+const BUILD = '3i1';
 // The engine module is imported DYNAMICALLY inside boot() with ?v=${BUILD}, so a
 // fresh wasm build is never served stale from a previous deploy's cache (a
 // hard-coded ?v on a static import had drifted out of sync).
@@ -563,6 +563,16 @@ async function doOptimize() {
     }
     if (seg.length>1) lines.push({ coords:seg, color });
   });
+  // Two different leftover kinds, two different fixes: `unreachable` stops
+  // snapped to a road fragment with no connection from the depot (more
+  // drivers/hours can never help — the pin needs to move onto the network),
+  // while `unassigned_shift` stops are routable but overflow every shift.
+  // Coloured BEFORE renderStopsAndList so the pins pick the colours up.
+  const unreach = plan.unreachable || [];
+  const unfit = plan.unassigned_shift || (plan.unassigned || []).filter(i => !unreach.includes(i));
+  const UNREACH_PIN = '#64748b', UNFIT_PIN = '#f59e0b';
+  unreach.forEach(i => { if (stops[i + 1]) stops[i + 1].color = UNREACH_PIN; });
+  unfit.forEach(i => { if (stops[i + 1]) stops[i + 1].color = UNFIT_PIN; });
   drawLinesRaw(lines);
   renderStopsAndList();   // recolour stop pins per vehicle WITHOUT redrawing routes
   fit(stops);
@@ -573,6 +583,10 @@ async function doOptimize() {
   // path doesn't run it, so the shift line and the "/ shift" budgets only
   // render when the cap was actually applied.
   const capMin = +plan.max_route_min > 0 ? +plan.max_route_min : null;
+  const nameList = (idx) => {
+    const names = idx.slice(0, 3).map(i => stops[i + 1]?.name || `stop ${i + 2}`);
+    return names.join(', ') + (idx.length > 3 ? ` +${idx.length - 3} more` : '');
+  };
   let html = `<b>${plan.vehicles_used} driver${plan.vehicles_used===1?'':'s'} · ${plan.total_stops} stops</b> · depot = stop 1<br>`
     + `total <b>${plan.total_distance_km.toFixed(1)} km</b> · ${fmtMin(plan.total_duration_min)} work`
     + ` · unassigned ${plan.unassigned.length}`
@@ -580,7 +594,8 @@ async function doOptimize() {
                 + (servMin ? ` · ${servMin} min/stop` : '') + `</span>` : '')
     + `<br><span class="dim">solved in ${ms.toFixed(0)} ms on ${onGpu ? 'GPU (WebGPU local search) ✓' : 'CPU (WASM)'}</span>`
     + (onGpu ? `<br><span class="dim">GPU relocate + 2-opt: ${plan.before_distance_km.toFixed(1)} → ${plan.after_distance_km.toFixed(1)} km (naive → optimised; no working-hours cap)</span>` : '')
-    + ((capMin && plan.unassigned.length) ? `<br><span class="dim">⚠ ${plan.unassigned.length} stop(s) don't fit the shifts — add drivers or hours</span>` : '')
+    + (unreach.length ? `<br><span class="dim" style="color:${UNREACH_PIN}">⚠ ${unreach.length} stop(s) have no road connection from the depot (grey pins) — move them onto the street network: ${nameList(unreach)}</span>` : '')
+    + ((capMin && unfit.length) ? `<br><span class="dim" style="color:${UNFIT_PIN}">⚠ ${unfit.length} stop(s) don't fit the shifts (amber pins) — add drivers or hours: ${nameList(unfit)}</span>` : '')
     + `<div class="veh-list">`;
   plan.routes.forEach((rt, vi) => {
     const color = PALETTE[vi % PALETTE.length];

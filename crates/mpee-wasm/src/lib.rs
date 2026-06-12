@@ -428,7 +428,14 @@ impl Engine {
                 _ => None,
             })
             .collect();
-        unassigned.extend(dropped);
+        // The two leftover kinds need different UI advice: `unreachable`
+        // stops snapped to a road fragment with no connection to the depot
+        // (more drivers/hours can never help), while `unassigned` stops are
+        // routable but did not fit any driver's shift. The combined list
+        // stays in `unassigned` for older callers.
+        let unreachable = dropped;
+        let solver_unassigned = unassigned.clone();
+        unassigned.extend(unreachable.iter().copied());
 
         let out = serde_json::json!({
             "routes": routes_out,
@@ -438,6 +445,8 @@ impl Engine {
             "total_duration_min": grand_t as f64 / 60.0,
             "depot": [depot.0, depot.1],
             "unassigned": unassigned,
+            "unassigned_shift": solver_unassigned,
+            "unreachable": unreachable,
             // Echo of the working-hours model, so the UI can render
             // "6h 51m / 7h 30m" without re-deriving its own inputs.
             "max_route_min": max_route_min,
