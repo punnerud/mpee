@@ -160,8 +160,18 @@ fn verdict_equivalence_on_random_instances() {
                 if *fr == r {
                     continue;
                 }
+                // task_load_fits is a NECESSARY condition: a false verdict
+                // must mean NO insertion position is feasible.
+                let fits = slack.task_load_fits(veh, &problem, *t);
                 for j in 0..=n {
                     check(j, j, &[*t]);
+                    if !fits {
+                        let cand = splice(&route.steps, j, j, &[*t]);
+                        assert!(
+                            evaluate_route(&problem, &matrix, veh, &cand).is_err(),
+                            "task_load_fits=false but pos {j} feasible (seed {seed} route {r})"
+                        );
+                    }
                 }
             }
             for w in all_tasks.windows(2).take(6) {

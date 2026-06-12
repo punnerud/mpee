@@ -31,6 +31,12 @@ use rand_chacha::ChaCha8Rng;
 use std::collections::HashSet;
 use web_time::Instant;
 
+/// Education-depth escalation kill-switch for A/B comparison. Read per call
+/// (once per generation) so tests can toggle it in-process.
+fn edu_escalate_on() -> bool {
+    std::env::var("BROOOM_NO_EDU_ESCALATE").is_err()
+}
+
 /// Whether this problem fits the v1 HGS envelope (see module docs). Outside it,
 /// the caller keeps the proven search path.
 pub fn hgs_applicable(problem: &Problem) -> bool {
@@ -1214,12 +1220,25 @@ pub fn solve_genetic(
             if Instant::now() >= d {
                 break;
             }
-            if edu_passes > 1 {
-                let total = d.saturating_duration_since(phase_start).as_secs_f64();
-                let frac = phase_start.elapsed().as_secs_f64() / total.max(1e-9);
-                if (frac > 0.35 && gen < 10) || (frac > 0.55 && gen < 30) {
-                    edu_passes = (edu_passes / 2).max(1);
-                }
+            let total = d.saturating_duration_since(phase_start).as_secs_f64();
+            let frac = phase_start.elapsed().as_secs_f64() / total.max(1e-9);
+            if edu_passes > 1 && ((frac > 0.35 && gen < 10) || (frac > 0.55 && gen < 30)) {
+                edu_passes = (edu_passes / 2).max(1);
+            }
+            // Symmetric escalation: when generations flow far ahead of
+            // schedule, convert the surplus throughput into search depth.
+            // The starved=1 regime was calibrated before the O(1)-slack LS
+            // made education ~7x cheaper; islands now reach 500-1600
+            // generations at depth 1. Checkpointed (one doubling per gen
+            // milestone) so each step is re-judged against the clock.
+            // Kill-switch: BROOOM_NO_EDU_ESCALATE=1.
+            if edu_passes < max_passes
+                && edu_escalate_on()
+                && ((gen == 30 && frac < 0.30)
+                    || (gen == 120 && frac < 0.45)
+                    || (gen == 400 && frac < 0.60))
+            {
+                edu_passes = (edu_passes * 2).min(max_passes);
             }
         }
         // Light island migration: occasionally adopt a foreign elite that is
