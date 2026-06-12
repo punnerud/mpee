@@ -149,7 +149,9 @@ pub fn solve_decomposed(
     if k <= 1 {
         return solve_with_matrix(problem, matrix, config);
     }
-    let t0 = std::time::Instant::now();
+    // web_time = std::time on native, browser-safe on wasm32 (set_ls_deadline
+    // takes web_time::Instant).
+    let t0 = web_time::Instant::now();
 
     // Customer-side location indices (skip the depot at 0 if it's the only
     // shared start; we take all jobs' locations).

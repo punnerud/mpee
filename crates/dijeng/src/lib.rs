@@ -50,6 +50,10 @@ pub mod varint;
 #[cfg(feature = "native")]
 pub mod elevation;
 pub mod isochrone;
+// matching rides on the native-gated parallel CH matrix (see routing.rs);
+// trip stays buildable everywhere (tsp_order is pure), its service wrapper
+// RoutingService::trip is native-gated.
+#[cfg(feature = "native")]
 pub mod matching;
 pub mod trip;
 pub mod wordladder;

@@ -161,18 +161,31 @@ pub fn build_with_dist(g: &CsrGraph, edge_dist: &[f32]) -> ContractionHierarchy 
     if edge_diff {
         // The initial edge-difference pass runs one witness-limited simulation
         // per vertex — embarrassingly parallel over the read-only base graph.
-        use rayon::prelude::*;
-        let contracted_ro = &contracted;
-        let fwd_ro = &fwd;
-        let bwd_ro = &bwd;
-        let dn_ro = &deleted_neighbors;
-        current_priority = (0..n)
-            .into_par_iter()
-            .map_init(
-                || WitnessState::new(n),
-                |ws, v| edge_diff_priority(fwd_ro, bwd_ro, contracted_ro, dn_ro, v as u32, ws),
-            )
-            .collect();
+        // (Serial under non-native builds: wasm never builds a CH in practice,
+        // but the path must compile without rayon.)
+        #[cfg(feature = "native")]
+        {
+            use rayon::prelude::*;
+            let contracted_ro = &contracted;
+            let fwd_ro = &fwd;
+            let bwd_ro = &bwd;
+            let dn_ro = &deleted_neighbors;
+            current_priority = (0..n)
+                .into_par_iter()
+                .map_init(
+                    || WitnessState::new(n),
+                    |ws, v| edge_diff_priority(fwd_ro, bwd_ro, contracted_ro, dn_ro, v as u32, ws),
+                )
+                .collect();
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            let mut ws = WitnessState::new(n);
+            for v in 0..n {
+                current_priority[v] =
+                    edge_diff_priority(&fwd, &bwd, &contracted, &deleted_neighbors, v as u32, &mut ws);
+            }
+        }
         for v in 0..n {
             pq.push((Reverse(current_priority[v]), v as u32));
         }
