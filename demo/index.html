@@ -393,10 +393,17 @@ function clearResultMarkers(){ resultMarkers.forEach(m=>m.remove()); resultMarke
 function clearRoutes(){ const s=routeSrc(); if (s) s.setData(fc([])); }
 
 // ---------- stops ----------
+// Clear every per-stop decoration set by Optimize (vehicle colour, the
+// per-route visiting number `seq`, and the vehicle display rank). Called
+// whenever the stop set changes, so pins fall back to global tap-order
+// numbering until the next Optimize.
+function resetStopDecor() {
+  stops.forEach(s => { s.color = null; s.seq = null; s.rank = null; });
+}
 function addStop(lat, lon, name, fly = true) {
   stops.push({ lat, lon, name: name || `${lat.toFixed(5)}, ${lon.toFixed(5)}` });
   lastPlan = null;            // stops changed → previous optimize result is stale
-  stops.forEach(s => s.color = null);  // back to default green until next Optimize
+  resetStopDecor();           // back to default green + tap-order numbers
   renderStops();              // also auto-routes through the stops in order
   if (fly) map.flyTo({ center:[lon, lat], zoom: Math.max(map.getZoom(), 13), duration:500 });
 }
@@ -426,26 +433,55 @@ function drawSequentialRoute() {
 // Markers + list, coloured by stops[i].color (set by Optimize per vehicle;
 // default green). Does NOT touch the route layer, so Optimize can recolour the
 // stops without wiping its coloured vehicle routes.
+//
+// Numbering: once Optimize has run, each stop carries `seq` (its 1-based
+// visiting position WITHIN its vehicle's route), so the pins read 1,2,3… per
+// colour. The depot shows "D"; a stop left out of every route (unreachable /
+// shift overflow) shows no number, just its colour. Before any Optimize the
+// pins fall back to global tap-order numbers (i+1).
 function renderStopsAndList() {
   stopMarkers.forEach(m=>m.remove()); stopMarkers=[];
+  const optimized = stops.some(s => s.seq != null);
+  // Pin/row label for stop `s` at global index `i`.
+  const labelOf = (s, i) =>
+    s.seq != null ? String(s.seq)
+    : optimized && i === 0 ? 'D'
+    : optimized ? ''
+    : String(i + 1);
   stops.forEach((s, i) => {
     const color = s.color || GREEN;
-    const el = document.createElement('div'); el.className='pin-num'; el.textContent = i+1; el.style.background = color;
+    const label = labelOf(s, i);
+    const el = document.createElement('div'); el.className='pin-num'; el.textContent = label; el.style.background = color;
+    const popup = label && label !== 'D' ? `${label}. ${s.name}` : s.name;
     const m = new maplibregl.Marker({ element: el }).setLngLat([s.lon, s.lat])
-      .setPopup(new maplibregl.Popup({ offset:18 }).setHTML(`<b>${i+1}. ${s.name}</b>`)).addTo(map);
+      .setPopup(new maplibregl.Popup({ offset:18 }).setHTML(`<b>${popup}</b>`)).addTo(map);
     stopMarkers.push(m);
   });
   const list = $('stoplist');
   list.innerHTML = '';
   if (!stops.length) { list.innerHTML = '<div class="empty-note">No stops yet.</div>'; }
-  stops.forEach((s, i) => {
+  // After Optimize, show the list grouped by vehicle (depot first, then each
+  // route in its breakdown order, unassigned last) so the per-colour 1,2,3…
+  // reads top-to-bottom. The real array index is kept for delete.
+  const order = stops.map((_, i) => i);
+  if (optimized) {
+    order.sort((a, b) => {
+      if (a === 0 || b === 0) return a === 0 ? -1 : 1;        // depot first
+      const ra = stops[a].rank ?? 1e9, rb = stops[b].rank ?? 1e9;
+      if (ra !== rb) return ra - rb;                          // group by vehicle
+      return (stops[a].seq ?? 1e9) - (stops[b].seq ?? 1e9);   // then visiting order
+    });
+  }
+  for (const i of order) {
+    const s = stops[i];
     const color = s.color || GREEN;
+    const label = labelOf(s, i);
     const row = document.createElement('div'); row.className='stoprow';
-    row.innerHTML = `<div class="pin" style="background:${color}">${i+1}</div><div class="nm">${s.name}<br><small>${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</small></div>`;
+    row.innerHTML = `<div class="pin" style="background:${color}">${label}</div><div class="nm">${s.name}<br><small>${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}</small></div>`;
     const del = document.createElement('button'); del.className='del'; del.textContent='✕';
-    del.onclick = () => { stops.splice(i,1); stops.forEach(x=>x.color=null); lastPlan=null; renderStops(); };
+    del.onclick = () => { stops.splice(i,1); resetStopDecor(); lastPlan=null; renderStops(); };
     row.appendChild(del); list.appendChild(row);
-  });
+  }
   const c = $('count'); c.textContent = stops.length; c.classList.toggle('show', stops.length>0);
   if (stops.length) hideHint();   // dismiss the tap-the-map nudge
   syncOptHint();                  // show/hide the "open ☰ to optimize" nudge
@@ -546,11 +582,17 @@ async function doOptimize() {
 
   clearRoutes(); clearResultMarkers();
   const lines = [];
-  stops.forEach(s => s.color = null);
+  resetStopDecor();
   stops[0].color = '#1f2937';   // depot (stop 1) — dark, clearly the start
   plan.routes.forEach((rt, vi) => {
     const color = PALETTE[vi % PALETTE.length];
-    rt.stops.forEach(s => { if (stops[s.stop_index + 1]) stops[s.stop_index + 1].color = color; });
+    // `seq` = this stop's 1-based visiting position within the route (s.order
+    // is 0-based in route order); `rank` = the route's display order, so the
+    // list can group by vehicle. Pins then read 1,2,3… per colour.
+    rt.stops.forEach(s => {
+      const st = stops[s.stop_index + 1];
+      if (st) { st.color = color; st.seq = s.order + 1; st.rank = vi; }
+    });
     const seq = [depot, ...rt.stops.map(s=>[s.lat, s.lon]), depot];
     // Split into separate features at any unroutable leg (no straight bridges).
     let seg = [];
