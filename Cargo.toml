@@ -11,8 +11,13 @@ members = [
     # separate sibling repo (../mpee-ios) so the engine stays platform-neutral.
 ]
 # The browser/WASM crate is its own workspace (wasm32 target, cdylib) so a
-# native `cargo build --workspace` never pulls it in.
-exclude = ["crates/mpee-wasm"]
+# native `cargo build --workspace` never pulls it in. The planet crate is out
+# for a different reason: it depends on MPEdb through a filesystem path that is
+# local to whoever built it, so putting it in `members` would break
+# `cargo build --workspace` for everyone else. Build it on its own —
+# `cd crates/mpee-planet && cargo build --release` — after pointing that path
+# at your own MPEdb checkout. See crates/mpee-planet/README.md.
+exclude = ["crates/mpee-wasm", "crates/mpee-planet"]
 
 # Each subcrate also declares its own `[profile.release]`; cargo prefers
 # these workspace-root settings when the workspace is the build unit and

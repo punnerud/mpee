@@ -1,0 +1,497 @@
+<!-- Offline map + router UI. No external requests: the basemap is drawn from
+     the same dataset the router uses, so this page works with the network
+     unplugged. -->
+<meta charset="utf-8">
+<title>MPEE Planet</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171b21; --line:#262c35; --text:#e6e9ee;
+    --muted:#8b95a4; --accent:#4a90ff; --water:#0d1520;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);
+    font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  #map{position:absolute;inset:0;cursor:grab}
+  #map.drag{cursor:grabbing}
+  #panel{position:absolute;top:12px;left:12px;width:330px;max-height:calc(100% - 24px);
+    overflow:auto;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:12px;box-shadow:0 8px 30px #0008;z-index:5}
+  h1{font-size:13px;margin:0 0 10px;letter-spacing:.3px;font-weight:600}
+  h1 span{color:var(--muted);font-weight:400}
+  .row{display:flex;gap:6px;margin-bottom:6px;align-items:center}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+  .dot.a{background:#2ecc71}.dot.b{background:#ff5c5c}
+  input,select{flex:1;min-width:0;background:#0d1116;border:1px solid var(--line);
+    color:var(--text);border-radius:6px;padding:7px 8px;font:inherit}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  select{max-width:92px}
+  .toll.dim{opacity:.45}
+  .toll .sch{color:var(--muted);font-size:11px}
+  button{background:var(--accent);border:0;color:#fff;border-radius:6px;
+    padding:7px 11px;font:inherit;cursor:pointer}
+  button.ghost{background:#222833;color:var(--muted)}
+  button:hover{filter:brightness(1.1)}
+  .hint{color:var(--muted);font-size:11px;margin:8px 0}
+  .stat{display:flex;justify-content:space-between;padding:3px 0;
+    border-bottom:1px solid var(--line)}
+  .stat b{font-weight:600;font-variant-numeric:tabular-nums}
+  .big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+  .sub{color:var(--muted);font-size:11px}
+  .sug{background:#0d1116;border:1px solid var(--line);border-radius:6px;
+    margin:-3px 0 6px;max-height:150px;overflow:auto}
+  .sug div{padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .sug div:hover{background:#1b222c}
+  .toll{display:flex;justify-content:space-between;gap:8px;padding:2px 0;font-size:12px;
+    align-items:baseline}
+  .toll .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  /* The price must never wrap: it is the number the row exists to show. */
+  .toll b{flex:0 0 auto;white-space:nowrap}
+  .sec{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+  #scale{position:absolute;bottom:14px;left:360px;color:var(--muted);z-index:5;
+    font-size:11px;background:#0f1216cc;padding:3px 7px;border-radius:5px}
+  #zoombox{position:absolute;bottom:14px;right:14px;z-index:5;display:flex;gap:6px}
+  #zoombox button{width:32px;height:32px;padding:0;font-size:17px;background:var(--panel);
+    border:1px solid var(--line)}
+  #busy{position:absolute;top:12px;right:14px;z-index:5;color:var(--muted);
+    background:#0f1216cc;padding:4px 9px;border-radius:6px;font-size:11px;display:none}
+</style>
+
+<canvas id="map"></canvas>
+<div id="busy">…</div>
+<div id="scale"></div>
+<div id="zoombox"><button id="zo">−</button><button id="zi">+</button></div>
+
+<div id="panel">
+  <h1>MPEE Planet <span id="ds"></span></h1>
+
+  <div class="row"><i class="dot a"></i>
+    <input id="qa" placeholder="From — address or lat,lon" autocomplete="off"></div>
+  <div class="sug" id="sa" style="display:none"></div>
+  <div class="row"><i class="dot b"></i>
+    <input id="qb" placeholder="To — address or lat,lon" autocomplete="off"></div>
+  <div class="sug" id="sb" style="display:none"></div>
+  <div class="row">
+    <select id="cls" title="Vehicle class — tolls differ">
+      <option value="car">Car</option>
+      <option value="hgv">Lorry</option>
+    </select>
+    <input id="at" placeholder="Depart HH:MM" style="max-width:110px" autocomplete="off">
+    <button id="go">Route</button>
+  </div>
+  <div class="row">
+    <button id="swap" class="ghost">Swap</button>
+    <button id="clear" class="ghost">Clear</button>
+  </div>
+  <div class="hint">Click the map to set the green point, shift-click for red.</div>
+
+  <div class="sec" id="ovbox" style="display:none">
+    <div class="sub" style="margin-bottom:4px">Local edits in force</div>
+    <div id="ovlist"></div>
+  </div>
+
+  <div id="result" style="display:none">
+    <div class="sec">
+      <div class="big"><span id="rkm"></span> <span class="sub">km</span></div>
+      <div class="sub" id="rtime"></div>
+    </div>
+    <div class="sec" id="tollbox" style="display:none">
+      <div class="sub" style="margin-bottom:4px">Toll gates</div>
+      <div id="tolls"></div>
+      <div class="stat" style="margin-top:5px"><span>Estimated toll</span>
+        <b id="tolltotal"></b></div>
+    </div>
+    <div class="sec">
+      <div class="stat"><span>Snapped from road</span><b id="snapa"></b></div>
+      <div class="stat"><span>Snapped to road</span><b id="snapb"></b></div>
+      <div class="stat"><span>Vertices settled</span><b id="settled"></b></div>
+      <div class="stat"><span>Search time</span><b id="qms"></b></div>
+    </div>
+    <div class="sec">
+      <div class="sub" style="margin-bottom:4px">Route</div>
+      <div id="steps"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TAU = Math.PI * 2;
+const cv = document.getElementById('map'), cx = cv.getContext('2d');
+let view = { lat: 59.913, lon: 10.752, z: 12 };
+let A = null, B = null, route = null, roads = [], roadKey = '', overrides = [];
+
+// ---- Web Mercator ---------------------------------------------------------
+const S = z => 256 * Math.pow(2, z);
+function projX(lon, z){ return (lon + 180) / 360 * S(z); }
+function projY(lat, z){
+  // Web Mercator: y = (0.5 - ln((1+sin φ)/(1-sin φ)) / 4π) · S.  TAU is 2π,
+  // so the divisor is 2·TAU — the inverse below uses the matching π(1 - 2y/S).
+  const s = Math.sin(lat * Math.PI / 180);
+  return (0.5 - Math.log((1 + s) / (1 - s)) / (2 * TAU)) * S(z);
+}
+function unprojLon(x, z){ return x / S(z) * 360 - 180; }
+function unprojLat(y, z){
+  const n = Math.PI - TAU * y / S(z);
+  return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+function toScreen(lat, lon){
+  return [projX(lon, view.z) - originX() , projY(lat, view.z) - originY()];
+}
+function originX(){ return projX(view.lon, view.z) - cv.width / dpr() / 2; }
+function originY(){ return projY(view.lat, view.z) - cv.height / dpr() / 2; }
+function fromScreen(px, py){
+  return [unprojLat(py + originY(), view.z), unprojLon(px + originX(), view.z)];
+}
+function dpr(){ return window.devicePixelRatio || 1; }
+
+function resize(){
+  const r = dpr();
+  cv.width = innerWidth * r; cv.height = innerHeight * r;
+  cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
+  cx.setTransform(r, 0, 0, r, 0, 0);
+  draw(); fetchRoads();
+}
+addEventListener('resize', resize);
+
+// ---- road styling ---------------------------------------------------------
+// Indices match the Class enum in profile.rs.
+const STYLE = [
+  ['#d98a3a', 3.0], ['#d98a3a', 2.0],   // motorway, link
+  ['#cf8b45', 2.6], ['#cf8b45', 1.8],   // trunk
+  ['#b8863f', 2.2], ['#b8863f', 1.6],   // primary
+  ['#8e7a52', 1.8], ['#8e7a52', 1.3],   // secondary
+  ['#6d707a', 1.5], ['#6d707a', 1.1],   // tertiary
+  ['#565b66', 1.1], ['#4d525c', 1.0],   // unclassified, residential
+  ['#4d525c', 0.9], ['#3f444d', 0.8],   // living street, service
+  ['#2f5d86', 1.2], ['#4d525c', 0.9],   // ferry, other
+];
+
+function draw(){
+  const w = cv.width / dpr(), h = cv.height / dpr();
+  cx.fillStyle = '#0f1216'; cx.fillRect(0, 0, w, h);
+  cx.lineCap = 'round'; cx.lineJoin = 'round';
+
+  // Draw minor roads first so majors sit on top.
+  const order = [...roads].sort((a, b) => b.c - a.c);
+  for (const r of order){
+    const st = STYLE[r.c] || STYLE[15];
+    cx.strokeStyle = st[0];
+    cx.lineWidth = st[1] * Math.max(0.6, (view.z - 8) / 5 + 0.7);
+    if (r.c === 14){ cx.setLineDash([5, 4]); } else { cx.setLineDash([]); }
+    cx.beginPath();
+    const p = r.p;
+    for (let i = 0; i < p.length; i += 2){
+      const [x, y] = toScreen(p[i], p[i+1]);
+      i === 0 ? cx.moveTo(x, y) : cx.lineTo(x, y);
+    }
+    cx.stroke();
+  }
+  cx.setLineDash([]);
+
+  if (route && route.geometry){
+    // White casing under the blue line keeps it readable over any road colour.
+    for (const [col, wid] of [['#0b1a2e', 8], ['#4a90ff', 4.5]]){
+      cx.strokeStyle = col; cx.lineWidth = wid;
+      cx.beginPath();
+      route.geometry.forEach((g, i) => {
+        const [x, y] = toScreen(g[0], g[1]);
+        i === 0 ? cx.moveTo(x, y) : cx.lineTo(x, y);
+      });
+      cx.stroke();
+    }
+    for (const t of (route.tolls || [])){
+      const [x, y] = toScreen(t.lat, t.lon);
+      cx.fillStyle = '#ffd166'; cx.strokeStyle = '#0f1216'; cx.lineWidth = 1.5;
+      cx.beginPath(); cx.arc(x, y, 4, 0, TAU); cx.fill(); cx.stroke();
+    }
+  }
+
+  // Local edits: a closure the router is honouring should be visible on the
+  // map, not merely felt in the answer.
+  for (const o of overrides){
+    const [x, y] = toScreen(o.lat, o.lon);
+    const col = o.kind === 'closed' ? '#ff5c5c' : '#ffa64d';
+    cx.strokeStyle = col; cx.lineWidth = 2; cx.setLineDash([4, 3]);
+    cx.beginPath(); cx.arc(x, y, 9, 0, TAU); cx.stroke();
+    cx.setLineDash([]);
+    cx.beginPath(); cx.moveTo(x - 4, y - 4); cx.lineTo(x + 4, y + 4);
+    cx.moveTo(x + 4, y - 4); cx.lineTo(x - 4, y + 4);
+    if (o.kind !== 'closed'){ cx.beginPath(); cx.arc(x, y, 3, 0, TAU); cx.fillStyle = col; cx.fill(); }
+    cx.stroke();
+  }
+  for (const [pt, col] of [[A, '#2ecc71'], [B, '#ff5c5c']]){
+    if (!pt) continue;
+    const [x, y] = toScreen(pt[0], pt[1]);
+    cx.fillStyle = col; cx.strokeStyle = '#0f1216'; cx.lineWidth = 2;
+    cx.beginPath(); cx.arc(x, y, 6, 0, TAU); cx.fill(); cx.stroke();
+  }
+  drawScale();
+}
+
+function drawScale(){
+  const mPerPx = 156543.03392 * Math.cos(view.lat * Math.PI/180) / Math.pow(2, view.z);
+  let target = 80 * mPerPx, unit = 'm', div = 1;
+  if (target > 1000){ unit = 'km'; div = 1000; }
+  const nice = [1,2,5,10,20,50,100,200,500,1000];
+  const v = nice.find(n => n >= target/div) || 1000;
+  document.getElementById('scale').textContent =
+    `${v} ${unit}  ·  z${view.z.toFixed(1)}  ·  ${roads.length} road segments`;
+}
+
+// ---- data fetching --------------------------------------------------------
+let roadTimer = null, busyN = 0;
+function busy(d){
+  busyN += d;
+  document.getElementById('busy').style.display = busyN > 0 ? 'block' : 'none';
+}
+function bbox(){
+  const w = cv.width/dpr(), h = cv.height/dpr();
+  const [n, wl] = fromScreen(0, 0), [s, e] = fromScreen(w, h);
+  return [s, wl, n, e];
+}
+function fetchRoads(){
+  clearTimeout(roadTimer);
+  roadTimer = setTimeout(async () => {
+    const b = bbox().map(v => v.toFixed(4)).join(',');
+    const key = b + '|' + Math.round(view.z);
+    if (key === roadKey) return;
+    roadKey = key;
+    busy(1);
+    try {
+      const r = await fetch(`/api/roads?bbox=${b}&z=${view.z.toFixed(1)}`);
+      roads = (await r.json()).roads || [];
+      draw();
+    } catch(e){ console.warn(e); }
+    busy(-1);
+  }, 140);
+}
+
+// ---- interaction ----------------------------------------------------------
+let drag = null;
+cv.addEventListener('mousedown', e => {
+  drag = { x: e.clientX, y: e.clientY, lat: view.lat, lon: view.lon, moved: 0 };
+  cv.classList.add('drag');
+});
+addEventListener('mousemove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.moved = Math.max(drag.moved, Math.abs(dx) + Math.abs(dy));
+  view.lon = unprojLon(projX(drag.lon, view.z) - dx, view.z);
+  view.lat = unprojLat(projY(drag.lat, view.z) - dy, view.z);
+  draw();
+});
+addEventListener('mouseup', e => {
+  if (drag && drag.moved < 4) setPoint(e);
+  if (drag) fetchRoads();
+  drag = null; cv.classList.remove('drag');
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const before = fromScreen(e.clientX, e.clientY);
+  view.z = Math.min(19, Math.max(2, view.z - Math.sign(e.deltaY) * 0.5));
+  const after = fromScreen(e.clientX, e.clientY);
+  view.lat += before[0] - after[0];
+  view.lon += before[1] - after[1];
+  draw(); fetchRoads();
+}, { passive: false });
+document.getElementById('zi').onclick = () => { view.z = Math.min(19, view.z+1); draw(); fetchRoads(); };
+document.getElementById('zo').onclick = () => { view.z = Math.max(2, view.z-1); draw(); fetchRoads(); };
+
+async function setPoint(e){
+  const ll = fromScreen(e.clientX, e.clientY);
+  const which = e.shiftKey ? 'b' : 'a';
+  if (which === 'a') A = ll; else B = ll;
+  document.getElementById('q' + which).value =
+    ll[0].toFixed(6) + ',' + ll[1].toFixed(6);
+  draw();
+  // Name the point if an address is nearby.
+  try {
+    const r = await fetch(`/api/reverse?lat=${ll[0]}&lon=${ll[1]}`);
+    const j = await r.json();
+    const label = j.address
+      ? `${j.address.street} ${j.address.housenumber}${j.address.city ? ', ' + j.address.city : ''}`
+      : (j.road && j.road.name ? j.road.name : null);
+    if (label) document.getElementById('q' + which).value = label;
+  } catch(e){}
+  if (A && B) doRoute();
+}
+
+// ---- geocoding ------------------------------------------------------------
+function isLL(s){ return /^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/.test(s); }
+async function resolve(text){
+  if (isLL(text)) return text.split(',').map(Number);
+  const r = await fetch('/api/geocode?q=' + encodeURIComponent(text) + '&limit=1');
+  const j = await r.json();
+  if (j.results && j.results.length) return [j.results[0].lat, j.results[0].lon];
+  return null;
+}
+function wireSuggest(inputId, boxId, which){
+  const inp = document.getElementById(inputId), box = document.getElementById(boxId);
+  let t = null;
+  inp.addEventListener('input', () => {
+    clearTimeout(t);
+    const v = inp.value.trim();
+    if (v.length < 3 || isLL(v)){ box.style.display = 'none'; return; }
+    t = setTimeout(async () => {
+      const r = await fetch('/api/geocode?q=' + encodeURIComponent(v) + '&limit=6');
+      const j = await r.json();
+      const items = (j.results || []).map(h => ({
+        label: `${h.street} ${h.housenumber}${h.city ? ', ' + h.city : ''}${h.approximate ? ' ·' : ''}`,
+        lat: h.lat, lon: h.lon
+      }));
+      for (const s of (j.suggest || [])) if (items.length < 8) items.push({ label: s, street: s });
+      box.innerHTML = '';
+      for (const it of items){
+        const d = document.createElement('div');
+        d.textContent = it.label;
+        d.onclick = () => {
+          inp.value = it.street || it.label;
+          box.style.display = 'none';
+          if (it.lat){
+            if (which === 'a') A = [it.lat, it.lon]; else B = [it.lat, it.lon];
+            view.lat = it.lat; view.lon = it.lon;
+            if (view.z < 14) view.z = 15;
+            draw(); fetchRoads();
+            if (A && B) doRoute();
+          }
+        };
+        box.appendChild(d);
+      }
+      box.style.display = items.length ? 'block' : 'none';
+    }, 180);
+  });
+}
+wireSuggest('qa', 'sa', 'a');
+wireSuggest('qb', 'sb', 'b');
+
+// ---- routing --------------------------------------------------------------
+async function doRoute(){
+  const ta = document.getElementById('qa').value.trim();
+  const tb = document.getElementById('qb').value.trim();
+  if (!A && ta) A = await resolve(ta);
+  if (!B && tb) B = await resolve(tb);
+  if (!A || !B) return;
+  busy(1);
+  try {
+    const cls = document.getElementById('cls').value;
+    const at = document.getElementById('at').value.trim();
+    const q = new URLSearchParams({ from: `${A[0]},${A[1]}`, to: `${B[0]},${B[1]}`, class: cls });
+    if (/^\d{1,2}:\d{2}$/.test(at)) q.set('at', at);
+    const r = await fetch('/api/route?' + q);
+    const j = await r.json();
+    if (j.error){ alert(j.error); busy(-1); return; }
+    route = j;
+    render(j);
+    draw();
+  } catch(e){ console.warn(e); }
+  busy(-1);
+}
+document.getElementById('go').onclick = () => { A = null; B = null; doRoute(); };
+document.getElementById('cls').onchange = () => { if (A && B) doRoute(); };
+document.getElementById('at').onchange = () => { if (A && B) doRoute(); };
+document.getElementById('swap').onclick = () => {
+  const a = document.getElementById('qa'), b = document.getElementById('qb');
+  [a.value, b.value] = [b.value, a.value];
+  [A, B] = [B, A]; if (A && B) doRoute();
+};
+document.getElementById('clear').onclick = () => {
+  A = B = route = null;
+  document.getElementById('qa').value = ''; document.getElementById('qb').value = '';
+  document.getElementById('result').style.display = 'none';
+  draw();
+};
+
+function fmtTime(s){
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+}
+function render(j){
+  document.getElementById('result').style.display = 'block';
+  document.getElementById('rkm').textContent = (j.distance_m / 1000).toFixed(2);
+  document.getElementById('rtime').textContent =
+    `${fmtTime(j.duration_s)} · ${j.distance_m.toFixed(0)} m exactly`;
+  document.getElementById('snapa').textContent = j.snap_from_m.toFixed(1) + ' m';
+  document.getElementById('snapb').textContent = j.snap_to_m.toFixed(1) + ' m';
+  document.getElementById('settled').textContent = j.settled.toLocaleString();
+  document.getElementById('qms').textContent = j.query_ms.toFixed(0) + ' ms';
+
+  const tb = document.getElementById('tollbox');
+  if (j.tolls && j.tolls.length){
+    tb.style.display = 'block';
+    // A gate covered by a scheme's hour rule is shown, but dimmed and at zero:
+    // you passed it, you did not pay for it, and hiding it would make the
+    // total impossible to reconcile against an invoice.
+    document.getElementById('tolls').innerHTML = j.tolls.map(t => {
+      const dim = t.price != null && !t.charged ? ' dim' : '';
+      const rate = t.rate === 'rush' ? ' · rush' : '';
+      const note = t.price != null && !t.charged ? ' · hour rule' : '';
+      return `<div class="toll${dim}"><span class="n">${esc(t.name || '(unnamed gate)')}
+        <span class="sch">${esc(t.scheme || '')}${rate}${note}</span></span>
+        <b>${t.price != null ? t.price.toFixed(0) + ' ' + esc(t.currency) : '—'}</b></div>`;
+    }).join('');
+    const unp = j.toll_unpriced
+      ? `<div class="sub" style="margin-top:4px">${j.toll_unpriced} gate(s) crossed with no known tariff</div>` : '';
+    document.getElementById('tolls').insertAdjacentHTML('beforeend', unp);
+    document.getElementById('tolltotal').textContent =
+      (j.toll_total || []).map(t => `${t.amount.toFixed(0)} ${t.currency}`).join(' + ') || '—';
+  } else tb.style.display = 'none';
+
+  document.getElementById('steps').innerHTML = (j.steps || [])
+    .filter(s => s.distance_m > 150).slice(0, 25)
+    .map(s => `<div class="toll"><span class="n">${esc(s.name || '· ' + s.class)}</span>
+      <b>${s.distance_m > 1000 ? (s.distance_m/1000).toFixed(1) + ' km'
+                               : s.distance_m.toFixed(0) + ' m'}</b></div>`).join('');
+}
+function esc(s){ return String(s).replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// Deep link: ?from=lat,lon&to=lat,lon[&z=] renders a route on load, which
+// makes routes shareable and the UI scriptable.
+(function fromUrl(){
+  const u = new URLSearchParams(location.search);
+  const p = s => s ? s.split(',').map(Number) : null;
+  const a = p(u.get('from')), b = p(u.get('to'));
+  if (u.get('z')) view.z = Number(u.get('z'));
+  if (u.get('class')) document.getElementById('cls').value = u.get('class');
+  if (u.get('at')) document.getElementById('at').value = u.get('at');
+  if (a){ A = a; document.getElementById('qa').value = u.get('from'); }
+  if (b){ B = b; document.getElementById('qb').value = u.get('to'); }
+  if (a && b){
+    // Frame both endpoints with a margin.
+    view.lat = (a[0]+b[0])/2; view.lon = (a[1]+b[1])/2;
+    if (!u.get('z')){
+      const span = Math.max(Math.abs(a[0]-b[0]) * 2, Math.abs(a[1]-b[1]));
+      view.z = Math.max(2, Math.min(16, Math.log2(360 / Math.max(span, 1e-4)) - 1.2));
+    }
+    doRoute().then(fetchRoads);
+  } else if (a || b){
+    const c = a || b; view.lat = c[0]; view.lon = c[1];
+  }
+})();
+
+async function loadOverrides(){
+  try {
+    const j = await (await fetch('/api/overrides')).json();
+    overrides = j.rules || [];
+    const box = document.getElementById('ovbox');
+    if (overrides.length){
+      box.style.display = 'block';
+      document.getElementById('ovlist').innerHTML = overrides.map(o => {
+        const what = o.kind === 'speed' ? `${o.speed_kmh} km/h`
+                   : o.kind === 'penalty' ? `x${o.factor}` : 'closed';
+        return `<div class="toll"><span class="n">${esc(o.street || o.note || 'edit #' + o.id)}
+          <span class="sch">${esc(what)} · ${o.segments} segment(s)</span></span>
+          <b>#${o.id}</b></div>`;
+      }).join('');
+    } else box.style.display = 'none';
+    draw();
+  } catch(e){}
+}
+setInterval(loadOverrides, 5000);
+loadOverrides();
+
+fetch('/api/info').then(r => r.json()).then(j => {
+  document.getElementById('ds').textContent =
+    `· ${(j.vertices/1e6).toFixed(1)} M junctions · ${(j.addresses/1e6).toFixed(1)} M addresses`;
+});
+resize();
+</script>

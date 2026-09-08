@@ -1,0 +1,32 @@
+[package]
+name = "mpee-planet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rayon = "1"
+memmap2 = "0.9"
+libdeflater = "1"
+crossbeam-channel = "0.5"
+# The toll tariff layer. Prices, vehicle classes and rush windows are small,
+# mutable and queried by predicate — the one part of this dataset that wants a
+# database rather than an array.
+mpedb = { path = "/Volumes/StorSSD/mpedb_src/crates/mpedb" }
+# NVDB's toll-station export. serde is already in the tree via mpedb, so this
+# is a parser, not a new dependency tree.
+serde_json = "1"
+# Artifact digests for `verify --deep`. Already compiled for mpedb.
+blake3 = "1"
+# Only used by `codecstat`, to measure what a codec would buy before writing one.
+flate2 = "1"
+# madvise/msync and the RSS probe behind `--cache-mb`: proving the dataset runs
+# on a small machine means capping the resident cache, not just measuring it.
+libc = "0.2"
+
+[dev-dependencies]
+osmpbf = "0.3"
+mpedb = { path = "/Volumes/StorSSD/mpedb_src/crates/mpedb" }
+
+[[bin]]
+name = "mpee-planet"
+path = "src/main.rs"
