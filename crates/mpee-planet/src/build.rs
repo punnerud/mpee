@@ -40,6 +40,12 @@ impl Paths {
     pub fn f(&self, name: &str) -> PathBuf {
         self.work.join(name)
     }
+
+    /// The directory itself, for the few readers that open by directory rather
+    /// than by artifact name.
+    pub fn dir(&self) -> &std::path::Path {
+        &self.work
+    }
 }
 
 // ------------------------------------------------------------ attr packing
@@ -51,6 +57,75 @@ pub const A_BRIDGE: u32 = 1 << 7;
 pub const A_TUNNEL: u32 = 1 << 8;
 pub const A_ROUNDABOUT: u32 = 1 << 9;
 pub const A_KMH_SH: u32 = 16;
+
+/// The on-disk form of one routable way.
+///
+/// Shared between the build and the update, and that sharing is the point: an
+/// update decides whether a way has changed by hashing this record and
+/// comparing it with the one stored at build time, so the two must produce
+/// byte-identical output for identical input or every way looks changed.
+pub fn encode_way(b: &mut Vec<u8>, id: u64, attr: u32, name: &[u8], rf: &[u8], refs: &[i64]) {
+    put_u(b, id);
+    put_u(b, attr as u64);
+    put_bytes(b, name);
+    put_bytes(b, rf);
+    put_u(b, refs.len() as u64);
+    let mut prev = 0i64;
+    for &r in refs {
+        put_i(b, r - prev);
+        prev = r;
+    }
+}
+
+/// A way's identity, split into the two halves that behave differently under
+/// an update.
+///
+/// The attribute half — packed class, direction, speed, plus name and ref — is
+/// what a table's numbers are computed *from*. Change it and the segments stay
+/// exactly where they are; only their cost changes, and that can be patched in
+/// place.
+///
+/// The topology half is the node list. Change it and the way splits into
+/// different segments at different junctions, with different ids, which no
+/// amount of recomputation can patch: the graph's shape has moved.
+///
+/// Keeping them apart is what tells an update which of the two it is looking
+/// at. A single hash over the whole record says only "something changed", and
+/// would send a corrected speed limit down the same expensive path as a new
+/// motorway.
+pub fn way_hashes(rec: &[u8]) -> (u64, u64, u64) {
+    fn read_u(b: &[u8], p: &mut usize) -> u64 {
+        let (mut v, mut sh) = (0u64, 0u32);
+        while *p < b.len() {
+            let c = b[*p];
+            *p += 1;
+            v |= ((c & 0x7f) as u64) << sh;
+            if c & 0x80 == 0 {
+                break;
+            }
+            sh += 7;
+        }
+        v
+    }
+    fn fnv(b: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &x in b {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        h
+    }
+    let mut p = 0usize;
+    let id = read_u(rec, &mut p);
+    let a0 = p;
+    read_u(rec, &mut p); // attr
+    let n = read_u(rec, &mut p) as usize;
+    p += n; // name
+    let n = read_u(rec, &mut p) as usize;
+    p += n; // ref
+    let a1 = p;
+    (id, fnv(&rec[a0..a1]), fnv(&rec[a1..]))
+}
 
 pub fn pack_attr(a: &WayAttr) -> u32 {
     let ow = match a.oneway {
@@ -112,7 +187,20 @@ pub struct Dir {
 
 pub fn open_dir(pbf: &Path, paths: &Paths) -> io::Result<Dir> {
     let cache = paths.f("blobs.idx");
-    let blobs = if cache.exists() {
+    // The cache is a list of byte offsets into one particular file. Reusing it
+    // for a different file reads whatever happens to sit at those offsets,
+    // which surfaces as a protobuf wire-type panic somewhere unrelated — so
+    // the file it was built for is recorded and checked. Length is enough:
+    // two PBFs of exactly the same size have the same blob boundaries only if
+    // they are the same file, and if that ever failed the check below would
+    // still catch it when the offsets stopped landing on blob headers.
+    let stamp = cache.with_extension("idx.for");
+    let want = std::fs::metadata(pbf)?.len();
+    let fresh = std::fs::read(&stamp)
+        .ok()
+        .and_then(|b| b.get(..8).map(|x| u64::from_le_bytes(x.try_into().unwrap())))
+        == Some(want);
+    let blobs = if cache.exists() && fresh {
         let raw = std::fs::read(&cache)?;
         let n = raw.len() / 16;
         (0..n)
@@ -139,6 +227,7 @@ pub fn open_dir(pbf: &Path, paths: &Paths) -> io::Result<Dir> {
             raw.extend_from_slice(&[0u8; 3]);
         }
         std::fs::write(&cache, &raw)?;
+        std::fs::write(&stamp, want.to_le_bytes())?;
         eprintln!("[dir] {} blobs in {:.1} s", b.len(), t.elapsed().as_secs_f64());
         b
     };
@@ -263,19 +352,16 @@ pub fn pass1(pbf: &Path, paths: &Paths, dir: &Dir) -> io::Result<P1> {
                                 st.junc.set_quiet(id);
                             }
                         }
-                        let b = &mut bufs[0];
-                        put_u(b, w.id as u64);
-                        put_u(b, pack_attr(&a) as u64);
                         let name = tags.iter().find(|(k, _)| *k == b"name").map(|(_, v)| *v);
                         let rf = tags.iter().find(|(k, _)| *k == b"ref").map(|(_, v)| *v);
-                        put_bytes(b, name.unwrap_or(b""));
-                        put_bytes(b, rf.unwrap_or(b""));
-                        put_u(b, refs.len() as u64);
-                        let mut prev = 0i64;
-                        for &r in refs.iter() {
-                            put_i(b, r - prev);
-                            prev = r;
-                        }
+                        encode_way(
+                            &mut bufs[0],
+                            w.id as u64,
+                            pack_attr(&a),
+                            name.unwrap_or(b""),
+                            rf.unwrap_or(b""),
+                            &refs,
+                        );
                     }
                 }
                 if is_addr_way && !refs.is_empty() {

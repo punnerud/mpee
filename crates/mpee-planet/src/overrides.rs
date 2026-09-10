@@ -385,6 +385,11 @@ impl Overrides {
             .map(|i| self.entries[i].1)
     }
 
+    /// The segments these overrides touch, ascending.
+    pub fn segments(&self) -> impl Iterator<Item = u32> + '_ {
+        self.entries.iter().map(|e| e.0)
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

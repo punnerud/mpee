@@ -30,3 +30,13 @@ mpedb = { path = "/Volumes/StorSSD/mpedb_src/crates/mpedb" }
 [[bin]]
 name = "mpee-planet"
 path = "src/main.rs"
+
+# `crates/mpee-planet` is not a member of the repo's workspace — it builds on
+# its own, so the release settings that lived in its old workspace root have to
+# live here.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = false
+overflow-checks = false

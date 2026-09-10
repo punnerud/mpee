@@ -14,7 +14,12 @@ use std::path::PathBuf;
 
 fn data() -> Option<(Dataset, Overlay)> {
     let p = mpee_planet::catalog::resolve(&PathBuf::from(std::env::var("MPEE_TEST_DATA").ok()?));
-    if !p.join("ov.mat").exists() {
+    // Either storage form counts as "there is an overlay". Checking only for
+    // the eager table is how this file silently skipped itself for a while
+    // after level 0 could be built lazily: every test reported ok without
+    // running. A guard that can quietly disable a whole file has to name both
+    // shapes.
+    if !p.join("ov.mat").exists() && !p.join("ov.lazy").exists() {
         eprintln!("no overlay in the test dataset — skipping");
         return None;
     }
@@ -130,6 +135,10 @@ fn a_region_table_never_undercuts_the_real_graph() {
         if i == j {
             continue;
         }
+        // A lazy level computes a row on demand, and reading one that has not
+        // been computed would read a hole in a sparse file — zeros, which here
+        // would mean free travel. Ask for it first.
+        ov.ensure_row(&ds, None, 0, c, i, true);
         let inside = ov.cost(c, i, j);
         if inside == overlay::UNREACHABLE {
             continue;
@@ -254,7 +263,7 @@ fn a_narrowed_region_reads_back_what_was_stored() {
     // Regions store 2- or 4-byte entries depending on their own diameter. A
     // narrow region must still report `UNREACHABLE` as unreachable rather than
     // as 65 535 tenths of a second, and a wide one must not be read as narrow.
-    let Some((_ds, ov)) = data() else { return };
+    let Some((ds, ov)) = data() else { return };
     let (mut narrow, mut wide, mut checked) = (0usize, 0usize, 0usize);
     // Every rung stores the same shape of table and narrows the same way, so
     // every rung has to read back the same way too.
@@ -269,6 +278,11 @@ fn a_narrowed_region_reads_back_what_was_stored() {
                 narrow += 1;
             } else {
                 wide += 1;
+            }
+            // A lazy level fills a row on demand; reading one that has not
+            // been computed would read a hole in a sparse file.
+            for i in 0..b.min(8) {
+                ov.ensure_row(&ds, None, k, c, i, true);
             }
             // A diagonal entry is a vertex to itself: always zero.
             for i in 0..b.min(8) {
@@ -299,7 +313,12 @@ fn a_narrowed_region_reads_back_what_was_stored() {
             }
         }
     }
-    assert!(narrow > 0 && wide > 0, "both widths should occur: {narrow} narrow, {wide} wide");
+    // A lazy level is 4 bytes everywhere by construction: narrowing needs every
+    // value of a region at once, which is exactly what it declines to compute.
+    // So the mixed-width claim only applies where widths are actually chosen.
+    if (0..ov.levels()).any(|k| !ov.level(k).is_lazy()) {
+        assert!(narrow > 0 && wide > 0, "both widths should occur: {narrow} narrow, {wide} wide");
+    }
     eprintln!("{narrow} narrow regions, {wide} wide");
 }
 
@@ -393,4 +412,314 @@ fn the_second_level_is_a_shortcut_not_a_different_answer() {
          ({:.2}x), {used_l2} level-2 crossings",
         settled1 as f64 / settled2.max(1) as f64
     );
+}
+
+/// A lazily-valued level must actually be exercised, and must fill as it goes.
+///
+/// The exactness tests above compare the ladder against a plain Dijkstra and
+/// against the single-level search, and they pass whether the ladder's values
+/// were computed up front or on demand — which is the point, but it also means
+/// they would keep passing if the fixture quietly became eager and the lazy
+/// path stopped being run at all. This pins that it is running: rows start
+/// missing, searches fill them, and the count only ever goes up.
+#[test]
+fn a_lazy_level_fills_its_rows_as_queries_ask_for_them() {
+    let Some((ds, ov)) = data() else { return };
+    let Some(k) = (0..ov.levels()).find(|&k| ov.level(k).is_lazy()) else {
+        eprintln!("no lazy level in the test dataset — skipping");
+        return;
+    };
+    let (before, total) = ov.filled(k).expect("a lazy level reports its fill");
+    assert!(total > 0, "level {k} has no rows to fill");
+
+    let mut rng = Rng(0x5A5A_1234_9876_ABCD);
+    let nv = ds.n_vertices();
+    let mut r = OverlayRouter::new();
+    let mut found = 0;
+    for _ in 0..3000 {
+        if found == 25 {
+            break;
+        }
+        let s = (rng.next() % nv as u64) as u32;
+        let t = (rng.next() % nv as u64) as u32;
+        if r.search_vertices(&ds, &ov, s, t).is_some() {
+            found += 1;
+        }
+    }
+    assert!(found > 0, "no connected pair found — the fixture is too sparse");
+    let (after, _) = ov.filled(k).unwrap();
+    assert!(
+        after >= before,
+        "level {k} lost rows: {before} filled before the searches, {after} after"
+    );
+    eprintln!("  level {k}: {before} -> {after} of {total} rows filled by {found} routes");
+}
+
+/// A closed road must change an overlay route, not just a plain one.
+///
+/// This is the failure the overlay makes easy to miss. A table entry is a
+/// shortcut *across a whole region*, summarising paths the search never walks
+/// edge by edge. If the tables were built from the original weights while the
+/// edges honoured an override, closing a road inside a region would change
+/// every route that drives along it and no route that hops over it — and the
+/// hop would keep quoting a journey through a road that is shut. The answer
+/// would stay plausible, which is what makes it dangerous.
+///
+/// So the yardstick is a plain Dijkstra told about the same override. The two
+/// must agree on every pair, exactly as they do without one.
+#[test]
+fn an_override_reaches_the_region_tables_and_not_only_the_edges() {
+    let Some((ds, ov)) = data() else { return };
+    let mut rng = Rng(0x00C1_05ED_0000_1234);
+    let nv = ds.n_vertices();
+
+    // Find a pair whose route is long enough to cross regions, so the search
+    // actually uses a table rather than walking the whole way.
+    let (mut s, mut t, mut base) = (0u32, 0u32, 0u32);
+    let mut r = OverlayRouter::new();
+    for _ in 0..5000 {
+        let a = (rng.next() % nv as u64) as u32;
+        let b = (rng.next() % nv as u64) as u32;
+        if let Some(c) = r.search_vertices(&ds, &ov, a, b) {
+            if c > 30_000 && ov.cell(a) != ov.cell(b) {
+                s = a;
+                t = b;
+                base = c;
+                break;
+            }
+        }
+    }
+    assert!(base > 0, "no long cross-region pair found — the fixture is too sparse");
+
+    // Close a segment on that route, at its midpoint, using the same
+    // ground-position keying an operator would.
+    let path = mpee_planet::router::Router::new(ds.n_vertices())
+        .route(&ds, &snap_at(&ds, s), &snap_at(&ds, t))
+        .expect("the plain router finds the same pair");
+    let mid = path.legs[path.legs.len() / 2].seg;
+    let (la, lo) = ds.vcoord[ds.seg_u[mid as usize] as usize];
+    let rule = mpee_planet::overrides::Rule {
+        id: 1,
+        kind: "closed".into(),
+        lat_e7: la,
+        lon_e7: lo,
+        radius_m: 30,
+        street: None,
+        speed_kmh: None,
+        factor: None,
+        note: "test".into(),
+        author: "test".into(),
+        created: 0,
+        expires: None,
+    };
+    // Work on a clone of the dataset, not the shared fixture.
+    //
+    // A cached row is computed for one cost function. Filling rows with a road
+    // closed and leaving them in the shared cache would poison every later
+    // query that does not have that closure — which is exactly what happened
+    // the first time this test was written, and it showed up as the *exactness*
+    // test failing somewhere else entirely. On APFS the clone is a
+    // copy-on-write operation, so isolating a 5 GB row cache costs a tenth of
+    // a second and only the blocks that diverge.
+    let clone = std::env::temp_dir().join(format!("mpee-ovr-{}", std::process::id()));
+    std::fs::remove_dir_all(&clone).ok();
+    let src = mpee_planet::catalog::resolve(&PathBuf::from(std::env::var("MPEE_TEST_DATA").unwrap()));
+    let ok = std::process::Command::new("cp")
+        .args(["-c", "-R"])
+        .arg(&src)
+        .arg(&clone)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("could not clone the dataset — skipping");
+        return;
+    }
+    let ds = Dataset::open(&clone).unwrap();
+    let ov = Overlay::open(&clone).unwrap();
+
+    let ovr = mpee_planet::overrides::Overrides::resolve(&ds, &[rule], 1);
+    assert!(!ovr.is_empty(), "the override matched no segment");
+    // Rows cached before the closure describe the road as it was. Making the
+    // cost function override-aware is only half the fix; the other half is
+    // that what has already been computed has to be forgotten.
+    let dropped = ov.invalidate_for(&ds, &ovr);
+    eprintln!("  the closure invalidated {dropped} cached rows");
+
+    let mut r = OverlayRouter::new();
+    let with = r.search_vertices_with(&ds, Some(&ovr), &ov, s, t);
+    let (reference, _) = overlay::reference_cost_with(&ds, Some(&ovr), s, t);
+    std::fs::remove_dir_all(&clone).ok();
+    assert_eq!(
+        with, reference,
+        "with a road closed, the overlay and a plain Dijkstra disagree — \
+         the tables are summarising a graph the edges no longer describe"
+    );
+    eprintln!("  {base} ds without the closure, {:?} with it", with);
+}
+
+/// Snap a vertex to itself, so vertex-level tests can call the plain router.
+fn snap_at(ds: &Dataset, v: u32) -> mpee_planet::router::Snap {
+    let seg = (0..ds.seg_u.len())
+        .find(|&s| ds.seg_u[s] == v || ds.seg_v[s] == v)
+        .expect("every vertex has a segment") as u32;
+    let at_u = ds.seg_u[seg as usize] == v;
+    mpee_planet::router::Snap {
+        seg,
+        u: ds.seg_u[seg as usize],
+        v: ds.seg_v[seg as usize],
+        t: if at_u { 0.0 } else { 1.0 },
+        off_m: 0.0,
+        lat_e7: ds.vcoord[v as usize].0,
+        lon_e7: ds.vcoord[v as usize].1,
+    }
+}
+
+/// Turning a global row index back into (region, row) must be exact.
+///
+/// The warm-up hands out rows by a single counter so that no thread is left
+/// grinding a huge region alone, and `bhead` — the prefix sum of rows per
+/// region — is what turns that counter back into a place. Getting it wrong
+/// would not crash: it would fill the wrong rows, leave others empty, and
+/// look like progress. Empty regions make it delicate, because several of
+/// them share a boundary offset.
+#[test]
+fn a_global_row_index_maps_back_to_the_region_that_owns_it() {
+    let Some((_ds, ov)) = data() else { return };
+    for k in 0..ov.levels() {
+        let lvl = ov.level(k);
+        let n = lvl.regions();
+        let rows = lvl.boundary_total();
+        let mut checked = 0usize;
+        // Every row of the first regions, then a stride over the rest — the
+        // interesting cases are boundaries between regions and runs of empty
+        // ones, and both cluster early.
+        let step = (rows / 20_000).max(1);
+        for r in (0..rows).step_by(step) {
+            let c = lvl.region_of_row(r, n);
+            let base = lvl.row_base(c);
+            let b = lvl.boundary(c).len();
+            assert!(
+                base <= r && r < base + b,
+                "level {k}: row {r} was placed in region {c}, which owns rows \
+                 {base}..{}",
+                base + b
+            );
+            checked += 1;
+        }
+        assert!(checked > 0 || rows == 0, "level {k} exercised nothing");
+        eprintln!("  level {k}: {checked} of {rows} row indices verified");
+    }
+}
+
+/// Splitting a region must keep every other region's rows, and every answer.
+///
+/// This is the operation the whole adaptive scheme rests on, and it has two
+/// halves that fail differently. Getting the *partition* wrong makes routes
+/// wrong in an obvious way. Getting the *layout* wrong makes them wrong in the
+/// dangerous way: a row read from the place a neighbour's row used to be is a
+/// plausible number, and the first version of this scored 4 926 where the
+/// answer is 214 867 — a route that looked like free travel because the
+/// backward rows of every region had shifted underneath it.
+///
+/// So the test asserts both: that answers survive, and that rows were actually
+/// preserved rather than the whole level quietly recomputed.
+#[test]
+fn a_split_keeps_the_neighbours_rows_and_every_answer() {
+    let Some((ds0, ov0)) = data() else { return };
+    if !(0..ov0.levels()).any(|k| ov0.level(k).is_lazy()) {
+        eprintln!("no lazy level in the test dataset — skipping");
+        return;
+    }
+    // A clone, because this writes: the shared fixture must not be reshaped
+    // under the other tests.
+    let clone = std::env::temp_dir().join(format!("mpee-split-{}", std::process::id()));
+    std::fs::remove_dir_all(&clone).ok();
+    let src = mpee_planet::catalog::resolve(&PathBuf::from(std::env::var("MPEE_TEST_DATA").unwrap()));
+    let ok = std::process::Command::new("cp")
+        .args(["-c", "-R"])
+        .arg(&src)
+        .arg(&clone)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("could not clone the dataset — skipping");
+        return;
+    }
+
+    // Answers before, over pairs that actually cross regions.
+    let mut rng = Rng(0x5F11_7000_0000_0001);
+    let nv = ds0.n_vertices();
+    let mut r = OverlayRouter::new();
+    let mut pairs: Vec<(u32, u32, u32)> = Vec::new();
+    for _ in 0..8000 {
+        if pairs.len() == 30 {
+            break;
+        }
+        let s = (rng.next() % nv as u64) as u32;
+        let t = (rng.next() % nv as u64) as u32;
+        if let Some(c) = r.search_vertices(&ds0, &ov0, s, t) {
+            if ov0.cell(s) != ov0.cell(t) {
+                pairs.push((s, t, c));
+            }
+        }
+    }
+    assert!(!pairs.is_empty(), "no cross-region pair found — the fixture is too sparse");
+    drop(ov0);
+    drop(ds0);
+
+    let ds = Dataset::open(&clone).unwrap();
+    let ov = Overlay::open(&clone).unwrap();
+    // The cost-guided planner, because that is the one that will run. The
+    // bisecting one exists to measure against.
+    // Split the *middle* of the ladder when there is one. A split at level 0
+    // only exercises the level it touches; a split above it has to carry the
+    // change upward — every level's members are the level below's boundary, so
+    // a rebuilt level must be built from the *new* gates, not the ones `ov`
+    // still holds. Two separate bugs lived there: a level above addressing
+    // regions that no longer existed, and a level built from stale gates that
+    // routed 245 441 where the answer is 214 867.
+    let lvl = (0..ov.levels()).find(|&k| ov.level(k).is_lazy() && k > 0).unwrap_or(0);
+    let plan = overlay::plan_splits_by_cost(&ds, &ov, lvl, if lvl == 0 { 64 } else { 32 }, 200);
+    if plan.cuts.is_empty() {
+        eprintln!("no region over the gate limit — skipping");
+        std::fs::remove_dir_all(&clone).ok();
+        return;
+    }
+    let paths = mpee_planet::build::Paths::new(&clone);
+    let st = overlay::split_level(&paths, &ds, &ov, lvl, &plan).unwrap();
+    drop(ov);
+    drop(ds);
+
+    assert!(st.regions_after > st.regions_before, "no region was actually split");
+    assert!(
+        st.rows_kept > st.rows_dropped,
+        "a split of {} of {} regions dropped {} rows and kept {} — the layout is \
+         not preserving what it should",
+        plan.cuts.len(),
+        st.regions_before,
+        st.rows_dropped,
+        st.rows_kept
+    );
+
+    let ds = Dataset::open(&clone).unwrap();
+    let ov = Overlay::open(&clone).unwrap();
+    let mut r = OverlayRouter::new();
+    for &(s, t, before) in &pairs {
+        let after = r.search_vertices(&ds, &ov, s, t);
+        assert_eq!(
+            after,
+            Some(before),
+            "route {s} -> {t} changed from {before} to {after:?} after a split"
+        );
+    }
+    eprintln!(
+        "  {} regions split, {} rows kept, {} recomputed, {} routes unchanged",
+        plan.cuts.len(),
+        st.rows_kept,
+        st.rows_dropped,
+        pairs.len()
+    );
+    std::fs::remove_dir_all(&clone).ok();
 }

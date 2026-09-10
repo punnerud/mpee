@@ -25,6 +25,11 @@ pub struct SearchState {
     /// Open-addressing table: `keys[i]` is the vertex owning slot `i`.
     keys: Vec<u32>,
     dist: Vec<u32>,
+    /// What the queue orders by. Equal to `dist` for a plain Dijkstra; for a
+    /// goal-directed search it is `dist + potential`, and the two must be kept
+    /// apart — the answer is a distance, the ordering is a guess about the
+    /// future, and conflating them was never going to end well.
+    prio: Vec<u32>,
     par: Vec<u32>,
     /// Where slot `i` sits in `heap`, or `EMPTY` when it is not queued.
     hpos: Vec<u32>,
@@ -45,6 +50,7 @@ impl SearchState {
         SearchState {
             keys: vec![EMPTY; cap],
             dist: vec![0; cap],
+            prio: vec![0; cap],
             par: vec![EMPTY; cap],
             hpos: vec![EMPTY; cap],
             heap: Vec::new(),
@@ -86,6 +92,7 @@ impl SearchState {
         let cap = (self.mask + 1) * 2;
         let old_keys = std::mem::replace(&mut self.keys, vec![EMPTY; cap]);
         let old_dist = std::mem::replace(&mut self.dist, vec![0; cap]);
+        let old_prio = std::mem::replace(&mut self.prio, vec![0; cap]);
         let old_par = std::mem::replace(&mut self.par, vec![EMPTY; cap]);
         let old_hpos = std::mem::replace(&mut self.hpos, vec![EMPTY; cap]);
         self.mask = cap - 1;
@@ -97,6 +104,7 @@ impl SearchState {
             let j = self.probe(k);
             self.keys[j] = k;
             self.dist[j] = old_dist[i];
+            self.prio[j] = old_prio[i];
             self.par[j] = old_par[i];
             self.hpos[j] = old_hpos[i];
             remap[i] = j as u32;
@@ -125,6 +133,32 @@ impl SearchState {
     /// Record `v` at `d` if that improves on what is known, moving its queue
     /// entry rather than adding a second one.
     pub fn relax(&mut self, v: u32, d: u32, parent: u32) -> bool {
+        self.relax_with(v, d, d, parent)
+    }
+
+    /// As `relax`, with a potential that is computed only when the vertex is
+    /// first seen.
+    ///
+    /// A vertex is relaxed many times — once per incoming edge that improves
+    /// it, and in a dense overlay that is hundreds — while its potential never
+    /// changes. On a revisit the stored `prio - dist` *is* the potential, so it
+    /// costs a subtraction instead of two great-circle calculations. That
+    /// difference is the whole reason a goal-directed search can be affordable
+    /// here at all.
+    pub fn relax_pot(&mut self, v: u32, d: u32, parent: u32, pot: impl FnOnce() -> u32) -> bool {
+        let i = self.probe(v);
+        if self.keys[i] != EMPTY {
+            if d >= self.dist[i] {
+                return false;
+            }
+            let p = self.prio[i] - self.dist[i];
+            return self.relax_with(v, d, d.saturating_add(p), parent);
+        }
+        self.relax_with(v, d, d.saturating_add(pot()), parent)
+    }
+
+    /// As `relax`, ordering by `prio` instead of by distance.
+    pub fn relax_with(&mut self, v: u32, d: u32, prio: u32, parent: u32) -> bool {
         if (self.len + 1) * 10 > (self.mask + 1) * 7 {
             self.grow();
         }
@@ -132,6 +166,7 @@ impl SearchState {
         if self.keys[i] == EMPTY {
             self.keys[i] = v;
             self.dist[i] = d;
+            self.prio[i] = prio;
             self.par[i] = parent;
             self.len += 1;
             self.hpos[i] = self.heap.len() as u32;
@@ -143,6 +178,7 @@ impl SearchState {
             return false;
         }
         self.dist[i] = d;
+        self.prio[i] = prio;
         self.par[i] = parent;
         if self.hpos[i] == EMPTY {
             // Re-queue a vertex that was already settled: only possible if the
@@ -158,8 +194,30 @@ impl SearchState {
         true
     }
 
+    /// The smallest priority in the queue — the figure a termination rule
+    /// compares, which under a potential is not a distance.
     pub fn peek(&self) -> Option<u32> {
+        self.heap.first().map(|&s| self.prio[s as usize])
+    }
+
+    /// The distance of the cheapest queued vertex.
+    pub fn peek_dist(&self) -> Option<u32> {
         self.heap.first().map(|&s| self.dist[s as usize])
+    }
+
+    /// Vertices near the top of the queue, cheapest first-ish.
+    ///
+    /// A binary heap only promises its root, so the first `n` slots are not
+    /// the `n` cheapest — but they are all shallow, which is exactly the
+    /// property wanted here. This is for prefetching work that a vertex will
+    /// need when it is settled: being approximately right costs a little
+    /// speculation and nothing in correctness, where sorting would cost more
+    /// than the prefetch saves.
+    pub fn peek_many(&self, n: usize, out: &mut Vec<u32>) {
+        out.clear();
+        for &slot in self.heap.iter().take(n) {
+            out.push(self.keys[slot as usize]);
+        }
     }
 
     /// Remove and return the cheapest `(vertex, distance)`.
@@ -177,7 +235,7 @@ impl SearchState {
 
     #[inline]
     fn key(&self, at: usize) -> u32 {
-        self.dist[self.heap[at] as usize]
+        self.prio[self.heap[at] as usize]
     }
 
     fn sift_up(&mut self, mut at: usize) {
@@ -220,7 +278,7 @@ impl SearchState {
     /// Bytes the structure currently occupies — what a memory budget is
     /// stated against.
     pub fn bytes(&self) -> usize {
-        (self.mask + 1) * 16 + self.heap.capacity() * 4
+        (self.mask + 1) * 20 + self.heap.capacity() * 4
     }
 }
 

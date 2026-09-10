@@ -84,6 +84,16 @@ pub fn pass3(
     let mut w_pool = BufWriter::with_capacity(1 << 22, File::create(paths.f("name.pool"))?);
     let mut w_poff = BufWriter::with_capacity(1 << 20, File::create(paths.f("name.off"))?);
 
+    // The way index: which OSM way each run of segments came from, and what it
+    // looked like. Segments from one way are produced consecutively, so a
+    // cumulative count is enough to address them — no per-segment back
+    // pointer, and no sort.
+    let mut w_wid = BufWriter::with_capacity(1 << 22, File::create(paths.f("way.id"))?);
+    let mut w_whash = BufWriter::with_capacity(1 << 22, File::create(paths.f("way.hash"))?);
+    let mut w_wtopo = BufWriter::with_capacity(1 << 22, File::create(paths.f("way.topo"))?);
+    let mut w_whead = BufWriter::with_capacity(1 << 22, File::create(paths.f("way.head"))?);
+    w_whead.write_all(&0u32.to_le_bytes())?;
+
     let mut names: HashMap<Vec<u8>, u32> = HashMap::with_capacity(1 << 20);
     let mut name_bytes = 0u64;
     w_poff.write_all(&0u64.to_le_bytes())?;
@@ -120,7 +130,11 @@ pub fn pass3(
             .map(|&(s, e)| contract_way(&ways[s..e], coords, need, junc, cfg))
             .collect();
 
-        for segs in produced {
+        for (bi, segs) in produced.into_iter().enumerate() {
+            let (wid, wattr, wtopo) = crate::build::way_hashes(&ways[batch[bi].0..batch[bi].1]);
+            w_wid.write_all(&wid.to_le_bytes())?;
+            w_whash.write_all(&wattr.to_le_bytes())?;
+            w_wtopo.write_all(&wtopo.to_le_bytes())?;
             for sg in segs {
                 if sg.u_node == u64::MAX {
                     out.dropped_incomplete += 1;
@@ -174,6 +188,11 @@ pub fn pass3(
                 }
                 out.segments += 1;
             }
+            // One entry per way, after its segments: `head[w]..head[w+1]` is
+            // the run this way produced. Ways that produced none — dropped for
+            // missing coordinates — get an empty run rather than disappearing,
+            // so the index stays aligned with `way.id`.
+            w_whead.write_all(&(out.segments as u32).to_le_bytes())?;
         }
         if last_report.elapsed().as_secs() >= 10 {
             last_report = std::time::Instant::now();
@@ -193,7 +212,16 @@ pub fn pass3(
     // Trailing entry so the last segment has an end offset.
     w_gidx.write_all(&(out.geom_points as u32).to_le_bytes())?;
 
-    for w in [&mut w_len as &mut dyn Write, &mut w_attr, &mut w_name, &mut w_edge] {
+    for w in [
+        &mut w_len as &mut dyn Write,
+        &mut w_attr,
+        &mut w_name,
+        &mut w_edge,
+        &mut w_wid,
+        &mut w_whash,
+        &mut w_wtopo,
+        &mut w_whead,
+    ] {
         w.flush()?;
     }
     w_geom.flush()?;

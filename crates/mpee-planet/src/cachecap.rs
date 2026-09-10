@@ -137,3 +137,50 @@ unsafe fn release(addr: usize, len: usize) {
     #[cfg(target_os = "macos")]
     libc::msync(p, len, libc::MS_INVALIDATE);
 }
+
+
+/// Ask the scheduler which kind of core this thread belongs on.
+///
+/// Apple Silicon has no thread affinity — `THREAD_AFFINITY_POLICY` returns
+/// `KERN_NOT_SUPPORTED` — so a program states an *intent* and the kernel picks
+/// the cluster. The three that matter here behave very differently, and the
+/// difference is not a gradient:
+///
+/// - `background` runs on the efficiency cores only, at their low background
+///   clock, and can never be promoted to a performance core even when one is
+///   idle. Measured on this warm-up: 3 rows/s against 114 on the performance
+///   cores.
+/// - `utility` prefers the performance cores and spills to efficiency ones
+///   when they are full — and a spilled thread clocks the efficiency cluster
+///   *up*, to something like two thirds of performance speed. This is what a
+///   long batch job wants: all the machine, without taking the machine.
+/// - `default` is what a foreground process already has.
+///
+/// It has to be set on each worker, because a thread inherits the QoS of
+/// whoever spawned it, and it cannot be set from outside: `taskpolicy -b` can
+/// only demote a running process, never promote it back.
+#[cfg(target_os = "macos")]
+pub fn set_thread_qos(name: &str) -> bool {
+    // From `pthread/qos.h`. Declared here rather than taken from `libc`,
+    // which does not name the constants in every version.
+    const BACKGROUND: u32 = 0x09;
+    const UTILITY: u32 = 0x11;
+    const DEFAULT: u32 = 0x15;
+    const USER_INITIATED: u32 = 0x19;
+    extern "C" {
+        fn pthread_set_qos_class_self_np(class: u32, priority: i32) -> i32;
+    }
+    let class = match name {
+        "background" => BACKGROUND,
+        "utility" => UTILITY,
+        "default" => DEFAULT,
+        "user_initiated" => USER_INITIATED,
+        _ => return false,
+    };
+    unsafe { pthread_set_qos_class_self_np(class, 0) == 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_thread_qos(_name: &str) -> bool {
+    false
+}

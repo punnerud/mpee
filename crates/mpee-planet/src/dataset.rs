@@ -26,6 +26,23 @@ pub struct Dataset {
     rto_exc: &'static [(u32, u32)],
     pub rseg: &'static [u32],
     pub vcoord: &'static [(i32, i32)],
+    /// Each vertex as a point in space, metres from the Earth's centre on a
+    /// sphere of the polar radius.
+    ///
+    /// Optional, and — measured — not worth generating.
+    ///
+    /// It was built to take the trigonometry out of the A* potential, which on
+    /// the planet ran once per settled vertex, 200 000 times a query. It does
+    /// that. It buys nothing: Lisboa-Warszawa runs in 797 ms with this table
+    /// and 799 ms deriving the same numbers from `vcoord`, for 3.24 GB.
+    ///
+    /// What actually cost the time was recomputing the *target's* position
+    /// inside the loop — a value constant for the whole query, evaluated four
+    /// times per settled vertex. Hoisting it out took A* from 37 % slower than
+    /// Dijkstra to 12 % faster. The table is kept because the fallback costs
+    /// one perfectly-predicted branch and the artifact is optional, not because
+    /// it earns its size.
+    pub vxyz: &'static [[f32; 3]],
     pub seg_len: &'static [u32],
     /// Legacy full-width attribute words. Kept so a dataset built before the
     /// dictionary still opens; `attr()` prefers the packed form.
@@ -83,6 +100,7 @@ impl Dataset {
                 rto_exc: map_as(dir, "rto.exc", &mut keep).unwrap_or(&[]),
                 rseg: map_as(dir, "csr.rseg", &mut keep)?,
                 vcoord: map_as(dir, "vcoord.bin", &mut keep)?,
+                vxyz: map_as(dir, "vxyz.bin", &mut keep).unwrap_or(&[]),
                 seg_len: map_as(dir, "seg.len", &mut keep)?,
                 seg_attr: map_as(dir, "seg.attr", &mut keep).unwrap_or(&[]),
                 seg_attr16: map_as(dir, "seg.attr16", &mut keep).unwrap_or(&[]),
@@ -156,6 +174,20 @@ impl Dataset {
     }
 
     #[inline]
+    /// The fastest speed any segment claims, in km/h.
+    ///
+    /// A geometric lower bound on remaining travel time divides by this, so it
+    /// has to be the true maximum or the bound stops being a bound. Read from
+    /// the attribute dictionary, which is a few thousand entries.
+    pub fn max_kmh(&self) -> u16 {
+        let it: Box<dyn Iterator<Item = u32> + '_> = if self.attr_dict.is_empty() {
+            Box::new(self.seg_attr.iter().copied())
+        } else {
+            Box::new(self.attr_dict.iter().copied())
+        };
+        it.map(crate::build::attr_kmh).max().unwrap_or(1).max(1)
+    }
+
     pub fn n_vertices(&self) -> usize {
         self.head.len().saturating_sub(1)
     }
@@ -220,13 +252,28 @@ pub const RUNTIME_ARTIFACTS: &[&str] = &[
     "street.normoff", "city.pool", "city.off", "pc.pool", "pc.off",
     "hn.pool", "hn.off", "place.tab", "toll.vertex", "toll.meta",
     "toll.tariff.tsv", "toll.mpedb",
+    // The way index: which OSM way each segment came from, and what that way
+    // looked like. Only an update needs it, so it is optional.
+    "way.id", "way.hash", "way.head", "way.seg",
+    // Cartesian vertex positions. Derivable from `vcoord`, so optional; only
+    // the A* potential reads it, and only to avoid trigonometry.
+    "vxyz.bin",
     // The overlay is optional: a dataset routes correctly without it, just
     // by touching more pages.
     "cell.of", "cell.bnd", "cell.bhead", "ov.head", "ov.mat", "ov.width", "ov.bounds",
 ];
 
 /// The six arrays one rung of the overlay ladder above level 0 lives in.
-const LEVEL_SUFFIXES: &[&str] = &[".of", ".bnd", ".bhead", ".head", ".mat", ".width"];
+const LEVEL_SUFFIXES: &[&str] = &[
+    ".of", ".bnd", ".bhead", ".head", ".mat", ".width", ".vhead", ".vlist", ".lazy", ".have",
+    ".use",
+];
+
+/// What every rung needs, whichever way it stores its values.
+const LEVEL_SHAPE: &[&str] = &[".of", ".bnd", ".bhead", ".head"];
+/// A rung has its values one way or the other.
+const LEVEL_EAGER: &[&str] = &[".mat", ".width"];
+const LEVEL_LAZY: &[&str] = &[".vhead", ".vlist", ".lazy", ".have"];
 
 /// Rungs above level 0 are named `l2.*`, `l3.*` and so on. They are optional —
 /// without them a query still answers exactly, it just walks every boundary
@@ -322,6 +369,10 @@ pub fn verify(dir: &Path) -> Vec<Problem> {
         // `attr.dict` belongs to the dictionary form and is required only
         // when that form is present.
         let optional = f.starts_with("toll.")
+            || f.starts_with("way.")
+            // Derived entirely from `vcoord.bin`, so a dataset without it is
+            // complete — the A* potential falls back to the trigonometry.
+            || *f == "vxyz.bin"
             || f.starts_with("cell.")
             || f.starts_with("ov.")
             || is_level_artifact(f)
@@ -336,37 +387,51 @@ pub fn verify(dir: &Path) -> Vec<Problem> {
     // ladder must have no gaps. A partial rung would open — the reader
     // tolerates a whole level being absent — and then index a table that is
     // not there; a gap would let a query climb to a level it cannot descend.
+    // A rung stores its values either eagerly or lazily, so "whole" means the
+    // shape plus one complete set of values.
     {
         let mut ended = false;
         for n in 2..=16u32 {
-            let files: Vec<String> =
-                LEVEL_SUFFIXES.iter().map(|x| format!("l{n}{x}")).collect();
-            let present = files.iter().filter(|f| len_of(dir, f).is_some()).count();
-            if present == 0 {
+            let has = |sfx: &[&str]| -> (usize, Vec<String>) {
+                let f: Vec<String> = sfx.iter().map(|x| format!("l{n}{x}")).collect();
+                let missing: Vec<String> =
+                    f.iter().filter(|x| len_of(dir, x).is_none()).cloned().collect();
+                (f.len() - missing.len(), missing)
+            };
+            let (shape_n, shape_missing) = has(LEVEL_SHAPE);
+            let (eager_n, _) = has(LEVEL_EAGER);
+            let (lazy_n, _) = has(LEVEL_LAZY);
+            if shape_n == 0 && eager_n == 0 && lazy_n == 0 {
                 ended = true;
                 continue;
             }
             if ended {
                 problem(
                     &mut out,
-                    &files[0],
+                    &format!("l{n}.of"),
                     format!(
                         "level {n} is present but a level below it is not — a gap \
                          lets a query climb to a level it cannot descend"
                     ),
                 );
             }
-            if present != files.len() {
-                for f in files.iter().filter(|f| len_of(dir, f).is_none()) {
-                    problem(
-                        &mut out,
-                        f,
-                        format!(
-                            "missing, but the rest of level {n} is present — a partial \
-                             level would index a table that is not there"
-                        ),
-                    );
-                }
+            for f in shape_missing {
+                problem(&mut out, &f, format!("missing from level {n}'s shape"));
+            }
+            let eager = eager_n == LEVEL_EAGER.len();
+            let lazy = lazy_n == LEVEL_LAZY.len();
+            if !eager && !lazy {
+                problem(
+                    &mut out,
+                    &format!("l{n}.mat"),
+                    format!(
+                        "level {n} has neither a complete eager table ({eager_n} of {}) \
+                         nor a complete lazy one ({lazy_n} of {}) — a partial level \
+                         would index a table that is not there",
+                        LEVEL_EAGER.len(),
+                        LEVEL_LAZY.len()
+                    ),
+                );
             }
         }
     }

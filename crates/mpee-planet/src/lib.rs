@@ -6,6 +6,7 @@ pub mod cachecap;
 pub mod codecstat;
 pub mod contract;
 pub mod dataset;
+pub mod diff;
 pub mod geo;
 pub mod geocode;
 pub mod graph;

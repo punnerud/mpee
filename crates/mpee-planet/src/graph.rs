@@ -342,6 +342,21 @@ fn renumber_segments(
     }
     debug_assert_eq!(next as usize, nseg);
 
+    // The way index points at segments, and this is where their ids change.
+    // `way.head` addresses runs in the *old* order — segments from one way are
+    // produced consecutively — so writing the permutation as it stands turns
+    // `way.seg[way.head[w] .. way.head[w+1]]` into that way's segments in the
+    // order the rest of the dataset uses. No sort, and nothing else to keep in
+    // step.
+    {
+        let mut ws = mmapvec::create::<u32>(&paths.f("way.seg"), nseg)?;
+        {
+            let out: &mut [u32] = unsafe { mmapvec::as_mut_slice(&mut ws[..]) };
+            out.copy_from_slice(&newid);
+        }
+        ws.flush()?;
+    }
+
     // Permute every per-segment array. `u32` arrays first.
     for name in ["seg.len", "seg.attr", "seg.name", "seg.u", "seg.v"] {
         let src = mmapvec::open(&paths.f(name))?;
