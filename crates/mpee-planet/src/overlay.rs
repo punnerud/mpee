@@ -1530,6 +1530,7 @@ impl Overlay {
     /// search matters: the warm path runs this 16 million times, so a second
     /// copy of it would drift, and a per-row buffer to compare through would
     /// cost an allocation where today there is none.
+    #[allow(clippy::too_many_arguments)]
     fn row_op(
         &self,
         ds: &Dataset,
