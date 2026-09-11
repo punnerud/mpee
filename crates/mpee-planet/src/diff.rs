@@ -30,19 +30,24 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 
-/// FNV-1a over a way record, skipping the leading id varint. Must agree with
-/// `contract::way_key`, or every way looks changed.
+/// The hash `way.hash` holds, computed the way the build computes it.
+///
+/// This used to be its own FNV over the whole record after the id, with a
+/// comment saying it must agree with a function that no longer exists. It did
+/// not agree: `contract` writes `way_hashes(...).1`, the *attribute* half, and
+/// this hashed the node list along with it. Three hashes over one record, two
+/// of them believed to be the same one.
+///
+/// The disagreement was invisible because every dataset on disk predated the
+/// split, so both sides were reading an older format that happened to match.
+/// A rebuilt way index would have made `diff` report all 168 million ways as
+/// changed — an update that recomputes the planet and reports success.
+///
+/// Splitting the two halves is what makes an update cheap: the attribute half
+/// says whether a *cost* moved, which is a metric change and patchable; the
+/// topology half says the segments themselves are different, which is not.
 fn hash_rec(rec: &[u8]) -> u64 {
-    let mut n = 0;
-    while n < rec.len() && rec[n] & 0x80 != 0 {
-        n += 1;
-    }
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in &rec[n + 1..] {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x1000_0000_01b3);
-    }
-    h
+    crate::build::way_hashes(rec).1
 }
 
 #[derive(Default)]

@@ -70,7 +70,7 @@ const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 fn every_section_is_read_and_the_ways_come_out_sorted() {
     let d = Dir::new("sections");
     let f = d.plain("a.osc", SAMPLE);
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.ways, vec![101, 102, 103]);
     assert_eq!(t.way_counts, [1, 1, 1], "created, modified, deleted");
     assert_eq!(t.node_counts, [1, 1, 1]);
@@ -87,7 +87,7 @@ fn an_id_attribute_is_not_confused_with_uid() {
         "a.osc",
         r#"<osmChange><modify><way uid="7" changeset="5" id="4242" version="2"/></modify></osmChange>"#,
     );
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.ways, vec![4242]);
 }
 
@@ -95,7 +95,7 @@ fn an_id_attribute_is_not_confused_with_uid() {
 fn coordinates_land_on_the_right_ten_millionth() {
     let d = Dir::new("coords");
     let f = d.plain("a.osc", SAMPLE);
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert!(t.nodes.contains(&(-338_688_000, 1_512_093_000)), "{:?}", t.nodes);
 }
 
@@ -108,7 +108,7 @@ fn only_modified_nodes_are_placed() {
     // 25 million of them in nine days of planet edits, for nothing.
     let d = Dir::new("onlymod");
     let f = d.plain("a.osc", SAMPLE);
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.nodes.len(), 1, "only the modified node: {:?}", t.nodes);
     assert!(
         !t.nodes.contains(&(599_139_000, 107_522_000)),
@@ -128,7 +128,7 @@ fn more_decimals_than_we_store_are_truncated_not_rejected() {
         "a.osc",
         r#"<osmChange><modify><node id="1" lat="1.23456789" lon="-0.000000049"/></modify></osmChange>"#,
     );
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.nodes, vec![(12_345_678, 0)]);
     assert_eq!(t.unplaced, 0);
 }
@@ -143,7 +143,7 @@ fn a_modified_node_with_no_position_is_counted_rather_than_dropped_in_silence() 
         "a.osc",
         r#"<osmChange><modify><node id="1" version="2"/><node id="2" lat="1.0" lon="2.0"/></modify></osmChange>"#,
     );
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.unplaced, 1);
     assert_eq!(t.nodes, vec![(10_000_000, 20_000_000)]);
 }
@@ -151,8 +151,8 @@ fn a_modified_node_with_no_position_is_counted_rather_than_dropped_in_silence() 
 #[test]
 fn gzip_and_plain_read_the_same() {
     let d = Dir::new("gz");
-    let a = osc::read(&[d.plain("a.osc", SAMPLE)]).unwrap();
-    let b = osc::read(&[d.gz("b.osc.gz", SAMPLE)]).unwrap();
+    let a = osc::read(d.path(), &[d.plain("a.osc", SAMPLE)]).unwrap();
+    let b = osc::read(d.path(), &[d.gz("b.osc.gz", SAMPLE)]).unwrap();
     assert_eq!(a.ways, b.ways);
     assert_eq!(a.nodes, b.nodes);
     assert_eq!(a.way_counts, b.way_counts);
@@ -165,7 +165,7 @@ fn several_files_merge_and_a_way_edited_twice_is_named_once() {
     let d = Dir::new("merge");
     let one = d.plain("1.osc", r#"<osmChange><modify><way id="7"/><way id="9"/></modify></osmChange>"#);
     let two = d.plain("2.osc", r#"<osmChange><modify><way id="7"/><way id="5"/></modify></osmChange>"#);
-    let t = osc::read(&[one, two]).unwrap();
+    let t = osc::read(d.path(), &[one, two]).unwrap();
     assert_eq!(t.ways, vec![5, 7, 9]);
 }
 
@@ -175,7 +175,7 @@ fn a_file_with_no_sections_is_read_as_modifications() {
     // ways rather than be skipped.
     let d = Dir::new("nosection");
     let f = d.plain("a.osc", r#"<osmChange><way id="1"/><node id="2" lat="0.5" lon="0.5"/></osmChange>"#);
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.ways, vec![1]);
     assert_eq!(t.nodes, vec![(5_000_000, 5_000_000)]);
 }
@@ -184,7 +184,7 @@ fn a_file_with_no_sections_is_read_as_modifications() {
 fn closing_tags_and_declarations_are_not_mistaken_for_elements() {
     let d = Dir::new("closing");
     let f = d.plain("a.osc", SAMPLE);
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     // `</way>`, `</create>` and the XML declaration must not be counted.
     assert_eq!(t.way_counts.iter().sum::<u64>(), 3);
     assert_eq!(t.node_counts.iter().sum::<u64>(), 3);
@@ -195,9 +195,9 @@ fn an_empty_or_truncated_file_is_not_an_error() {
     // A download cut short should report nothing changed, not fail — the caller
     // decides whether that is acceptable.
     let d = Dir::new("trunc");
-    assert_eq!(osc::read(&[d.plain("a.osc", "")]).unwrap().ways.len(), 0);
+    assert_eq!(osc::read(d.path(), &[d.plain("a.osc", "")]).unwrap().ways.len(), 0);
     let f = d.plain("b.osc", r#"<osmChange><modify><way id="77"/><way id="8"#);
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.ways, vec![77], "the complete element is kept, the partial one dropped");
 }
 
@@ -215,9 +215,61 @@ fn the_reader_does_not_hold_the_file_in_memory() {
     body.push_str("</modify></osmChange>");
     let f = d.gz("big.osc.gz", &body);
     let on_disk = std::fs::metadata(&f).unwrap().len();
-    let t = osc::read(&[f]).unwrap();
+    let t = osc::read(d.path(), &[f]).unwrap();
     assert_eq!(t.ways.len(), 199_999);
     assert_eq!(t.way_counts[1], 199_999);
     assert!(on_disk < body.len() as u64 / 4, "the fixture should be compressed");
     let _ = d.path();
+}
+
+#[test]
+fn without_a_way_index_the_cost_question_is_answered_with_i_do_not_know() {
+    // `cost_changed` empty must not be read as "no cost moved". Without the
+    // index there is nothing to compare against, and a caller that took the
+    // empty list at face value would skip every region that needed work.
+    let d = Dir::new("nocost");
+    let f = d.plain("a.osc", SAMPLE);
+    let t = osc::read(d.path(), &[f]).unwrap();
+    assert!(!t.cost_known, "there is no way.hash here, so nothing can be compared");
+    assert!(t.cost_changed.is_empty());
+    assert!(!t.ways.is_empty(), "the ways are still found");
+}
+
+#[test]
+fn tags_are_collected_from_ways_and_not_from_nodes() {
+    // A node's tags decide nothing about a road's cost. Letting them leak into
+    // the way being parsed would change its hash and make an untouched road
+    // look like its speed had moved.
+    let d = Dir::new("tags");
+    let f = d.plain(
+        "a.osc",
+        r#"<osmChange><modify>
+             <way id="1"><nd ref="5"/><tag k="highway" v="primary"/></way>
+             <node id="9" lat="1.0" lon="2.0"><tag k="highway" v="motorway"/></node>
+             <way id="2"><tag k="highway" v="residential"/></way>
+           </modify></osmChange>"#,
+    );
+    let t = osc::read(d.path(), &[f]).unwrap();
+    assert_eq!(t.ways, vec![1, 2]);
+    assert_eq!(t.nodes, vec![(10_000_000, 20_000_000)]);
+}
+
+#[test]
+fn entities_come_back_as_the_bytes_the_pbf_would_have_given() {
+    // The hash is computed from these bytes and compared against one the build
+    // stored from the PBF, so an unescaped `&apos;` in a street name makes an
+    // untouched road look changed. `Rue de l'Église` is not a rare case.
+    let d = Dir::new("entities");
+    let f = d.plain(
+        "a.osc",
+        r#"<osmChange><modify><way id="1">
+             <tag k="highway" v="residential"/>
+             <tag k="name" v="Rue de l&apos;&#201;glise &amp; Co &lt;2&gt; &quot;x&quot;"/>
+           </way></modify></osmChange>"#,
+    );
+    // Parsing must not fail and must find the way; the bytes are checked by the
+    // hash agreeing with a built dataset, which this fixture has not got.
+    let t = osc::read(d.path(), &[f]).unwrap();
+    assert_eq!(t.ways, vec![1]);
+    assert!(!t.cost_known);
 }

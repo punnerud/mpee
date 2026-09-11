@@ -250,6 +250,12 @@ pub fn pass3(
             out.dropped_incomplete
         );
     }
+    // Last, after the index is whole: a stamp saying which revision its hashes
+    // are in, so a reader never has to guess.
+    // The way count comes from the index itself rather than a counter, so the
+    // stamp can never disagree with what was written.
+    let n_ways = std::fs::metadata(paths.f("way.id")).map(|m| m.len() / 8).unwrap_or(0);
+    crate::build::write_way_stamp(&paths.f(crate::build::way_fmt_file()), n_ways)?;
     Ok(out)
 }
 

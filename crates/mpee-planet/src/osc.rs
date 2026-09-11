@@ -39,6 +39,32 @@ const DELETE: usize = 2;
 pub struct Touched {
     /// Way ids named by the file, sorted and deduplicated.
     pub ways: Vec<u64>,
+    /// Of those, the ones whose *cost* changed — sorted, a subset of `ways`.
+    ///
+    /// A way can be edited without its cost moving: a corrected name, a new
+    /// sidewalk tag, a `source` field. Only the attribute half decides what a
+    /// table entry costs, and `way.hash` holds exactly that half — the node
+    /// list lives in `way.topo` — so recomputing it from the change file's tags
+    /// and comparing says whether a table could have moved at all.
+    ///
+    /// Empty when the comparison could not be made, which is not the same as
+    /// "nothing changed": see `cost_known`.
+    pub cost_changed: Vec<u64>,
+    /// Whether `cost_changed` was actually computed. False when the live way
+    /// index is missing, and then every caller must fall back to assuming any
+    /// edit could have moved a cost.
+    pub cost_known: bool,
+    /// Ways the change file names that the index has never heard of. Mostly not
+    /// roads at all — the index holds only routable ways, and most OSM edits are
+    /// buildings and landuse — plus anything created since the dataset was built.
+    /// Either way there are no segments here to invalidate.
+    pub unknown: u64,
+    /// Ways in the index whose attribute hash came out the same: edited, but not
+    /// in a way that can move a cost.
+    pub cost_same: u64,
+    /// Ways in the index the change file no longer classifies as routable, so
+    /// there is no hash to compare and they are counted as changed.
+    pub cost_unroutable: u64,
     /// Positions of nodes it *modified*, for the ways it cannot name.
     ///
     /// Only the modified ones. A created node is reachable only through a way
@@ -133,13 +159,102 @@ fn attr<'a>(tag: &'a [u8], name: &str) -> Option<&'a [u8]> {
     None
 }
 
+/// A way and the tags the change file gave it, as raw bytes.
+///
+/// Bytes rather than strings because the hash they feed is computed over the
+/// bytes the PBF would have held, and a lossy conversion would change it.
+type TaggedWay = (u64, Vec<(Vec<u8>, Vec<u8>)>);
+
+/// XML entities, in the five forms a change file actually uses plus numeric.
+///
+/// The bytes have to come out exactly as the PBF would give them, or the hash
+/// computed from them will not match the one the build stored and every way
+/// will look like its cost moved. A street called `Rue de l&apos;Église` is
+/// not a rare case.
+fn unescape(v: &[u8]) -> Vec<u8> {
+    if !v.contains(&b'&') {
+        return v.to_vec();
+    }
+    let mut out = Vec::with_capacity(v.len());
+    let mut i = 0;
+    while i < v.len() {
+        if v[i] != b'&' {
+            out.push(v[i]);
+            i += 1;
+            continue;
+        }
+        let end = match v[i..].iter().position(|&c| c == b';') {
+            Some(e) if e <= 10 => i + e,
+            // No terminator within reach: not an entity, keep the ampersand.
+            _ => {
+                out.push(v[i]);
+                i += 1;
+                continue;
+            }
+        };
+        match &v[i + 1..end] {
+            b"amp" => out.push(b'&'),
+            b"lt" => out.push(b'<'),
+            b"gt" => out.push(b'>'),
+            b"quot" => out.push(b'"'),
+            b"apos" => out.push(b'\''),
+            e if e.first() == Some(&b'#') => {
+                let txt = std::str::from_utf8(&e[1..]).unwrap_or("");
+                let cp = if let Some(hex) = txt.strip_prefix('x').or(txt.strip_prefix('X')) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    txt.parse::<u32>().ok()
+                };
+                match cp.and_then(char::from_u32) {
+                    Some(c) => {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                    }
+                    None => out.extend_from_slice(&v[i..=end]),
+                }
+            }
+            // Something else entirely; keep it verbatim rather than guess.
+            _ => out.extend_from_slice(&v[i..=end]),
+        }
+        i = end + 1;
+    }
+    out
+}
+
+/// The attribute hash of a way as the build would have computed it.
+///
+/// `way.hash` holds the attribute half — packed class, direction, speed, plus
+/// name and ref — and `way.topo` holds the node list. So this says whether an
+/// edit could have moved what a table entry costs, without needing the nodes,
+/// which a change file gives only for the ways it rewrote whole.
+fn cost_hash(id: u64, tags: &[(Vec<u8>, Vec<u8>)]) -> Option<u64> {
+    let pairs: Vec<(&[u8], &[u8])> =
+        tags.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+    let a = crate::profile::classify(pairs.iter().copied(), |_| crate::profile::NO_STR)?;
+    let name = pairs.iter().find(|(k, _)| *k == b"name").map(|(_, v)| *v);
+    let rf = pairs.iter().find(|(k, _)| *k == b"ref").map(|(_, v)| *v);
+    let mut rec = Vec::with_capacity(256);
+    // The node list is not part of the attribute half, so an empty one gives
+    // the same hash as the real one would.
+    crate::build::encode_way(
+        &mut rec,
+        id,
+        crate::build::pack_attr(&a),
+        name.unwrap_or(b""),
+        rf.unwrap_or(b""),
+        &[],
+    );
+    Some(crate::build::way_hashes(&rec).1)
+}
+
 /// Read one or more `.osc` or `.osc.gz` change files.
 ///
 /// Streamed, never held: a 95 MB change file is about 1.5 GB of XML, and the
 /// machine this is built for does not have that to spare. The scanner carries
 /// one tag at a time.
-pub fn read(files: &[std::path::PathBuf]) -> io::Result<Touched> {
+pub fn read(live: &Path, files: &[std::path::PathBuf]) -> io::Result<Touched> {
     let mut t = Touched::default();
+    let mut tagged: Vec<TaggedWay> = Vec::new();
     for f in files {
         let file = std::fs::File::open(f)?;
         let gz = f.extension().is_some_and(|e| e == "gz");
@@ -148,16 +263,56 @@ pub fn read(files: &[std::path::PathBuf]) -> io::Result<Touched> {
         } else {
             Box::new(file)
         };
-        scan(BufReader::with_capacity(1 << 20, rd), &mut t)?;
+        scan(BufReader::with_capacity(1 << 20, rd), &mut t, &mut tagged)?;
     }
     t.ways.sort_unstable();
     t.ways.dedup();
+
+    // Which of those edits could have moved a cost. Without the index this
+    // cannot be answered, and saying so is the point: a caller that assumes
+    // "none changed" because the list is empty would skip real work.
+    if let Ok(m) = mmapvec::open(&live.join("way.hash")) {
+        let whash: &[u64] = unsafe { mmapvec::as_slice(&m[..]) };
+        let idm = mmapvec::open(&live.join("way.id"))?;
+        let wid: &[u64] = unsafe { mmapvec::as_slice(&idm[..]) };
+        // Last edit wins: a way touched on several of the nine days appears
+        // once per file, and only its final state decides what it costs now.
+        // Counting the duplicates as separate ways made `unknown` larger than
+        // the number of ways there were.
+        tagged.sort_by_key(|(id, _)| *id);
+        tagged.dedup_by_key(|(id, _)| *id);
+        for (id, tags) in &tagged {
+            match wid.binary_search(id) {
+                Ok(i) => match cost_hash(*id, tags) {
+                    Some(h) if h == whash[i] => t.cost_same += 1,
+                    // The change file no longer classifies it as routable —
+                    // downgraded to a track, or its highway tag gone. No hash
+                    // to compare, and it has certainly changed.
+                    None => {
+                        t.cost_unroutable += 1;
+                        t.cost_changed.push(*id);
+                    }
+                    Some(_) => t.cost_changed.push(*id),
+                },
+                Err(_) => t.unknown += 1,
+            }
+        }
+        t.cost_changed.sort_unstable();
+        t.cost_changed.dedup();
+        t.cost_known = true;
+    }
     Ok(t)
 }
 
-fn scan<R: BufRead>(mut rd: R, t: &mut Touched) -> io::Result<()> {
+fn scan<R: BufRead>(
+    mut rd: R,
+    t: &mut Touched,
+    tagged: &mut Vec<TaggedWay>,
+) -> io::Result<()> {
     let mut section = MODIFY; // a file without sections is read as a modify
     let mut tag: Vec<u8> = Vec::with_capacity(1 << 12);
+    let mut cur_way: Option<u64> = None;
+    let mut cur_tags: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     loop {
         // Everything outside a tag is whitespace or text we do not want.
         let mut skipped = Vec::new();
@@ -180,8 +335,20 @@ fn scan<R: BufRead>(mut rd: R, t: &mut Touched) -> io::Result<()> {
             return Ok(());
         }
         tag.pop();
-        if tag.first() == Some(&b'/') || tag.first() == Some(&b'?') || tag.first() == Some(&b'!') {
+        if tag.first() == Some(&b'?') || tag.first() == Some(&b'!') {
             continue;
+        }
+        if tag.first() == Some(&b'/') {
+            if tag[1..].starts_with(b"way") {
+                if let Some(id) = cur_way.take() {
+                    tagged.push((id, std::mem::take(&mut cur_tags)));
+                }
+            }
+            continue;
+        }
+        let self_closing = tag.last() == Some(&b'/');
+        if self_closing {
+            tag.pop();
         }
         // The element name, then its attribute text.
         let end = tag.iter().position(|c| c.is_ascii_whitespace()).unwrap_or(tag.len());
@@ -192,9 +359,25 @@ fn scan<R: BufRead>(mut rd: R, t: &mut Touched) -> io::Result<()> {
             b"delete" => section = DELETE,
             b"way" => {
                 t.way_counts[section] += 1;
-                if let Some(id) = attr(rest, "id").and_then(|v| std::str::from_utf8(v).ok()) {
-                    if let Ok(id) = id.trim().parse::<u64>() {
-                        t.ways.push(id);
+                cur_way = attr(rest, "id")
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok());
+                if let Some(id) = cur_way {
+                    t.ways.push(id);
+                }
+                cur_tags.clear();
+                // `<way .../>` closes itself, so there are no tags to wait for.
+                if self_closing {
+                    if let Some(id) = cur_way.take() {
+                        tagged.push((id, std::mem::take(&mut cur_tags)));
+                    }
+                }
+            }
+            b"tag" => {
+                // Only the tags inside a way; a node's tags decide nothing here.
+                if cur_way.is_some() {
+                    if let (Some(k), Some(v)) = (attr(rest, "k"), attr(rest, "v")) {
+                        cur_tags.push((unescape(k), unescape(v)));
                     }
                 }
             }

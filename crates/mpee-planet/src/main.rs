@@ -814,8 +814,11 @@ fn main() -> std::io::Result<()> {
             if files.is_empty() {
                 usage();
             }
+            if let Err(e) = build::check_way_stamp(&live) {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
             let t = std::time::Instant::now();
-            let touched = mpee_planet::osc::read(&files)?;
+            let touched = mpee_planet::osc::read(&live, &files)?;
             println!(
                 "read {} change file(s) in {:.1} s",
                 files.len(),
@@ -837,6 +840,19 @@ fn main() -> std::io::Result<()> {
                 touched.unplaced
             );
 
+            if touched.cost_known {
+                println!(
+                    "  of {} edited ways: {} not in the index, {} unchanged cost, \
+                     {} no longer routable, {} moved a cost",
+                    touched.ways.len(),
+                    touched.unknown,
+                    touched.cost_same,
+                    touched.cost_unroutable,
+                    touched.cost_changed.len()
+                );
+            } else {
+                println!("  no way index — whether a cost moved cannot be told");
+            }
             let ds = Dataset::open(&live)?;
             let ovl = Overlay::open(&live).ok();
             // One budget over everything the refresh maps: the graph, the
@@ -919,12 +935,28 @@ fn main() -> std::io::Result<()> {
                     let rules = db.list().unwrap_or_default();
                     Overrides::resolve(&ds, &rules, db.generation())
                 });
+                // Only the ways whose *cost* moved. A change file names what an
+                // editor touched; `way.hash` says whether that touch could have
+                // moved a table entry. Without the index the question cannot be
+                // answered, and then every edit has to be assumed to count.
+                let work = if touched.cost_known {
+                    let cs = mpee_planet::osc::segments_of(
+                        &live,
+                        &touched.cost_changed,
+                        cap.as_mut(),
+                    )?;
+                    println!("  -> {} of {} segments to examine", cs.len(), segs.len());
+                    cs
+                } else {
+                    println!("  no way index — every edit assumed to move a cost");
+                    segs.clone()
+                };
                 let t4 = std::time::Instant::now();
                 let steps = mpee_planet::diff::propagate(
                     &ds,
                     ovr.as_ref().filter(|o| !o.is_empty()),
                     ov,
-                    &segs,
+                    &work,
                 );
                 let mut rows = 0usize;
                 let mut moved = 0usize;
@@ -1020,6 +1052,11 @@ fn main() -> std::io::Result<()> {
             // The diff's temporaries go beside the dataset but must not collide
             // with the build's: a blob directory belongs to one PBF, and this
             // is deliberately a different one.
+            // Before anything is hashed: the index has to be in a revision whose
+            // way.hash means the same thing this build computes.
+            if let Err(e) = build::check_way_stamp(&live) {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
             let paths = Paths::new(&root.join("diff.tmp"));
             let dir = build::open_dir(&pbf, &paths)?;
             let t = std::time::Instant::now();

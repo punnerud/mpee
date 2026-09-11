@@ -255,6 +255,9 @@ pub const RUNTIME_ARTIFACTS: &[&str] = &[
     // The way index: which OSM way each segment came from, and what that way
     // looked like. Only an update needs it, so it is optional.
     "way.id", "way.hash", "way.head", "way.seg",
+    // Which revision those hashes are in. Optional only so a dataset built
+    // before stamps existed still verifies; an update refuses without it.
+    "way.fmt",
     // Cartesian vertex positions. Derivable from `vcoord`, so optional; only
     // the A* potential reads it, and only to avoid trigonometry.
     "vxyz.bin",
@@ -373,6 +376,7 @@ pub fn verify(dir: &Path) -> Vec<Problem> {
             // Derived entirely from `vcoord.bin`, so a dataset without it is
             // complete — the A* potential falls back to the trigonometry.
             || *f == "vxyz.bin"
+            || *f == "way.fmt"
             || f.starts_with("cell.")
             || f.starts_with("ov.")
             || is_level_artifact(f)

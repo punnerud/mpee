@@ -93,6 +93,66 @@ pub fn encode_way(b: &mut Vec<u8>, id: u64, attr: u32, name: &[u8], rf: &[u8], r
 /// at. A single hash over the whole record says only "something changed", and
 /// would send a corrected speed limit down the same expensive path as a new
 /// motorway.
+/// What `way.hash` and `way.topo` mean, on disk.
+///
+/// Revision 1 was a single FNV over the whole record after the id — one hash
+/// that mixed a way's cost with its shape, so an update could not tell a
+/// renamed street from a re-drawn one. Revision 2 is the split below: the
+/// attribute half in `way.hash`, the node list in `way.topo`.
+///
+/// The split happened in the code before it happened on disk, and for a while
+/// `contract` wrote one thing while `diff` compared another. Nothing noticed,
+/// because every dataset predated the change and both sides were reading the
+/// older format. A rebuild would have made every way look changed. Hence a
+/// stamp: an index whose revision is not this one is refused, not reinterpreted.
+pub const WAY_INDEX_REVISION: u32 = 2;
+
+/// The file recording which revision a way index was written in.
+pub fn way_fmt_file() -> &'static str {
+    "way.fmt"
+}
+
+/// Write the way index's revision stamp. Last, after the index itself.
+pub fn write_way_stamp(path: &std::path::Path, ways: u64) -> std::io::Result<()> {
+    let mut b = Vec::with_capacity(20);
+    b.extend_from_slice(b"MPEEWAY\0");
+    b.extend_from_slice(&WAY_INDEX_REVISION.to_le_bytes());
+    b.extend_from_slice(&ways.to_le_bytes());
+    std::fs::write(path, &b)
+}
+
+/// Check a way index is in the revision this build reads.
+///
+/// A missing stamp means an index written before stamps existed, which is
+/// revision 1 — the one whose hash mixed cost and shape. Saying so is the whole
+/// point: the alternative is a diff that reports every way as changed and an
+/// update that recomputes the planet while reporting success.
+pub fn check_way_stamp(dir: &std::path::Path) -> Result<(), String> {
+    let p = dir.join(way_fmt_file());
+    let Ok(b) = std::fs::read(&p) else {
+        return Err(format!(
+            "{}: no way-index stamp, so it was written before revision {} — its \
+             way.hash mixes a way's cost with its node list and cannot be compared \
+             against one that separates them. Re-run `contract` to rebuild the index.",
+            dir.display(),
+            WAY_INDEX_REVISION
+        ));
+    };
+    if b.len() < 20 || &b[..8] != b"MPEEWAY\0" {
+        return Err(format!("{}: not a way-index stamp", p.display()));
+    }
+    let rev = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+    if rev != WAY_INDEX_REVISION {
+        return Err(format!(
+            "{}: way index is revision {rev}, this build reads revision {} — \
+             re-run `contract`",
+            p.display(),
+            WAY_INDEX_REVISION
+        ));
+    }
+    Ok(())
+}
+
 pub fn way_hashes(rec: &[u8]) -> (u64, u64, u64) {
     fn read_u(b: &[u8], p: &mut usize) -> u64 {
         let (mut v, mut sh) = (0u64, 0u32);
