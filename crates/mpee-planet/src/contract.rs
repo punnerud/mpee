@@ -267,7 +267,7 @@ fn write_edge(w: &mut impl Write, u: u32, v: u32, seg: u32) -> io::Result<()> {
 }
 
 /// Advance `p` past one way record without decoding it.
-fn skip_way(b: &[u8], p: &mut usize) {
+pub fn skip_way(b: &[u8], p: &mut usize) {
     get_u(b, p); // id
     get_u(b, p); // attr
     let l = get_u(b, p) as usize;

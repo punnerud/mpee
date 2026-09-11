@@ -114,6 +114,7 @@ fn usage() -> ! {
   mpee-planet overlay  <dir> [target]               build the region overlay (CRP)
   mpee-planet xyz      <dir>                        write vxyz.bin (Cartesian vertex positions)
   mpee-planet traffic  <dir>                        fold use counters into traffic.bin
+  mpee-planet wayhash  <dir> <ways.bin>             recompute way.hash in the current revision
   mpee-planet osc      <dir> <f.osc.gz>...           refresh from OSM replication diffs
                        [nodes|nodes=N]               also place modified nodes (one snap each)
                        [apply]                       drop the affected rows so they recompute
@@ -1040,6 +1041,80 @@ fn main() -> std::io::Result<()> {
                 }
                 None => println!("  no overlay to invalidate"),
             }
+        }
+        // Recompute `way.hash` in the current revision, from the `ways.bin` a
+        // build left behind, without touching anything else.
+        //
+        // The alternative is re-running `contract`, which rebuilds every segment
+        // and every geometry — hours on a planet, and it would renumber nothing
+        // but would replace the live build and with it a warm overlay that took
+        // two. Only the *meaning* of the hash changed; the ids, the segments and
+        // the offsets are the same bytes they were.
+        //
+        // Refuses unless every record in `ways.bin` lines up with `way.id`, one
+        // for one and in order. That is what makes it safe to take a file from
+        // an older build directory: if it is not the same set of ways, nothing
+        // is written.
+        "wayhash" => {
+            if args.len() < 4 {
+                usage();
+            }
+            use std::io::Write;
+            let live = catalog::resolve(Path::new(&args[2]));
+            let ways_path = PathBuf::from(&args[3]);
+            let wmap = mpee_planet::mmapvec::open(&ways_path)?;
+            let ways: &[u8] = &wmap[..];
+            let idmap = mpee_planet::mmapvec::open(&live.join("way.id"))?;
+            let wid: &[u64] = unsafe { mpee_planet::mmapvec::as_slice(&idmap[..]) };
+            println!(
+                "{} ways in the index, {:.2} GB of records to read",
+                wid.len(),
+                ways.len() as f64 / 1e9
+            );
+
+            let t = std::time::Instant::now();
+            let mut out: Vec<u64> = Vec::with_capacity(wid.len());
+            let mut p = 0usize;
+            let mut n = 0usize;
+            while p < ways.len() {
+                let start = p;
+                mpee_planet::contract::skip_way(ways, &mut p);
+                let (id, attr, _topo) = mpee_planet::build::way_hashes(&ways[start..p]);
+                if n >= wid.len() || wid[n] != id {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "record {n} is way {id} but the index has {} there — this \
+                             ways.bin is not the one the index was built from, and \
+                             nothing has been written",
+                            wid.get(n).copied().unwrap_or(0)
+                        ),
+                    ));
+                }
+                out.push(attr);
+                n += 1;
+            }
+            if n != wid.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{n} records but {} ways in the index", wid.len()),
+                ));
+            }
+            println!("  {n} records matched the index in {:.1} s", t.elapsed().as_secs_f64());
+
+            // Written to a temporary and renamed, so an interrupted run leaves
+            // the old index rather than half a new one.
+            let tmp = live.join("way.hash.new");
+            {
+                let mut w = std::io::BufWriter::with_capacity(1 << 22, std::fs::File::create(&tmp)?);
+                for h in &out {
+                    w.write_all(&h.to_le_bytes())?;
+                }
+                w.flush()?;
+            }
+            std::fs::rename(&tmp, live.join("way.hash"))?;
+            build::write_way_stamp(&live.join(build::way_fmt_file()), n as u64)?;
+            println!("  way.hash rewritten and stamped revision {}", build::WAY_INDEX_REVISION);
         }
         "diff" => {
             if args.len() < 4 {
