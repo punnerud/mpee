@@ -443,6 +443,89 @@ FoR er per *rad* — og `ensure_row` regner nettopp ut en hel rad om gangen.
 
 ---
 
+## Oppdateringen, målt ende til ende — 11. september 2026
+
+Diffen fant at 3,1 % av regionene er berørt, og det høres billig ut. Det er
+det ikke, og grunnen er verdt å skrive ned.
+
+### Å oppdage er billig, å utføre er dyrt
+
+| ledd | kostnad |
+|---|---|
+| 9 dagers endringer, OSM-replikasjon | 960 MB, 60 s |
+| les dem og finn berørte veier | 32 s, **én kjerne, 241 MB** |
+| berørte regioner | 3,1 % på nivå 0 |
+| **rader som må regnes om** | **8 543 176 av 16 189 660 — 52,8 %** |
+| **refyll** | **2 t 17 min** |
+| verifisert etterpå | kostnad og nodetall identiske |
+
+Tre prosent av regionene drar med seg over halve stigen. Refyllen tar lenger
+tid enn den opprinnelige oppvarmingen gjorde, fordi den startet på 25 % fylt
+mens refyllen startet på null på de dyre nivåene.
+
+### Hvorfor: invalideringskornet er grovt der det koster
+
+| nivå | regioner **med porter** | berørt |
+|---:|---:|---:|
+| 0 | 137 507 | 29 % |
+| 1 | 39 632 | 21 % |
+| 2 | 2 608 | **100 %** |
+| 3 | **55** | **100 %** |
+| 4 | **40** | **100 %** |
+
+Over nivå 1 finnes det bare noen titalls regioner med porter, hver av dem
+kontinentstor. Ni dagers globale redigeringer treffer samtlige. «Inkrementell»
+oppdatering er derfor bare inkrementell på nivå 0 og 1 — de billige — og sparer
+ingenting der all tiden ligger.
+
+### Finere korn gjør det verre, målt
+
+Samme endringer mot tre partisjoner:
+
+| partisjon | nivåer | rader totalt | droppet | andel |
+|---|---:|---:|---:|---:|
+| uten agg-tak | 5 | 16 189 660 | 8 543 176 | **52,8 %** |
+| agg=32 | 12 | 22 213 306 | 12 359 960 | 55,6 % |
+| agg=8 | 6 | 26 924 570 | 15 143 614 | 56,2 % |
+
+Andelen er nær konstant, mens radantallet vokser. Endringene er globalt
+spredt, så jo mindre regionene er, jo flere av dem skjærer det samme arealet.
+Aggregeringstaket taper dermed på **alle tre** akser — fylling, spørring og
+oppdatering — og den tredje, som var den eneste uprøvde da det ble forkastet,
+er den klareste taperen.
+
+### Det som kan hjelpe, og hva det krever
+
+Invalideringen er i dag strukturell: berører noe en region, faller alt over
+den. Den burde være **verdibasert** — regn om, sammenlign, og spre bare der et
+tall faktisk flyttet seg. I målingen over var grafen uendret, så en verdibasert
+spredning ville stoppet umiddelbart og spart alle 2 t 17 min.
+
+Tre betingelser må holde før spredningen kan stoppes, og den tredje er den som
+kan gi et stille galt svar:
+
+1. **Radene er uendret.** Den opplagte.
+2. **Snittkantene er uendret.** En fartsendring på en veg *mellom* to regioner
+   flytter nivået overs graf uten å røre en rad. Lett å glemme, usynlig når den
+   er glemt.
+3. **Partisjonen er uendret.** En ny veg kan skape et kryss, en slettet kan
+   dele en region. Da er det strukturen som er utdatert, og ingen
+   verdisammenligning kan se det.
+
+Dagens kode kan ikke gjøre dette: `invalidate` sletter biten før noe regnes, så
+den gamle verdien finnes ikke å sammenligne mot. Rekkefølgen må snus.
+
+**Og den bør bygges med verifisering som del av mekanismen.** Fire stille feil
+ble funnet på ett døgn, alle av samme form — noe som ikke lykkes og heller ikke
+stopper: et layout-stempel som manglet, en tomt-nivå-vakt som bare lå i én av to
+byggeveier, et cache-tak som var lagt på men aldri håndhevet, og et måleskript
+der en mislykket byggekommando lot skriptet måle forrige partisjon tre ganger
+med plausible tall. Et generasjonsnummer per region som *må* stemme er tryggere
+enn en sammenligning man håper ble gjort, og `ovcheck` hører i byggeporten og
+ikke i ettertanken.
+
+---
+
 ## Risikoer, ærlig
 
 - **Snittet skaper porter.** Alle anslag i dag ignorerer det. Fase 1s

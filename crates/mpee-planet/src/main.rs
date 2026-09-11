@@ -116,6 +116,7 @@ fn usage() -> ! {
   mpee-planet traffic  <dir>                        fold use counters into traffic.bin
   mpee-planet osc      <dir> <f.osc.gz>...           refresh from OSM replication diffs
                        [nodes|nodes=N]               also place modified nodes (one snap each)
+                       [apply]                       drop the affected rows so they recompute
   mpee-planet ovcheck  <dir> [pairs]                overlay answers vs the plain router
   mpee-planet tolldb   <dir> [nvdb.json]            build the tariff database (mpedb)
   mpee-planet tollq    <dir> '<SQL>'                ask the tariff database anything
@@ -896,16 +897,59 @@ fn main() -> std::io::Result<()> {
             }
             println!("  {} distinct segments affected", segs.len());
 
+            // `apply` forgets the affected rows so they are computed again from
+            // the graph. Note what that does and does not do: the graph here is
+            // still the old one, because reading a change file does not rebuild
+            // segments. So until that half exists, this measures what an update
+            // costs and proves the forget-and-recompute path is faithful — the
+            // rows come back identical — rather than bringing in new data.
+            let apply = args.iter().any(|a| a == "apply");
             match ovl {
                 Some(ov) => {
                     let per = mpee_planet::diff::regions_of(&ds, &ov, &segs, cap.as_mut());
+                    let mut dropped = 0usize;
                     for (k, set) in per.iter().enumerate() {
                         let tot = ov.level(k).regions().max(1);
+                        let lazy = ov.level(k).is_lazy();
+                        // Counted whether or not it is applied: the row count
+                        // is the size of an update, and a dry run that cannot
+                        // say it is no use for choosing a partition.
+                        let mut rows = 0usize;
+                        for &c in set {
+                            rows += if apply && lazy {
+                                ov.invalidate(k, c)
+                            } else {
+                                ov.level(k).boundary(c).len() * 2
+                            };
+                        }
+                        dropped += rows;
                         println!(
-                            "  level {k}: {} of {} regions to recompute ({:.3} %)",
+                            "  level {k}: {} of {} regions to recompute ({:.3} %){}",
                             set.len(),
                             tot,
-                            100.0 * set.len() as f64 / tot as f64
+                            100.0 * set.len() as f64 / tot as f64,
+                            if !lazy {
+                                "  — eager, needs a rebuild rather than a forget".into()
+                            } else if apply {
+                                format!("  — {rows} rows dropped")
+                            } else {
+                                format!("  — {rows} rows would drop")
+                            }
+                        );
+                    }
+                    if apply {
+                        println!(
+                            "dropped {dropped} cached rows; they will be recomputed on demand \
+                             or by `warm`"
+                        );
+                    } else {
+                        let tot: usize = (0..ov.levels())
+                            .map(|k| ov.level(k).boundary_total() * 2)
+                            .sum();
+                        println!(
+                            "{dropped} of {tot} rows would drop ({:.1} % of the ladder) \
+                             — dry run, pass `apply` to do it",
+                            100.0 * dropped as f64 / tot.max(1) as f64
                         );
                     }
                 }
