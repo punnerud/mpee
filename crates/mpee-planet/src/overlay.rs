@@ -2123,11 +2123,12 @@ impl OverlayRouter {
                 return None;
             }
             self.check_cache();
-            if best != UNREACHABLE && aim[side].is_some() {
-                if d.saturating_add(geo_floor_xyz(ds, u, axyz[side], vmax)) >= best {
-                    self.pruned += 1;
-                    continue;
-                }
+            if best != UNREACHABLE
+                && aim[side].is_some()
+                && d.saturating_add(geo_floor_xyz(ds, u, axyz[side], vmax)) >= best
+            {
+                self.pruned += 1;
+                continue;
             }
             let (lv, lc, li) = choose_level(ov, &home, u);
             let (head, fwd) = if side == 0 { (ds.head, true) } else { (ds.rhead, false) };
@@ -2714,8 +2715,8 @@ fn level_structure(
     let ilist: Vec<u32> = inv.iter().map(|&(_, g)| g).collect();
     drop(inv);
     let mut bstart = vec![0u32; nprev + 1];
-    for c in 0..nprev {
-        bstart[c] = ov.level(below).boundary_start(c as u32) as u32;
+    for (c, b) in bstart.iter_mut().take(nprev).enumerate() {
+        *b = ov.level(below).boundary_start(c as u32) as u32;
     }
     bstart[nprev] = nb_below as u32;
     let gx = GateIndex { bstart, nhead, nlist, ihead, ilist, owner };
@@ -3363,7 +3364,7 @@ pub fn build_level_lazy(
         &paths.f(&fmt_file(k)),
         (st.bhead.len() - 1) as u64,
         nb as u64,
-        st.entries as u64,
+        st.entries,
     )?;
     // One count per member, for the betweenness a cut decision reads. Four
     // bytes per boundary vertex of the level below — 7 MB on the planet's
