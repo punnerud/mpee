@@ -1307,6 +1307,24 @@ pub struct Overlay {
     pub bounds: &'static [(u32, u32)],
 }
 
+/// What recomputing a row found.
+///
+/// The distinction between `Same` and `Changed` is the whole point. An update
+/// that recomputes a region and finds every number where it was has learned
+/// something worth acting on: nothing above that region can have moved because
+/// of it. A structural invalidation throws that away before anyone looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    /// The region has no gates, so there is no row.
+    Empty,
+    /// Was absent; computed and stored.
+    Written,
+    /// Was there, and recomputing gives the same numbers.
+    Same,
+    /// Was there, the numbers have moved, and the new ones are stored.
+    Changed,
+}
+
 impl Overlay {
     /// The mappings behind the region tables. These are the largest arrays in
     /// the dataset and the ones a cache budget mostly governs.
@@ -1484,17 +1502,56 @@ impl Overlay {
         i: usize,
         fwd: bool,
     ) {
+        self.row_op(ds, ovr, k, c, i, fwd, false);
+    }
+
+    /// Recompute a row that is already there and say whether its numbers moved.
+    ///
+    /// Writes the new values when they differ, so the row is correct either way
+    /// — this repairs and reports in one pass rather than inviting a caller to
+    /// forget the repair. An absent row is computed and reported as `Written`,
+    /// which a cascade must treat as "assume it moved": there is nothing to
+    /// compare against.
+    pub fn recheck_row(
+        &self,
+        ds: &Dataset,
+        ovr: Option<&Overrides>,
+        k: usize,
+        c: u32,
+        i: usize,
+        fwd: bool,
+    ) -> Row {
+        self.row_op(ds, ovr, k, c, i, fwd, true)
+    }
+
+    /// One Dijkstra, two destinations for its answer.
+    ///
+    /// `compare` is what separates `ensure_row` from `recheck_row`. Sharing the
+    /// search matters: the warm path runs this 16 million times, so a second
+    /// copy of it would drift, and a per-row buffer to compare through would
+    /// cost an allocation where today there is none.
+    fn row_op(
+        &self,
+        ds: &Dataset,
+        ovr: Option<&Overrides>,
+        k: usize,
+        c: u32,
+        i: usize,
+        fwd: bool,
+        compare: bool,
+    ) -> Row {
         let lvl = &self.levels[k];
-        let Values::Lazy(z) = &lvl.values else { return };
+        let Values::Lazy(z) = &lvl.values else { return Row::Empty };
         let row = lvl.bhead[c as usize] as usize + i;
-        if z.bit(row, fwd) {
-            return;
+        let had = z.bit(row, fwd);
+        if had && !compare {
+            return Row::Same;
         }
         let bnd = lvl.boundary(c);
         let b = bnd.len();
         if b == 0 {
             z.set_bit(row, fwd);
-            return;
+            return Row::Empty;
         }
         let (vs, ve) = (z.vhead[c as usize] as usize, z.vhead[c as usize + 1] as usize);
         let members = &z.vlist[vs..ve];
@@ -1599,10 +1656,31 @@ impl Overlay {
             }
         }
         let p = z.at(lvl.head[c as usize], b, i, fwd);
+        if !had {
+            for (j, &dst) in bnd.iter().enumerate() {
+                z.put(p, j, local(dst).map(|x| dist[x]).unwrap_or(UNREACHABLE));
+            }
+            z.set_bit(row, fwd);
+            return Row::Written;
+        }
+        // The row was there. Compare first, and only write when something
+        // moved — a write that changes nothing still dirties a page, and on a
+        // planet that is gigabytes of needless writeback.
+        let mut moved = false;
+        for (j, &dst) in bnd.iter().enumerate() {
+            let want = local(dst).map(|x| dist[x]).unwrap_or(UNREACHABLE);
+            if z.get(p, j) != want {
+                moved = true;
+                break;
+            }
+        }
+        if !moved {
+            return Row::Same;
+        }
         for (j, &dst) in bnd.iter().enumerate() {
             z.put(p, j, local(dst).map(|x| dist[x]).unwrap_or(UNREACHABLE));
         }
-        z.set_bit(row, fwd);
+        Row::Changed
     }
 
     /// Whether a row is already there. Always true on an eager level.
@@ -3912,6 +3990,17 @@ pub fn split_level(
     std::fs::write(paths.f(&lf[3]), &have)?;
     // The use counter is per member, and the member list changed.
     std::fs::write(paths.f(&use_file(k)), vec![0u8; vlist.len() * 4])?;
+    // And the stamp, because a split changes every number in it: more regions,
+    // more gates, a bigger table. Leaving the old one is not a stale comment,
+    // it is a dataset that refuses to open — which is how this omission was
+    // found, by a split test that could no longer read what it had just
+    // written. A rule that holds on the build paths and not here is not a rule.
+    write_lazy_stamp(
+        &paths.f(&fmt_file(k)),
+        (bhead.len() - 1) as u64,
+        blist.len() as u64,
+        acc,
+    )?;
 
     // 7. And every level above, whose members are the boundary that just moved.
     //    Same rule for keeping rows: a region whose boundary is unchanged keeps
@@ -3980,6 +4069,12 @@ pub fn split_level(
         }
         std::fs::write(paths.f(&ulf[3]), &uhave)?;
         std::fs::write(paths.f(&use_file(l)), vec![0u8; uvlist.len() * 4])?;
+        write_lazy_stamp(
+            &paths.f(&fmt_file(l)),
+            (ubhead.len() - 1) as u64,
+            ublist.len() as u64,
+            uacc,
+        )?;
     }
 
     Ok(SplitStats {

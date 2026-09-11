@@ -22,9 +22,10 @@
 use crate::build::{encode_way, pack_attr, Dir, Paths};
 use crate::dataset::Dataset;
 use crate::mmapvec;
-use crate::overlay::Overlay;
+use crate::overlay::{Overlay, Row};
 use crate::parallel::scan_blobs;
 use crate::profile;
+use rayon::prelude::*;
 use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
@@ -216,4 +217,153 @@ pub fn regions_of(
         }
     }
     per_level
+}
+
+/// One level's share of a value-based update.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Step {
+    pub level: usize,
+    /// Regions examined at this level.
+    pub regions: usize,
+    /// Of those, the ones where at least one number moved.
+    pub changed: usize,
+    /// Rows recomputed.
+    pub rows: usize,
+    /// Rows whose numbers moved.
+    pub moved: usize,
+    /// True when the level stores its values eagerly and cannot be checked this
+    /// way, so every region of it is treated as changed.
+    pub eager: bool,
+}
+
+/// Carry an update up the ladder by measured change rather than by containment.
+///
+/// The structural alternative — forget every region above anything that was
+/// touched — costs 52.8 % of the planet's ladder for nine days of edits, and
+/// most of that is regions whose numbers did not move at all. Above rung 1
+/// there are only tens of regions, each continental, so *any* edit invalidates
+/// all of them.
+///
+/// This recomputes instead, compares, and carries upward only what actually
+/// changed. Two things feed the next level's work, and the second is the one
+/// that is easy to forget:
+///
+/// 1. The parents of regions whose table entries moved.
+/// 2. The regions holding a **cut edge** whose cost changed. A level's graph is
+///    its tables *plus* the real edges between its regions, so a changed speed
+///    limit on a road between two regions moves the level above without
+///    touching a single table entry. Leaving this out gives exactly the silent
+///    staleness the whole scheme is supposed to avoid.
+///
+/// # What this is sound for
+///
+/// Metric changes — costs, closures, speed limits — which is what CRP separates
+/// out and what `Overrides` applies. It is **not** sound across a topology
+/// change: a new or deleted way alters which segments exist and can alter the
+/// partition itself, and no comparison of values can see that. Such a change
+/// needs the graph rebuilt, and then nothing here transfers.
+pub fn propagate(
+    ds: &Dataset,
+    ovr: Option<&crate::overrides::Overrides>,
+    ov: &Overlay,
+    segments: &[u32],
+) -> Vec<Step> {
+    let endpoints = |s: u32| -> Option<(u32, u32)> {
+        let i = s as usize;
+        if i >= ds.seg_u.len() {
+            return None;
+        }
+        let (u, v) = (ds.seg_u[i], ds.seg_v[i]);
+        if u as usize >= ds.n_vertices() || v as usize >= ds.n_vertices() {
+            return None;
+        }
+        Some((u, v))
+    };
+
+    // Level 0's work: the regions holding an end of a changed segment.
+    let mut seed: BTreeSet<u32> = BTreeSet::new();
+    for &s in segments {
+        if let Some((u, v)) = endpoints(s) {
+            seed.insert(ov.cell(u));
+            seed.insert(ov.cell(v));
+        }
+    }
+
+    let mut out = Vec::new();
+    for k in 0..ov.levels() {
+        let eager = !ov.level(k).is_lazy();
+        let mut step = Step { level: k, regions: seed.len(), eager, ..Default::default() };
+        let changed: BTreeSet<u32> = if eager {
+            // Its values live in a packed table whose per-region width was
+            // chosen from numbers that are about to move, so it needs
+            // rebuilding rather than checking. Assume every region changed.
+            seed.iter().copied().collect()
+        } else {
+            // In parallel over regions. Each row is an independent restricted
+            // search and writes only its own bytes, which is the same property
+            // the warm relies on. Left sequential this was a tenth the speed of
+            // the thing it is meant to be cheaper than, which made the whole
+            // comparison meaningless.
+            let work: Vec<u32> = seed.iter().copied().collect();
+            let found: Vec<(u32, bool, usize, usize)> = work
+                .par_iter()
+                .map(|&c| {
+                    let b = ov.level(k).boundary(c).len();
+                    let (mut rows, mut moved, mut any) = (0usize, 0usize, false);
+                    for i in 0..b {
+                        for fwd in [true, false] {
+                            rows += 1;
+                            match ov.recheck_row(ds, ovr, k, c, i, fwd) {
+                                // Absent counts as moved: there is nothing to
+                                // compare against, so assuming it held still
+                                // would be a guess.
+                                Row::Changed | Row::Written => {
+                                    moved += 1;
+                                    any = true;
+                                }
+                                Row::Same | Row::Empty => {}
+                            }
+                        }
+                    }
+                    (c, any, rows, moved)
+                })
+                .collect();
+            let mut ch = BTreeSet::new();
+            for (c, any, rows, moved) in found {
+                step.rows += rows;
+                step.moved += moved;
+                if any {
+                    ch.insert(c);
+                }
+            }
+            ch
+        };
+        step.changed = changed.len();
+        out.push(step);
+
+        if k + 1 >= ov.levels() {
+            break;
+        }
+        let mut next: BTreeSet<u32> = BTreeSet::new();
+        for &c in &changed {
+            next.insert(ov.level(k + 1).parent(c));
+        }
+        // Condition 2: cut edges. Cheap to test — a segment crosses a level-k
+        // boundary when its ends sit in different level-k regions — and the
+        // cost of forgetting it is a stale table nobody notices.
+        for &s in segments {
+            if let Some((u, v)) = endpoints(s) {
+                let (cu, cv) = (ov.cell_at(k, u), ov.cell_at(k, v));
+                if cu != cv {
+                    next.insert(ov.level(k + 1).parent(cu));
+                    next.insert(ov.level(k + 1).parent(cv));
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        seed = next;
+    }
+    out
 }

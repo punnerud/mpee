@@ -117,6 +117,7 @@ fn usage() -> ! {
   mpee-planet osc      <dir> <f.osc.gz>...           refresh from OSM replication diffs
                        [nodes|nodes=N]               also place modified nodes (one snap each)
                        [apply]                       drop the affected rows so they recompute
+                       [values]                      recompute and climb only where numbers moved
   mpee-planet ovcheck  <dir> [pairs]                overlay answers vs the plain router
   mpee-planet tolldb   <dir> [nvdb.json]            build the tariff database (mpedb)
   mpee-planet tollq    <dir> '<SQL>'                ask the tariff database anything
@@ -904,6 +905,58 @@ fn main() -> std::io::Result<()> {
             // costs and proves the forget-and-recompute path is faithful — the
             // rows come back identical — rather than bringing in new data.
             let apply = args.iter().any(|a| a == "apply");
+            // `values` carries the update up by measured change instead of by
+            // containment: recompute the affected regions, compare, and climb
+            // only where a number actually moved. Sound for metric changes,
+            // which is what this path sees; a topology change needs the graph
+            // rebuilt and then nothing here transfers. See `diff::propagate`.
+            if args.iter().any(|a| a == "values") {
+                let Some(ov) = ovl.as_ref() else {
+                    println!("  no overlay to update");
+                    return Ok(());
+                };
+                let ovr = OverrideDb::open(&root).ok().map(|db| {
+                    let rules = db.list().unwrap_or_default();
+                    Overrides::resolve(&ds, &rules, db.generation())
+                });
+                let t4 = std::time::Instant::now();
+                let steps = mpee_planet::diff::propagate(
+                    &ds,
+                    ovr.as_ref().filter(|o| !o.is_empty()),
+                    ov,
+                    &segs,
+                );
+                let mut rows = 0usize;
+                let mut moved = 0usize;
+                for st in &steps {
+                    rows += st.rows;
+                    moved += st.moved;
+                    println!(
+                        "  level {}: {} regions examined, {} moved, {} of {} rows changed{}",
+                        st.level,
+                        st.regions,
+                        st.changed,
+                        st.moved,
+                        st.rows,
+                        if st.eager { "  — eager, assumed changed" } else { "" }
+                    );
+                }
+                let tot: usize =
+                    (0..ov.levels()).map(|k| ov.level(k).boundary_total() * 2).sum();
+                println!(
+                    "{rows} rows recomputed, {moved} moved, of {tot} in the ladder \
+                     ({:.2} % recomputed) in {:.1} s",
+                    100.0 * rows as f64 / tot.max(1) as f64,
+                    t4.elapsed().as_secs_f64()
+                );
+                if steps.len() < ov.levels() {
+                    println!(
+                        "  the climb stopped after level {} — nothing above it could move",
+                        steps.len() - 1
+                    );
+                }
+                return Ok(());
+            }
             match ovl {
                 Some(ov) => {
                     let per = mpee_planet::diff::regions_of(&ds, &ov, &segs, cap.as_mut());
