@@ -11,6 +11,7 @@ pub mod geo;
 pub mod geocode;
 pub mod graph;
 pub mod mmapvec;
+pub mod osc;
 pub mod overlay;
 pub mod overrides;
 pub mod parallel;

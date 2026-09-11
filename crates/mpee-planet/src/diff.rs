@@ -180,9 +180,25 @@ pub fn compare(live: &Path, paths: &Paths) -> io::Result<Changes> {
 /// a walk up the ladder rather than a search. That is what bounds the work an
 /// update causes: a closed motorway touches a few regions at level 0 and one
 /// above each of them, never a cascade.
-pub fn regions_of(ds: &Dataset, ov: &Overlay, segments: &[u32]) -> Vec<BTreeSet<u32>> {
+/// `cap` is the same budget the caller used for everything else, and it has to
+/// be enforced *here* as well as during the join. Measured without it: the join
+/// held 192-373 MB under a 256 MB cap, and then this walk took the process to
+/// 1.6 GB in three seconds. It reads `seg_u`, `seg_v` and `cell.of` — over 3 GB
+/// between them — and a governed mapping that nothing enforces is just a
+/// mapping.
+pub fn regions_of(
+    ds: &Dataset,
+    ov: &Overlay,
+    segments: &[u32],
+    mut cap: Option<&mut crate::cachecap::CacheCap>,
+) -> Vec<BTreeSet<u32>> {
     let mut per_level: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); ov.levels()];
-    for &s in segments {
+    for (n, &s) in segments.iter().enumerate() {
+        if n % 65_536 == 0 {
+            if let Some(c) = cap.as_deref_mut() {
+                c.enforce();
+            }
+        }
         if s as usize >= ds.seg_u.len() {
             continue;
         }

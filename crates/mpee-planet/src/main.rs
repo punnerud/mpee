@@ -114,6 +114,8 @@ fn usage() -> ! {
   mpee-planet overlay  <dir> [target]               build the region overlay (CRP)
   mpee-planet xyz      <dir>                        write vxyz.bin (Cartesian vertex positions)
   mpee-planet traffic  <dir>                        fold use counters into traffic.bin
+  mpee-planet osc      <dir> <f.osc.gz>...           refresh from OSM replication diffs
+                       [nodes|nodes=N]               also place modified nodes (one snap each)
   mpee-planet ovcheck  <dir> [pairs]                overlay answers vs the plain router
   mpee-planet tolldb   <dir> [nvdb.json]            build the tariff database (mpedb)
   mpee-planet tollq    <dir> '<SQL>'                ask the tariff database anything
@@ -793,6 +795,123 @@ fn main() -> std::io::Result<()> {
         }
         // What changed since we built, and what that costs to fix.
         // `diff <dataset> <new.osm.pbf> [apply]`
+        // The cheap refresh path: OSM's replication diffs instead of a planet
+        // file. Four days of edits are four 95 MB files against 94.7 GB, and
+        // they name the ids that changed rather than making us derive them.
+        "osc" => {
+            if args.len() < 4 {
+                usage();
+            }
+            let root = PathBuf::from(&args[2]);
+            let live = catalog::resolve(&root);
+            let files: Vec<PathBuf> = args[3..]
+                .iter()
+                .filter(|a| a.ends_with(".osc") || a.ends_with(".osc.gz"))
+                .map(PathBuf::from)
+                .collect();
+            if files.is_empty() {
+                usage();
+            }
+            let t = std::time::Instant::now();
+            let touched = mpee_planet::osc::read(&files)?;
+            println!(
+                "read {} change file(s) in {:.1} s",
+                files.len(),
+                t.elapsed().as_secs_f64()
+            );
+            println!(
+                "  ways   created {} modified {} deleted {}  ({} distinct)",
+                touched.way_counts[0],
+                touched.way_counts[1],
+                touched.way_counts[2],
+                touched.ways.len()
+            );
+            println!(
+                "  nodes  created {} modified {} deleted {}  ({} placed, {} without a position)",
+                touched.node_counts[0],
+                touched.node_counts[1],
+                touched.node_counts[2],
+                touched.nodes.len(),
+                touched.unplaced
+            );
+
+            let ds = Dataset::open(&live)?;
+            let ovl = Overlay::open(&live).ok();
+            // One budget over everything the refresh maps: the graph, the
+            // overlay, and the way index. Without it the kernel keeps the
+            // 1.34 GB of way ids the join reads, which is fine here and fatal
+            // on the machine this is for.
+            let mut cap = std::env::var("MPEE_CACHE_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|mb| {
+                    let mut c = cachecap::CacheCap::new(mb * 1_000_000);
+                    c.govern(ds.maps());
+                    if let Some(o) = ovl.as_ref() {
+                        c.govern(o.maps());
+                    }
+                    c
+                });
+            let t2 = std::time::Instant::now();
+            let by_way = mpee_planet::osc::segments_of(&live, &touched.ways, cap.as_mut())?;
+            println!(
+                "  {} segments from {} ways in {:.1} s",
+                by_way.len(),
+                touched.ways.len(),
+                t2.elapsed().as_secs_f64()
+            );
+            let mut segs = by_way.clone();
+
+            // The node path is opt-in. A way edit names its segments outright;
+            // a node that moved has to be found geographically, because
+            // `way.topo` hashes a way's node list rather than keeping it. That
+            // is one snap per node, and nine days of planet edits hold 4.8
+            // million modified nodes — minutes of work for the last few tenths
+            // of a percent. `nodes` asks for it, `nodes=N` samples N of them.
+            let want = args.iter().find(|a| a.starts_with("nodes"));
+            if let Some(w) = want {
+                let limit: usize = w
+                    .split_once('=')
+                    .and_then(|(_, v)| v.parse().ok())
+                    .unwrap_or(usize::MAX);
+                let t3 = std::time::Instant::now();
+                let (by_node, looked) =
+                    mpee_planet::osc::segments_near(&ds, &touched.nodes, 30.0, limit);
+                println!(
+                    "  {} segments from {} of {} modified nodes in {:.1} s",
+                    by_node.len(),
+                    looked,
+                    touched.nodes.len(),
+                    t3.elapsed().as_secs_f64()
+                );
+                segs.extend_from_slice(&by_node);
+                segs.sort_unstable();
+                segs.dedup();
+            } else if !touched.nodes.is_empty() {
+                println!(
+                    "  {} modified nodes not placed — pass `nodes` to snap them, \
+                     and see the note in osc.rs for what that misses",
+                    touched.nodes.len()
+                );
+            }
+            println!("  {} distinct segments affected", segs.len());
+
+            match ovl {
+                Some(ov) => {
+                    let per = mpee_planet::diff::regions_of(&ds, &ov, &segs, cap.as_mut());
+                    for (k, set) in per.iter().enumerate() {
+                        let tot = ov.level(k).regions().max(1);
+                        println!(
+                            "  level {k}: {} of {} regions to recompute ({:.3} %)",
+                            set.len(),
+                            tot,
+                            100.0 * set.len() as f64 / tot as f64
+                        );
+                    }
+                }
+                None => println!("  no overlay to invalidate"),
+            }
+        }
         "diff" => {
             if args.len() < 4 {
                 usage();
@@ -822,7 +941,19 @@ fn main() -> std::io::Result<()> {
             }
             let ds = Dataset::open(&live)?;
             let ov = Overlay::open(&live)?;
-            let per = mpee_planet::diff::regions_of(&ds, &ov, &ch.segments);
+            // Same budget as the `osc` path, and for the same reason: the walk
+            // reads `seg_u`, `seg_v` and `cell.of`, which is over 3 GB between
+            // them on the planet.
+            let mut cap = std::env::var("MPEE_CACHE_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|mb| {
+                    let mut c = cachecap::CacheCap::new(mb * 1_000_000);
+                    c.govern(ds.maps());
+                    c.govern(ov.maps());
+                    c
+                });
+            let per = mpee_planet::diff::regions_of(&ds, &ov, &ch.segments, cap.as_mut());
             let mut dropped = 0usize;
             for (k, set) in per.iter().enumerate() {
                 let lazy = ov.level(k).is_lazy();
