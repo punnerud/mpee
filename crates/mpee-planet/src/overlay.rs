@@ -1684,6 +1684,56 @@ impl Overlay {
         Row::Changed
     }
 
+    /// A hash of everything a level-0 region's rows are computed *from*.
+    ///
+    /// A row is a deterministic function of the region's internal graph: which
+    /// members there are, which edges run between them, and what those edges
+    /// cost. Same inputs, same row. So an update that finds this unchanged has
+    /// proved the rows cannot have moved — without computing one.
+    ///
+    /// That is the difference between asking and answering. Recomputing a
+    /// region to see whether it changed costs `b` restricted searches; hashing
+    /// its inputs costs one pass over its edges, which on the planet's first
+    /// rung is about 47 times less. Nine days of edits recomputed 3 056 304
+    /// level-0 rows to discover that none of them moved.
+    ///
+    /// Only edges whose far end is also a member are folded in. An edge leaving
+    /// the region is not part of what the row is computed from — the search
+    /// ignores it — so including it would make the hash differ over changes the
+    /// rows cannot feel, which is safe but wasteful.
+    ///
+    /// Level 0 only. Above it, a region's inputs are the tables below, and
+    /// whether *those* moved is what the cascade already establishes.
+    pub fn input_hash(&self, ds: &Dataset, ovr: Option<&Overrides>, c: u32) -> u64 {
+        let Values::Lazy(z) = &self.levels[0].values else { return 0 };
+        let (vs, ve) = (z.vhead[c as usize] as usize, z.vhead[c as usize + 1] as usize);
+        let members = &z.vlist[vs..ve];
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fold = |x: u64| {
+            for b in x.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+        };
+        fold(members.len() as u64);
+        for &u in members {
+            let (a, e) = (ds.head[u as usize] as usize, ds.head[u as usize + 1] as usize);
+            for j in a..e {
+                let v = ds.target(u, j);
+                if members.binary_search(&v).is_err() {
+                    continue;
+                }
+                let sid = (ds.eseg[j] & SEG_MASK) as usize;
+                // A closed edge folds in as a value no duration can take, so
+                // closing a road and making it infinitely slow are not the same
+                // input.
+                fold(v as u64);
+                fold(edge_ds_ov(ds, ovr, sid).map(|w| w as u64).unwrap_or(u64::MAX));
+            }
+        }
+        h
+    }
+
     /// Whether a row is already there. Always true on an eager level.
     #[inline]
     pub fn row_present(&self, k: usize, c: u32, i: usize, fwd: bool) -> bool {

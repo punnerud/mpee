@@ -239,6 +239,9 @@ pub struct Step {
     /// True when the level stores its values eagerly and cannot be checked this
     /// way, so every region of it is treated as changed.
     pub eager: bool,
+    /// Regions whose inputs hashed the same, so their rows were not computed
+    /// at all. Level 0 only.
+    pub skipped: usize,
 }
 
 /// Carry an update up the ladder by measured change rather than by containment.
@@ -267,11 +270,17 @@ pub struct Step {
 /// change: a new or deleted way alters which segments exist and can alter the
 /// partition itself, and no comparison of values can see that. Such a change
 /// needs the graph rebuilt, and then nothing here transfers.
+/// The file holding one input hash per level-0 region.
+pub fn inhash_file() -> &'static str {
+    "ov.inhash"
+}
+
 pub fn propagate(
     ds: &Dataset,
     ovr: Option<&crate::overrides::Overrides>,
     ov: &Overlay,
     segments: &[u32],
+    mut inhash: Option<&mut [u64]>,
 ) -> Vec<Step> {
     let endpoints = |s: u32| -> Option<(u32, u32)> {
         let i = s as usize;
@@ -309,7 +318,31 @@ pub fn propagate(
             // the warm relies on. Left sequential this was a tenth the speed of
             // the thing it is meant to be cheaper than, which made the whole
             // comparison meaningless.
-            let work: Vec<u32> = seed.iter().copied().collect();
+            // Level 0 first asks the cheap question. A region whose inputs
+            // hash the same cannot have moved, and skipping it skips `b`
+            // restricted searches for the price of one pass over its edges.
+            // A zero means "not recorded yet" — the first update after this
+            // file appears pays in full, every later one does not.
+            let mut work: Vec<u32> = seed.iter().copied().collect();
+            if k == 0 {
+                if let Some(h) = inhash.as_deref_mut() {
+                    let live: Vec<(u32, u64)> = work
+                        .par_iter()
+                        .map(|&c| (c, ov.input_hash(ds, ovr, c)))
+                        .collect();
+                    let mut keep = Vec::with_capacity(live.len());
+                    for (c, now) in live {
+                        let slot = &mut h[c as usize];
+                        if *slot != 0 && *slot == now {
+                            step.skipped += 1;
+                        } else {
+                            *slot = now;
+                            keep.push(c);
+                        }
+                    }
+                    work = keep;
+                }
+            }
             let found: Vec<(u32, bool, usize, usize)> = work
                 .par_iter()
                 .map(|&c| {

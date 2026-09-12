@@ -163,7 +163,7 @@ fn attr<'a>(tag: &'a [u8], name: &str) -> Option<&'a [u8]> {
 ///
 /// Bytes rather than strings because the hash they feed is computed over the
 /// bytes the PBF would have held, and a lossy conversion would change it.
-type TaggedWay = (u64, Vec<(Vec<u8>, Vec<u8>)>);
+type TaggedWay = (u64, Vec<(Vec<u8>, Vec<u8>)>, Vec<i64>);
 
 /// XML entities, in the five forms a change file actually uses plus numeric.
 ///
@@ -227,6 +227,24 @@ fn unescape(v: &[u8]) -> Vec<u8> {
 /// name and ref — and `way.topo` holds the node list. So this says whether an
 /// edit could have moved what a table entry costs, without needing the nodes,
 /// which a change file gives only for the ways it rewrote whole.
+/// The packed attribute and both hashes, as the build would have them.
+pub fn way_state(
+    id: u64,
+    tags: &[(Vec<u8>, Vec<u8>)],
+    refs: &[i64],
+) -> Option<(u32, u64, u64)> {
+    let pairs: Vec<(&[u8], &[u8])> =
+        tags.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+    let a = crate::profile::classify(pairs.iter().copied(), |_| crate::profile::NO_STR)?;
+    let name = pairs.iter().find(|(k, _)| *k == b"name").map(|(_, v)| *v);
+    let rf = pairs.iter().find(|(k, _)| *k == b"ref").map(|(_, v)| *v);
+    let packed = crate::build::pack_attr(&a);
+    let mut rec = Vec::with_capacity(256);
+    crate::build::encode_way(&mut rec, id, packed, name.unwrap_or(b""), rf.unwrap_or(b""), refs);
+    let (_, attr, topo) = crate::build::way_hashes(&rec);
+    Some((packed, attr, topo))
+}
+
 fn cost_hash(id: u64, tags: &[(Vec<u8>, Vec<u8>)]) -> Option<u64> {
     let pairs: Vec<(&[u8], &[u8])> =
         tags.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
@@ -279,9 +297,9 @@ pub fn read(live: &Path, files: &[std::path::PathBuf]) -> io::Result<Touched> {
         // once per file, and only its final state decides what it costs now.
         // Counting the duplicates as separate ways made `unknown` larger than
         // the number of ways there were.
-        tagged.sort_by_key(|(id, _)| *id);
-        tagged.dedup_by_key(|(id, _)| *id);
-        for (id, tags) in &tagged {
+        tagged.sort_by_key(|(id, _, _)| *id);
+        tagged.dedup_by_key(|(id, _, _)| *id);
+        for (id, tags, _) in &tagged {
             match wid.binary_search(id) {
                 Ok(i) => match cost_hash(*id, tags) {
                     Some(h) if h == whash[i] => t.cost_same += 1,
@@ -313,6 +331,7 @@ fn scan<R: BufRead>(
     let mut tag: Vec<u8> = Vec::with_capacity(1 << 12);
     let mut cur_way: Option<u64> = None;
     let mut cur_tags: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut cur_refs: Vec<i64> = Vec::new();
     loop {
         // Everything outside a tag is whitespace or text we do not want.
         let mut skipped = Vec::new();
@@ -341,7 +360,11 @@ fn scan<R: BufRead>(
         if tag.first() == Some(&b'/') {
             if tag[1..].starts_with(b"way") {
                 if let Some(id) = cur_way.take() {
-                    tagged.push((id, std::mem::take(&mut cur_tags)));
+                    tagged.push((
+                        id,
+                        std::mem::take(&mut cur_tags),
+                        std::mem::take(&mut cur_refs),
+                    ));
                 }
             }
             continue;
@@ -366,10 +389,25 @@ fn scan<R: BufRead>(
                     t.ways.push(id);
                 }
                 cur_tags.clear();
-                // `<way .../>` closes itself, so there are no tags to wait for.
+                cur_refs.clear();
+                // `<way .../>` closes itself, so there are no children to wait for.
                 if self_closing {
                     if let Some(id) = cur_way.take() {
-                        tagged.push((id, std::mem::take(&mut cur_tags)));
+                        tagged.push((
+                            id,
+                            std::mem::take(&mut cur_tags),
+                            std::mem::take(&mut cur_refs),
+                        ));
+                    }
+                }
+            }
+            b"nd" => {
+                if cur_way.is_some() {
+                    if let Some(r) = attr(rest, "ref")
+                        .and_then(|v| std::str::from_utf8(v).ok())
+                        .and_then(|v| v.trim().parse::<i64>().ok())
+                    {
+                        cur_refs.push(r);
                     }
                 }
             }

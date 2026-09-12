@@ -952,22 +952,42 @@ fn main() -> std::io::Result<()> {
                     println!("  no way index — every edit assumed to move a cost");
                     segs.clone()
                 };
+                // One input hash per level-0 region, created on first use. The
+                // file is the memory that lets a later update skip a region
+                // instead of proving it unchanged the expensive way.
+                let nreg = ov.level(0).regions();
+                let hpath = live.join(mpee_planet::diff::inhash_file());
+                if std::fs::metadata(&hpath).map(|m| m.len()).unwrap_or(0) != (nreg * 8) as u64 {
+                    std::fs::File::create(&hpath)?.set_len((nreg * 8) as u64)?;
+                    println!("  {} input hashes to record (first run)", nreg);
+                }
+                let hfile =
+                    std::fs::OpenOptions::new().read(true).write(true).open(&hpath)?;
+                let mut hmap = unsafe { memmap2::MmapOptions::new().map_mut(&hfile)? };
+                let hashes: &mut [u64] = unsafe {
+                    std::slice::from_raw_parts_mut(hmap.as_mut_ptr() as *mut u64, nreg)
+                };
+
                 let t4 = std::time::Instant::now();
                 let steps = mpee_planet::diff::propagate(
                     &ds,
                     ovr.as_ref().filter(|o| !o.is_empty()),
                     ov,
                     &work,
+                    Some(hashes),
                 );
+                hmap.flush()?;
                 let mut rows = 0usize;
                 let mut moved = 0usize;
                 for st in &steps {
                     rows += st.rows;
                     moved += st.moved;
                     println!(
-                        "  level {}: {} regions examined, {} moved, {} of {} rows changed{}",
+                        "  level {}: {} regions seeded, {} skipped on unchanged inputs, \
+                         {} moved, {} of {} rows changed{}",
                         st.level,
                         st.regions,
+                        st.skipped,
                         st.changed,
                         st.moved,
                         st.rows,
@@ -1074,12 +1094,18 @@ fn main() -> std::io::Result<()> {
 
             let t = std::time::Instant::now();
             let mut out: Vec<u64> = Vec::with_capacity(wid.len());
+            // The topology half too. It is what says an edit only changed a
+            // cost — the node list untouched, so the segments are still the
+            // same segments — which is the difference between patching a
+            // dataset in place and rebuilding it.
+            let mut topo: Vec<u64> = Vec::with_capacity(wid.len());
             let mut p = 0usize;
             let mut n = 0usize;
             while p < ways.len() {
                 let start = p;
                 mpee_planet::contract::skip_way(ways, &mut p);
-                let (id, attr, _topo) = mpee_planet::build::way_hashes(&ways[start..p]);
+                let (id, attr, wtopo) = mpee_planet::build::way_hashes(&ways[start..p]);
+                topo.push(wtopo);
                 if n >= wid.len() || wid[n] != id {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -1113,8 +1139,17 @@ fn main() -> std::io::Result<()> {
                 w.flush()?;
             }
             std::fs::rename(&tmp, live.join("way.hash"))?;
+            let tmp = live.join("way.topo.new");
+            {
+                let mut w = std::io::BufWriter::with_capacity(1 << 22, std::fs::File::create(&tmp)?);
+                for h in &topo {
+                    w.write_all(&h.to_le_bytes())?;
+                }
+                w.flush()?;
+            }
+            std::fs::rename(&tmp, live.join("way.topo"))?;
             build::write_way_stamp(&live.join(build::way_fmt_file()), n as u64)?;
-            println!("  way.hash rewritten and stamped revision {}", build::WAY_INDEX_REVISION);
+            println!("  way.hash and way.topo rewritten, stamped revision {}", build::WAY_INDEX_REVISION);
         }
         "diff" => {
             if args.len() < 4 {

@@ -254,7 +254,7 @@ pub const RUNTIME_ARTIFACTS: &[&str] = &[
     "toll.tariff.tsv", "toll.mpedb",
     // The way index: which OSM way each segment came from, and what that way
     // looked like. Only an update needs it, so it is optional.
-    "way.id", "way.hash", "way.head", "way.seg",
+    "way.id", "way.hash", "way.topo", "way.head", "way.seg",
     // Which revision those hashes are in. Optional only so a dataset built
     // before stamps existed still verifies; an update refuses without it.
     "way.fmt",
