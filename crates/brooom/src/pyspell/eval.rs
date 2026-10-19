@@ -796,6 +796,7 @@ mod tests {
             tw_excess: 0.0,
             load_excess: 0.0,
             dur_excess: 0.0,
+            completion: 0,
         }
     }
 

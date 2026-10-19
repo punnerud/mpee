@@ -91,6 +91,7 @@ pub fn lex_objective_from_name(name: &str) -> Result<LexObjective> {
         "vehicles" | "vehicle_count" => LexObjective::Vehicles,
         "cost" => LexObjective::Cost,
         "makespan" => LexObjective::Makespan,
+        "completion" | "completion_time" => LexObjective::Completion,
         "distance" => LexObjective::Distance,
         other => {
             return Err(Error::Invalid(format!(

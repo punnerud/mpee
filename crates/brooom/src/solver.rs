@@ -172,6 +172,10 @@ pub enum LexObjective {
     Makespan,
     /// Total distance summed across all routes.
     Distance,
+    /// Sum over jobs / shipment deliveries of their service start time relative
+    /// to the route start (minisum completion time). Unlike `Cost`, it rewards
+    /// spreading work over vehicles so each task is done early.
+    Completion,
 }
 
 /// A level's achieved value, kept in the measure's native units so the matching
@@ -201,6 +205,22 @@ impl LexObjective {
             }
             LexObjective::Makespan => gc::makespan_penalty(penalty),
             LexObjective::Distance => gc::distance_penalty(penalty),
+            LexObjective::Completion => gc::completion_penalty(penalty),
+        }
+    }
+
+    /// How many measure units one HARD-sized unit of bias is spread over. Count
+    /// levels keep the full HARD per unit. Time/distance levels are measured in
+    /// seconds/metres, so a full HARD per second made a single second of
+    /// makespan out-rank a whole pinned `unassigned` unit (and the scalar
+    /// per-task unassigned penalty): the search dropped shipments to shorten
+    /// routes. Scaling them down keeps every pinned cap dominant while the
+    /// level still out-ranks route cost.
+    fn bias_unit(&self) -> crate::problem::Cost {
+        match self {
+            LexObjective::Vehicles | LexObjective::UnassignedCount | LexObjective::Cost => 1.0,
+            LexObjective::Makespan | LexObjective::Completion => 1e6,
+            LexObjective::Distance => 1e9,
         }
     }
 
@@ -210,9 +230,12 @@ impl LexObjective {
             LexObjective::Vehicles => {
                 LexMeasure::Count(sol.routes.iter().filter(|r| !r.steps.is_empty()).count())
             }
-            LexObjective::UnassignedCount => LexMeasure::Count(
-                sol.unassigned.iter().filter(|t| matches!(t, TaskRef::Job(_))).count(),
-            ),
+            LexObjective::UnassignedCount => {
+                LexMeasure::Count(crate::global_constraint::unassigned_units(&sol.unassigned))
+            }
+            LexObjective::Completion => {
+                LexMeasure::Int(sol.routes.iter().map(|r| r.metrics.completion).sum())
+            }
             LexObjective::Cost => {
                 LexMeasure::Cost(sol.routes.iter().map(|r| r.metrics.cost).sum())
             }
@@ -241,6 +264,7 @@ impl LexObjective {
             (LexObjective::Cost, LexMeasure::Cost(c)) => gc::cost_cap(c + 1e-6),
             (LexObjective::Makespan, LexMeasure::Int(c)) => gc::makespan_cap(c),
             (LexObjective::Distance, LexMeasure::Int(c)) => gc::distance_cap(c),
+            (LexObjective::Completion, LexMeasure::Int(c)) => gc::completion_cap(c),
             // Mismatched measure/objective never happens (measure() and cap()
             // are always called with the same objective). Install a no-op rather
             // than panic so a future variant addition fails soft.
@@ -404,7 +428,7 @@ fn solve_lexicographic(
         // penalty (a no-op zero global for `Cost`, whose bias *is* the base
         // objective). The cap set guarantees no higher-priority level regresses.
         let mut extra = pinned_caps.clone();
-        extra.push(level.bias_penalty(bias));
+        extra.push(level.bias_penalty(bias / level.bias_unit()));
 
         // Warm-start from the previous level's solution. Strictly safe: seed 0
         // adopts it only if best-of-K keeps it, so a level can never come back
@@ -428,7 +452,17 @@ fn solve_lexicographic(
 
         // Pin this level's achieved value for every subsequent level.
         if !is_last {
-            pinned_caps.push(level.cap(achieved));
+            // Scale the cap like the bias: one second over a pinned makespan /
+            // completion cap must weigh less than one unit over a pinned count
+            // cap from a higher level, or the search trades a dropped shipment
+            // for a few seconds.
+            let cap = level.cap(achieved);
+            let unit = level.bias_unit();
+            pinned_caps.push(if unit == 1.0 {
+                cap
+            } else {
+                std::sync::Arc::new(move |v: &crate::global_constraint::SolutionView| cap(v) / unit)
+            });
         }
         prev = Some(sol);
     }
@@ -470,6 +504,7 @@ fn solve_scalar_with_extra_global(
     // Drop any stale eval cache from a previous solve. Worker threads each
     // have their own thread-local cache; rayon will warm them as it spawns.
     crate::solution::eval_cache_invalidate();
+    let lex_globals = !extra_globals.is_empty();
 
     // Register solution-level (cross-route) constraints for this solve: a
     // max-vehicles cap, fairness balancing, and exactly-one-per-group whenever
@@ -1109,6 +1144,22 @@ fn solve_scalar_with_extra_global(
         );
     }
 
+    // Lexicographic levels with a solution-level measure (makespan, completion)
+    // only reach the search through ILS acceptance, and route LS has no move that
+    // carries a whole pickup&delivery pair to another vehicle. Close that gap with
+    // a pair/job relocation pass scored on the FULL objective (globals included).
+    if lex_globals {
+        let pre = best.summary.cost;
+        // Own budget (a quarter of the limit, at least 20 ms): the ILS above runs
+        // until the main deadline, so `full_deadline` has normally passed here.
+        let budget_ms = config.time_limit_ms.map_or(200, |ms| (ms / 4).max(20));
+        let reloc_deadline = Some(Instant::now() + std::time::Duration::from_millis(budget_ms));
+        global_relocate_pass(&mut best, problem, matrix, reloc_deadline);
+        if config.verbose {
+            eprintln!("brooom: global relocate pass: {:.2} → {:.2}", pre, best.summary.cost);
+        }
+    }
+
     // Validity work below (repair) must never be deadline-cut — clear the LS
     // wall-clock armed for the polish above.
     crate::local_search::set_ls_deadline(None);
@@ -1211,6 +1262,126 @@ fn prize_swap_pass(sol: &mut Solution, problem: &Problem, matrix: &Matrix) {
         }
         if !applied {
             break;
+        }
+    }
+    sol.recompute_summary(problem);
+}
+
+/// Relocate whole units — a shipment's pickup+delivery pair, or a single job —
+/// to the position pair (any route, including an unused vehicle) that lowers the
+/// full objective `summary.cost`, globals included. Unassigned units are tried
+/// for insertion the same way. First-improvement per unit, repeated until no
+/// unit moves or the deadline hits. Exhaustive over positions, so it is gated to
+/// small instances (it exists for the lexicographic solution-level levels).
+fn global_relocate_pass(sol: &mut Solution, problem: &Problem, matrix: &Matrix, deadline: Option<Instant>) {
+    use crate::solution::{evaluate_route, Route, TaskRef};
+    let n_tasks = problem.jobs.len() + 2 * problem.shipments.len();
+    if n_tasks == 0 || n_tasks > 400 {
+        return;
+    }
+    let expired = || deadline.map_or(false, |d| Instant::now() >= d);
+    sol.recompute_summary(problem);
+
+    // Units: (first task, optional partner that must follow it on the same route).
+    let mut units: Vec<(TaskRef, Option<TaskRef>)> = Vec::new();
+    for i in 0..problem.jobs.len() {
+        units.push((TaskRef::Job(i), None));
+    }
+    for i in 0..problem.shipments.len() {
+        units.push((TaskRef::Pickup(i), Some(TaskRef::Delivery(i))));
+    }
+
+    let mut improved = true;
+    let mut passes = 0;
+    while improved && passes < 20 && !expired() {
+        improved = false;
+        passes += 1;
+        for &(a, b) in &units {
+            if expired() {
+                break;
+            }
+            // Detach the unit (from its route or from `unassigned`).
+            let mut base = sol.clone();
+            let mut from_route = None;
+            for (ri, r) in base.routes.iter_mut().enumerate() {
+                if r.steps.contains(&a) {
+                    r.steps.retain(|t| *t != a && Some(*t) != b);
+                    from_route = Some(ri);
+                    break;
+                }
+            }
+            match from_route {
+                Some(ri) => {
+                    let veh = &problem.vehicles[base.routes[ri].vehicle_idx];
+                    if base.routes[ri].steps.is_empty() {
+                        base.routes.remove(ri);
+                    } else {
+                        match evaluate_route(problem, matrix, veh, &base.routes[ri].steps) {
+                            Ok(m) => base.routes[ri].metrics = m,
+                            Err(_) => continue, // removal leaves an infeasible route
+                        }
+                    }
+                }
+                None => {
+                    let before = base.unassigned.len();
+                    base.unassigned.retain(|t| *t != a && Some(*t) != b);
+                    if base.unassigned.len() == before {
+                        continue;
+                    }
+                }
+            }
+            // Candidate routes: every existing route plus each unused vehicle.
+            let used: Vec<usize> = base.routes.iter().map(|r| r.vehicle_idx).collect();
+            let mut targets: Vec<(Option<usize>, usize)> =
+                base.routes.iter().enumerate().map(|(ri, r)| (Some(ri), r.vehicle_idx)).collect();
+            targets.extend((0..problem.vehicles.len()).filter(|v| !used.contains(v)).map(|v| (None, v)));
+
+            let mut best: Option<(f64, Solution)> = None;
+            for (ri, vi) in targets {
+                let veh = &problem.vehicles[vi];
+                if !veh.has_skills(a.skills(problem)) {
+                    continue;
+                }
+                let steps: &[TaskRef] = match ri {
+                    Some(ri) => &base.routes[ri].steps,
+                    None => &[],
+                };
+                let n = steps.len();
+                for pa in 0..=n {
+                    let partner_range = if b.is_some() { pa..=n } else { pa..=pa };
+                    for pb in partner_range {
+                        let mut cand: Vec<TaskRef> = Vec::with_capacity(n + 2);
+                        cand.extend_from_slice(&steps[..pa]);
+                        cand.push(a);
+                        if let Some(bt) = b {
+                            cand.extend_from_slice(&steps[pa..pb]);
+                            cand.push(bt);
+                            cand.extend_from_slice(&steps[pb..]);
+                        } else {
+                            cand.extend_from_slice(&steps[pa..]);
+                        }
+                        let Ok(m) = evaluate_route(problem, matrix, veh, &cand) else { continue };
+                        let mut trial = base.clone();
+                        match ri {
+                            Some(ri) => {
+                                trial.routes[ri].steps = cand;
+                                trial.routes[ri].metrics = m;
+                            }
+                            None => trial.routes.push(Route { vehicle_idx: vi, steps: cand, metrics: m }),
+                        }
+                        trial.recompute_summary(problem);
+                        if best.as_ref().map_or(true, |(c, _)| trial.summary.cost < *c) {
+                            best = Some((trial.summary.cost, trial));
+                        }
+                    }
+                }
+            }
+            if let Some((c, trial)) = best {
+                if c < sol.summary.cost - 1e-6 {
+                    *sol = trial;
+                    improved = true;
+                }
+            }
         }
     }
     sol.recompute_summary(problem);

@@ -136,6 +136,9 @@ pub struct RouteMetrics {
     pub load_excess: f64,
     /// Soft-mode duration/travel-time overrun on this route (seconds). `0.0` in hard mode.
     pub dur_excess: f64,
+    /// Sum over job and shipment-delivery stops of (service start − route start).
+    /// Read by the `completion` lexicographic level (minisum completion time).
+    pub completion: Time,
 }
 
 impl RouteMetrics {
@@ -489,6 +492,13 @@ fn evaluate_route_with_buf(
     let mut break_duration: Time = 0;
     // Multi-trip: shipments may not be carried across a depot reload.
     let mut open_shipments: i32 = 0;
+    // Shipment pairing: every delivery must follow its own pickup on this route,
+    // and no pickup may be left without its delivery. A bare counter is not
+    // enough (Pickup(a) + Delivery(b) would balance it).
+    let mut open_pickups: Vec<usize> = Vec::new();
+    // Sum over job/delivery stops of (service start − route start): the
+    // "completion time" objective (sum of completion times, minisum latency).
+    let mut completion: Time = 0;
 
     for (k, s) in steps.iter().enumerate() {
         // Multi-trip reload: close the current trip back at the depot, reset the
@@ -538,8 +548,17 @@ fn evaluate_route_with_buf(
         let here = job.location.index.ok_or("job location missing matrix index")?;
 
         match s {
-            TaskRef::Pickup(_) => open_shipments += 1,
-            TaskRef::Delivery(_) => open_shipments -= 1,
+            TaskRef::Pickup(i) => {
+                open_shipments += 1;
+                open_pickups.push(*i);
+            }
+            TaskRef::Delivery(i) => {
+                open_shipments -= 1;
+                match open_pickups.iter().position(|p| p == i) {
+                    Some(at) => { open_pickups.swap_remove(at); }
+                    None => return Err("shipment delivery before its pickup"),
+                }
+            }
             _ => {}
         }
 
@@ -664,6 +683,9 @@ fn evaluate_route_with_buf(
             }
         }
 
+        if matches!(s, TaskRef::Job(_) | TaskRef::Delivery(_)) {
+            completion += t - vw.start;
+        }
         t += job.service;
         service_time += job.service;
 
@@ -685,6 +707,10 @@ fn evaluate_route_with_buf(
         if let Some(max) = vehicle.max_tasks {
             if tasks_count > max { return Err("max_tasks exceeded"); }
         }
+    }
+
+    if !open_pickups.is_empty() {
+        return Err("shipment pickup without its delivery");
     }
 
     // Final leg back to depot.
@@ -780,6 +806,7 @@ fn evaluate_route_with_buf(
         tw_excess: 0.0,
         load_excess: 0.0,
         dur_excess: 0.0,
+        completion,
     };
 
     // Penalty-managed soft constraints: charge accumulated time warp, load
