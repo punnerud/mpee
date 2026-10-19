@@ -20,6 +20,22 @@ use crate::solution::{Route, TaskRef};
 /// dominate any realistic route cost and the per-unassigned prize, but finite.
 pub const HARD: Cost = 1e12;
 
+/// Unassigned single jobs plus distinct unassigned shipments. Shipments used to
+/// be left out, which let a later lexicographic level drop whole shipments
+/// without touching an `unassigned` cap.
+pub fn unassigned_units(unassigned: &[TaskRef]) -> usize {
+    let mut ships: Vec<usize> = unassigned
+        .iter()
+        .filter_map(|t| match t {
+            TaskRef::Pickup(i) | TaskRef::Delivery(i) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    ships.sort_unstable();
+    ships.dedup();
+    unassigned.iter().filter(|t| matches!(t, TaskRef::Job(_))).count() + ships.len()
+}
+
 /// What a global constraint sees: the whole candidate solution.
 pub struct SolutionView<'a> {
     pub problem: &'a Problem,
@@ -79,14 +95,15 @@ impl SolutionView<'_> {
     pub fn total_distance(&self) -> i64 {
         self.routes.iter().map(|r| r.metrics.distance).sum()
     }
-    /// Number of unassigned *single jobs* (shipment halves excluded — they are
-    /// not independently droppable). This is the count a `UnassignedCount`
-    /// lexicographic level minimises.
+    /// Number of unassigned units: single jobs plus shipments (a shipment counts
+    /// once, whichever of its halves is unassigned). This is the count a
+    /// `UnassignedCount` lexicographic level minimises.
     pub fn unassigned_count(&self) -> usize {
-        self.unassigned
-            .iter()
-            .filter(|t| matches!(t, TaskRef::Job(_)))
-            .count()
+        unassigned_units(self.unassigned)
+    }
+    /// Sum of completion times over all routes (see `RouteMetrics::completion`).
+    pub fn completion_sum(&self) -> i64 {
+        self.routes.iter().map(|r| r.metrics.completion).sum()
     }
     /// Recompute the custom-dimension cumuls for route `i` (Phase 1). Needs the
     /// routing `matrix` (the `SolutionView` does not carry one, since the per-route
@@ -271,6 +288,24 @@ pub fn makespan_cap(cap: i64) -> Arc<GlobalConstraintFn> {
         let m = v.makespan();
         if m > cap {
             HARD * (m - cap) as Cost
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Bias penalty for a `Completion` level: charge `penalty` per second of summed
+/// completion time (job / delivery service starts, relative to route start).
+pub fn completion_penalty(penalty: Cost) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| penalty * v.completion_sum() as Cost)
+}
+
+/// HARD cap on summed completion time. Pins a `Completion` level's value.
+pub fn completion_cap(cap: i64) -> Arc<GlobalConstraintFn> {
+    Arc::new(move |v: &SolutionView| {
+        let c = v.completion_sum();
+        if c > cap {
+            HARD * (c - cap) as Cost
         } else {
             0.0
         }
